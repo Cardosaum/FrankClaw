@@ -112,6 +112,10 @@ impl FrankClawConfig {
             });
         }
 
+        for channel in self.channels.values() {
+            channel.security_policy()?;
+        }
+
         Ok(())
     }
 }
@@ -272,6 +276,94 @@ pub struct ChannelConfig {
     pub accounts: Vec<serde_json::Value>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelDmPolicy {
+    Open,
+    Allowlist,
+    Pairing,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelSecurityPolicy {
+    pub dm_policy: ChannelDmPolicy,
+    pub allow_from: Vec<String>,
+    pub require_mention_for_groups: bool,
+    pub max_message_bytes: Option<usize>,
+}
+
+impl Default for ChannelSecurityPolicy {
+    fn default() -> Self {
+        Self {
+            dm_policy: ChannelDmPolicy::Pairing,
+            allow_from: Vec::new(),
+            require_mention_for_groups: true,
+            max_message_bytes: None,
+        }
+    }
+}
+
+impl ChannelConfig {
+    pub fn security_policy(&self) -> Result<ChannelSecurityPolicy> {
+        let mut policy = ChannelSecurityPolicy::default();
+
+        if let Some(raw) = self.extra.get("dm_policy").and_then(|value| value.as_str()) {
+            policy.dm_policy = match raw {
+                "open" => ChannelDmPolicy::Open,
+                "allowlist" => ChannelDmPolicy::Allowlist,
+                "pairing" => ChannelDmPolicy::Pairing,
+                "disabled" => ChannelDmPolicy::Disabled,
+                other => {
+                    return Err(FrankClawError::ConfigValidation {
+                        msg: format!(
+                            "invalid dm_policy '{}'; expected open, allowlist, pairing, or disabled",
+                            other
+                        ),
+                    });
+                }
+            };
+        }
+
+        if let Some(raw) = self.extra.get("allow_from") {
+            let entries = raw.as_array().ok_or_else(|| FrankClawError::ConfigValidation {
+                msg: "allow_from must be an array of sender ids".into(),
+            })?;
+            policy.allow_from = entries
+                .iter()
+                .map(|entry| {
+                    entry.as_str().map(str::to_string).ok_or_else(|| {
+                        FrankClawError::ConfigValidation {
+                            msg: "allow_from entries must be strings".into(),
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+        }
+
+        if let Some(raw) = self
+            .extra
+            .get("require_mention_for_groups")
+            .and_then(|value| value.as_bool())
+        {
+            policy.require_mention_for_groups = raw;
+        }
+
+        if let Some(raw) = self.extra.get("max_message_bytes") {
+            let value = raw.as_u64().ok_or_else(|| FrankClawError::ConfigValidation {
+                msg: "max_message_bytes must be a positive integer".into(),
+            })? as usize;
+            if value == 0 {
+                return Err(FrankClawError::ConfigValidation {
+                    msg: "max_message_bytes must be greater than 0".into(),
+                });
+            }
+            policy.max_message_bytes = Some(value);
+        }
+
+        Ok(policy)
+    }
 }
 
 /// Model provider configuration.
@@ -461,5 +553,37 @@ mod tests {
         }];
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_dm_policy_fails_validation() {
+        let mut config = FrankClawConfig::default();
+        config.channels.insert(
+            ChannelId::new("web"),
+            ChannelConfig {
+                enabled: true,
+                accounts: Vec::new(),
+                extra: serde_json::json!({
+                    "dm_policy": "wide_open"
+                }),
+            },
+        );
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn channel_security_policy_defaults_to_pairing_and_mentions() {
+        let policy = ChannelConfig {
+            enabled: true,
+            accounts: Vec::new(),
+            extra: serde_json::json!({}),
+        }
+        .security_policy()
+        .expect("policy should parse");
+
+        assert_eq!(policy.dm_policy, ChannelDmPolicy::Pairing);
+        assert!(policy.require_mention_for_groups);
+        assert!(policy.allow_from.is_empty());
     }
 }

@@ -19,7 +19,7 @@ use tower_http::{
 use tracing::info;
 
 use frankclaw_core::channel::{InboundMessage, OutboundMessage, SendResult};
-use frankclaw_core::config::{BindMode, FrankClawConfig};
+use frankclaw_core::config::{BindMode, ChannelDmPolicy, FrankClawConfig};
 use frankclaw_core::session::SessionStore;
 use frankclaw_cron::{CronJob, CronService};
 use frankclaw_runtime::Runtime;
@@ -422,6 +422,15 @@ async fn process_inbound_message(
     inbound: InboundMessage,
 ) -> frankclaw_core::error::Result<()> {
     let config = state.current_config();
+    let policy = config
+        .channels
+        .get(&inbound.channel)
+        .map(|channel| channel.security_policy())
+        .transpose()?
+        .unwrap_or_else(|| frankclaw_core::config::ChannelSecurityPolicy {
+            dm_policy: ChannelDmPolicy::Disabled,
+            ..Default::default()
+        });
     let text = inbound
         .text
         .as_deref()
@@ -431,27 +440,31 @@ async fn process_inbound_message(
             msg: "inbound message text is required".into(),
         })?;
 
-    if text.len() > config.security.max_webhook_body_bytes {
+    let max_message_bytes = policy
+        .max_message_bytes
+        .unwrap_or(config.security.max_webhook_body_bytes)
+        .min(config.security.max_webhook_body_bytes);
+    if text.len() > max_message_bytes {
         return Err(frankclaw_core::error::FrankClawError::RequestTooLarge {
-            max_bytes: config.security.max_webhook_body_bytes,
+            max_bytes: max_message_bytes,
         });
     }
 
-    if inbound.is_group && !inbound.is_mention {
+    if inbound.is_group && policy.require_mention_for_groups && !inbound.is_mention {
         return Ok(());
     }
 
     if !inbound.is_group {
-        match dm_policy(&config, &inbound.channel) {
-            DmPolicy::Disabled => return Ok(()),
-            DmPolicy::Open => {}
-            DmPolicy::Allowlist => {
-                if !sender_allowed(&config, &state, &inbound) {
+        match policy.dm_policy {
+            ChannelDmPolicy::Disabled => return Ok(()),
+            ChannelDmPolicy::Open => {}
+            ChannelDmPolicy::Allowlist => {
+                if !sender_allowed(&policy, &state, &inbound) {
                     return Ok(());
                 }
             }
-            DmPolicy::Pairing => {
-                if !sender_allowed(&config, &state, &inbound) {
+            ChannelDmPolicy::Pairing => {
+                if !sender_allowed(&policy, &state, &inbound) {
                     let pending = state.pairing.ensure_pending(
                         inbound.channel.as_str(),
                         &inbound.account_id,
@@ -836,51 +849,15 @@ fn validate_cron_job(job: &CronJob) -> frankclaw_core::error::Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum DmPolicy {
-    Open,
-    Allowlist,
-    Pairing,
-    Disabled,
-}
-
-fn dm_policy(config: &FrankClawConfig, channel_id: &frankclaw_core::types::ChannelId) -> DmPolicy {
-    let Some(channel) = config.channels.get(channel_id) else {
-        return DmPolicy::Disabled;
-    };
-    let raw = channel
-        .extra
-        .get("dm_policy")
-        .and_then(|value| value.as_str())
-        .unwrap_or("pairing");
-
-    match raw {
-        "open" => DmPolicy::Open,
-        "allowlist" => DmPolicy::Allowlist,
-        "disabled" => DmPolicy::Disabled,
-        _ => DmPolicy::Pairing,
-    }
-}
-
 fn sender_allowed(
-    config: &FrankClawConfig,
+    policy: &frankclaw_core::config::ChannelSecurityPolicy,
     state: &GatewayState,
     inbound: &InboundMessage,
 ) -> bool {
-    let explicit = config
-        .channels
-        .get(&inbound.channel)
-        .and_then(|channel| channel.extra.get("allow_from"))
-        .and_then(|value| value.as_array())
-        .map(|entries| {
-            entries.iter().any(|entry| {
-                entry
-                    .as_str()
-                    .map(|entry| entry == "*" || entry == inbound.sender_id)
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
+    let explicit = policy
+        .allow_from
+        .iter()
+        .any(|entry| entry == "*" || entry == &inbound.sender_id);
 
     explicit
         || state
