@@ -21,7 +21,43 @@ pub enum SessionScoping {
 
 impl Default for SessionScoping {
     fn default() -> Self {
-        Self::Main
+        Self::PerChannelPeer
+    }
+}
+
+impl SessionScoping {
+    pub fn resolve_inbound_account_scope(
+        &self,
+        account_id: &str,
+        sender_id: &str,
+        thread_id: Option<&str>,
+        is_group: bool,
+    ) -> String {
+        match self {
+            Self::Main => {
+                if is_group {
+                    thread_id.unwrap_or("main").to_string()
+                } else {
+                    "main".to_string()
+                }
+            }
+            Self::PerPeer => {
+                if is_group {
+                    thread_id.unwrap_or(sender_id).to_string()
+                } else {
+                    sender_id.to_string()
+                }
+            }
+            Self::PerChannelPeer => {
+                let peer = if is_group {
+                    thread_id.unwrap_or(sender_id)
+                } else {
+                    sender_id
+                };
+                format!("{account_id}:{peer}")
+            }
+            Self::Global => "global".to_string(),
+        }
     }
 }
 
@@ -122,4 +158,42 @@ pub trait SessionStore: Send + Sync + 'static {
 
     /// Run maintenance (pruning, disk budget enforcement).
     async fn maintenance(&self, config: &PruningConfig) -> Result<u64>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionScoping;
+
+    #[test]
+    fn per_channel_peer_scoping_includes_account() {
+        let scope = SessionScoping::PerChannelPeer.resolve_inbound_account_scope(
+            "default",
+            "user-123",
+            None,
+            false,
+        );
+        assert_eq!(scope, "default:user-123");
+    }
+
+    #[test]
+    fn global_scoping_is_stable() {
+        let scope = SessionScoping::Global.resolve_inbound_account_scope(
+            "default",
+            "user-123",
+            Some("thread-1"),
+            true,
+        );
+        assert_eq!(scope, "global");
+    }
+
+    #[test]
+    fn group_scoping_prefers_thread_id() {
+        let scope = SessionScoping::PerPeer.resolve_inbound_account_scope(
+            "default",
+            "user-123",
+            Some("thread-1"),
+            true,
+        );
+        assert_eq!(scope, "thread-1");
+    }
 }

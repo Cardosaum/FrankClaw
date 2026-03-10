@@ -349,6 +349,7 @@ async fn process_inbound_message(
     state: Arc<GatewayState>,
     inbound: InboundMessage,
 ) -> frankclaw_core::error::Result<()> {
+    let config = state.current_config();
     let text = inbound
         .text
         .as_deref()
@@ -358,23 +359,17 @@ async fn process_inbound_message(
             msg: "inbound message text is required".into(),
         })?;
 
+    if text.len() > config.security.max_webhook_body_bytes {
+        return Err(frankclaw_core::error::FrankClawError::RequestTooLarge {
+            max_bytes: config.security.max_webhook_body_bytes,
+        });
+    }
+
     if inbound.is_group && !inbound.is_mention {
         return Ok(());
     }
 
-    let account_scope = if inbound.is_group {
-        inbound
-            .thread_id
-            .clone()
-            .unwrap_or_else(|| inbound.sender_id.clone())
-    } else {
-        inbound.sender_id.clone()
-    };
-    let session_key = frankclaw_core::types::SessionKey::new(
-        &state.current_config().agents.default_agent,
-        &inbound.channel,
-        &format!("{}:{}", inbound.account_id, account_scope),
-    );
+    let session_key = state.runtime.session_key_for_inbound(&inbound);
 
     let response = state
         .runtime

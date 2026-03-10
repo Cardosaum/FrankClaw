@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -145,7 +146,10 @@ async fn main() -> anyhow::Result<()> {
 
             let db_path = state_dir.join("sessions.db");
             let sessions = std::sync::Arc::new(
-                frankclaw_sessions::SqliteSessionStore::open(&db_path, None)
+                frankclaw_sessions::SqliteSessionStore::open(
+                    &db_path,
+                    load_master_key_from_env()?.as_ref(),
+                )
                     .context("failed to open session store")?,
             );
             let runtime = std::sync::Arc::new(
@@ -202,6 +206,9 @@ async fn main() -> anyhow::Result<()> {
             }
             if !config.security.encrypt_sessions {
                 warnings.push("session encryption is disabled");
+            }
+            if config.security.encrypt_sessions && load_master_key_from_env()?.is_none() {
+                warnings.push("session encryption is enabled but FRANKCLAW_MASTER_KEY is not set");
             }
 
             println!("Doctor check passed.");
@@ -388,7 +395,10 @@ fn open_sessions(
 ) -> anyhow::Result<std::sync::Arc<frankclaw_sessions::SqliteSessionStore>> {
     let db_path = state_dir.join("sessions.db");
     Ok(std::sync::Arc::new(
-        frankclaw_sessions::SqliteSessionStore::open(&db_path, None)
+        frankclaw_sessions::SqliteSessionStore::open(
+            &db_path,
+            load_master_key_from_env()?.as_ref(),
+        )
             .context("failed to open session store")?,
     ))
 }
@@ -435,4 +445,27 @@ fn redact_config(config: &frankclaw_core::config::FrankClawConfig) -> serde_json
         }
     }
     val
+}
+
+fn load_master_key_from_env() -> anyhow::Result<Option<frankclaw_crypto::MasterKey>> {
+    if let Ok(raw_key) = std::env::var("FRANKCLAW_MASTER_KEY") {
+        if raw_key.trim().is_empty() {
+            anyhow::bail!("FRANKCLAW_MASTER_KEY is set but empty");
+        }
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(raw_key.trim())
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw_key.trim()))
+            .context("FRANKCLAW_MASTER_KEY must be valid base64")?;
+
+        if decoded.len() != 32 {
+            anyhow::bail!("FRANKCLAW_MASTER_KEY must decode to exactly 32 bytes");
+        }
+
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&decoded);
+        return Ok(Some(frankclaw_crypto::MasterKey::from_bytes(bytes)));
+    }
+
+    Ok(None)
 }

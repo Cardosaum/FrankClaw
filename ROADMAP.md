@@ -80,8 +80,8 @@ Acceptance:
 
 - [ ] DM pairing / allowlist enforcement
 - [x] Group mention gating by default
-- [ ] Per-channel-peer session policy wired into runtime
-- [ ] Inbound message size limits and normalization
+- [x] Per-channel-peer session policy wired into runtime
+- [x] Inbound message size limits and normalization
 - [ ] Outbound retry / rate-limit behavior
 
 Acceptance:
@@ -91,8 +91,8 @@ Acceptance:
 
 ### M4: Session and Secret Hardening
 
-- [ ] Load a master key from CLI / environment
-- [ ] Enable transcript encryption in real startup
+- [x] Load a master key from CLI / environment
+- [x] Enable transcript encryption in real startup
 - [ ] Wire session maintenance / pruning
 - [ ] Add structured security audit logs
 

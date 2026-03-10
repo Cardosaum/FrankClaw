@@ -8,9 +8,8 @@ use secrecy::SecretString;
 
 use frankclaw_core::config::{AgentDef, FrankClawConfig, ProviderConfig};
 use frankclaw_core::error::{FrankClawError, Result};
-use frankclaw_core::model::{
-    CompletionMessage, CompletionRequest, ModelDef, Usage,
-};
+use frankclaw_core::channel::InboundMessage;
+use frankclaw_core::model::{CompletionMessage, CompletionRequest, ModelDef, Usage};
 use frankclaw_core::session::{SessionEntry, SessionStore, TranscriptEntry};
 use frankclaw_core::types::{AgentId, ChannelId, Role, SessionKey};
 use frankclaw_models::{
@@ -86,6 +85,24 @@ impl Runtime {
 
     pub fn list_channels(&self) -> &[ChannelId] {
         &self.channel_ids
+    }
+
+    pub fn session_key_for_inbound(
+        &self,
+        inbound: &InboundMessage,
+    ) -> SessionKey {
+        let account_scope = self.config.session.scoping.resolve_inbound_account_scope(
+            &inbound.account_id,
+            &inbound.sender_id,
+            inbound.thread_id.as_deref(),
+            inbound.is_group,
+        );
+
+        SessionKey::new(
+            &self.config.agents.default_agent,
+            &inbound.channel,
+            &account_scope,
+        )
     }
 
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
