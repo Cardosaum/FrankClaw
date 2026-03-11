@@ -1088,6 +1088,7 @@ async fn process_inbound_message_with_target(
             model_id: None,
             max_tokens: None,
             temperature: None,
+            stream_tx: None,
         })
         .await?;
 
@@ -1356,6 +1357,7 @@ async fn start_cron_runtime(
                         model_id: None,
                         max_tokens: None,
                         temperature: None,
+                        stream_tx: None,
                     })
                     .await
                 {
@@ -2184,7 +2186,13 @@ mod tests {
             to: "browser-b".into(),
             thread_id: None,
             text: "reply for b".into(),
-            attachments: Vec::new(),
+            attachments: vec![frankclaw_core::channel::OutboundAttachment {
+                media_id: MediaId::new(),
+                mime_type: "image/png".into(),
+                filename: Some("photo.png".into()),
+                url: Some("/api/media/test-photo".into()),
+                bytes: b"png".to_vec(),
+            }],
             reply_to: None,
         })
         .await
@@ -2230,6 +2238,14 @@ mod tests {
             serde_json::from_slice(&other_body).expect("response should be json");
         assert_eq!(other_json["messages"].as_array().map(Vec::len), Some(1));
         assert_eq!(other_json["messages"][0]["text"], serde_json::json!("reply for b"));
+        assert_eq!(
+            other_json["messages"][0]["attachments"][0]["filename"],
+            serde_json::json!("photo.png")
+        );
+        assert_eq!(
+            other_json["messages"][0]["attachments"][0]["url"],
+            serde_json::json!("/api/media/test-photo")
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

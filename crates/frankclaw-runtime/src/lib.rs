@@ -10,7 +10,8 @@ use frankclaw_core::config::{AgentDef, FrankClawConfig, ProviderConfig};
 use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::channel::InboundMessage;
 use frankclaw_core::model::{
-    CompletionMessage, CompletionRequest, ModelDef, ModelProvider, ToolCallResponse, Usage,
+    CompletionMessage, CompletionRequest, ModelDef, ModelProvider, StreamDelta, ToolCallResponse,
+    Usage,
 };
 use frankclaw_core::session::{SessionEntry, SessionStore, TranscriptEntry};
 use frankclaw_core::types::{AgentId, ChannelId, Role, SessionKey};
@@ -38,6 +39,7 @@ pub struct ChatRequest {
     pub model_id: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    pub stream_tx: Option<tokio::sync::mpsc::Sender<StreamDelta>>,
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +232,7 @@ impl Runtime {
                         system: system_prompt.clone(),
                         tools: allowed_tools.clone(),
                     },
-                    None,
+                    request.stream_tx.clone(),
                 )
                 .await?;
 
@@ -846,6 +848,7 @@ mod tests {
                 model_id: Some("mock-secondary".into()),
                 max_tokens: None,
                 temperature: None,
+                stream_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -892,6 +895,7 @@ mod tests {
                 model_id: Some("mock-primary".into()),
                 max_tokens: None,
                 temperature: None,
+                stream_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -963,6 +967,7 @@ mod tests {
                 model_id: Some("mock-primary".into()),
                 max_tokens: None,
                 temperature: None,
+                stream_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -1029,6 +1034,7 @@ mod tests {
                 model_id: Some("mock-primary".into()),
                 max_tokens: None,
                 temperature: None,
+                stream_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -1117,6 +1123,7 @@ mod tests {
                 model_id: Some("mock-primary".into()),
                 max_tokens: None,
                 temperature: None,
+                stream_tx: None,
             })
             .await
             .expect_err("invalid tool args should fail");
@@ -1169,6 +1176,7 @@ mod tests {
                 model_id: Some("mock-primary".into()),
                 max_tokens: None,
                 temperature: None,
+                stream_tx: None,
             })
             .await
             .expect_err("too many tool calls should fail");

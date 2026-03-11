@@ -53,11 +53,12 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 ### Rich Channel Behavior
 
 - [ ] Rich attachment/media handling across supported channels
-  Current slice: authenticated web media upload/download, console upload flow, attachment-capable web inbound turns, gateway-side attachment hydration from stored media, outbound media send flows for Telegram, Discord, Slack, Signal, and WhatsApp, central batching for WhatsApp single-media sends, and Telegram media-group support for mixed photo/video albums plus same-type audio/document albums. Remaining depth is mostly the long tail of platform-specific media edge cases.
+  Current slice: authenticated web media upload/download, console upload flow, attachment-capable web inbound turns, gateway-side attachment hydration from stored media, outbound media send flows for Telegram, Discord, Slack, Signal, and WhatsApp, central batching for WhatsApp single-media sends, Telegram media-group support for mixed photo/video albums plus same-type audio/document albums, and richer web-console attachment previews. Remaining depth is mostly the long tail of platform-specific media edge cases.
 - [x] Broader edit support beyond Telegram
 - [x] Delete support where platforms allow it
 - [x] Shared outbound text normalization and reply-safe formatting
 - [x] Channel-specific streaming or pseudo-streaming delivery
+- [x] Provider SSE streaming for OpenAI/Anthropic-backed chat turns
 - [x] Explicit group allowlist routing on supported group-capable channels
 - [x] Better reply-tag semantics across supported channels
 - [x] Better WhatsApp-specific behavior beyond normalized inbound media/webhook handling and safer outbound text shaping
@@ -82,6 +83,11 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 - [x] Tool approvals for higher-risk tool families
 - [x] More first-party tools beyond session inspection
 - [x] Better tool tracing and operator visibility
+
+### Deferred Runtime Depth
+
+- [ ] Sandboxed agent runtime execution surface
+- [ ] Vector memory backend
 
 ### Operator / Install
 

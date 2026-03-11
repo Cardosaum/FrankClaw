@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -52,9 +53,32 @@ impl FailoverChain {
                 self.cooldowns.remove(&id);
             }
 
-            match provider.complete(request.clone(), stream_tx.clone()).await {
+            let mut forward_task = None;
+            let streamed_any = Arc::new(AtomicBool::new(false));
+            let provider_stream_tx = stream_tx.as_ref().map(|stream_tx| {
+                let (proxy_tx, mut proxy_rx) = tokio::sync::mpsc::channel(64);
+                let target_tx = stream_tx.clone();
+                let streamed_any = streamed_any.clone();
+                forward_task = Some(tokio::spawn(async move {
+                    while let Some(delta) = proxy_rx.recv().await {
+                        streamed_any.store(true, Ordering::Relaxed);
+                        let _ = target_tx.send(delta).await;
+                    }
+                }));
+                proxy_tx
+            });
+
+            let result = provider.complete(request.clone(), provider_stream_tx).await;
+            if let Some(task) = forward_task {
+                let _ = task.await;
+            }
+
+            match result {
                 Ok(response) => return Ok(response),
                 Err(e) => {
+                    if stream_tx.is_some() && streamed_any.load(Ordering::Relaxed) {
+                        return Err(e);
+                    }
                     warn!(provider = %id, error = %e, "provider failed, trying next");
                     self.cooldowns
                         .insert(id, Instant::now() + self.cooldown_duration);

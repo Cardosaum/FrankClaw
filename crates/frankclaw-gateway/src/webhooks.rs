@@ -90,6 +90,7 @@ pub async fn execute_request(
             model_id: None,
             max_tokens: None,
             temperature: None,
+            stream_tx: None,
         })
         .await
 }

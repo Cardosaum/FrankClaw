@@ -478,6 +478,7 @@ async fn main() -> anyhow::Result<()> {
                     model_id: model,
                     max_tokens: None,
                     temperature: None,
+                    stream_tx: None,
                 })
                 .await?;
 

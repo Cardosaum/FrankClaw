@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use frankclaw_core::protocol::{EventFrame, EventType, Frame, RequestFrame, ResponseFrame};
 use frankclaw_core::session::SessionStore;
-use frankclaw_core::types::{AgentId, SessionKey};
+use frankclaw_core::types::{AgentId, ConnId, SessionKey};
 
 use crate::state::GatewayState;
 
@@ -130,6 +130,7 @@ pub async fn sessions_reset(
 /// Handle `chat.send` method.
 pub async fn chat_send(
     state: &Arc<GatewayState>,
+    conn_id: ConnId,
     request: RequestFrame,
 ) -> ResponseFrame {
     let message = match request.params.get("message").and_then(|value| value.as_str()) {
@@ -162,6 +163,70 @@ pub async fn chat_send(
         .get("temperature")
         .and_then(|value| value.as_f64())
         .map(|value| value as f32);
+    let stream = request
+        .params
+        .get("stream")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let request_id = request.id.clone();
+
+    let stream_tx = if stream {
+        state.clients.get(&conn_id).map(|client| {
+            let client_tx = client.tx.clone();
+            let request_id = request_id.clone();
+            let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel(64);
+            tokio::spawn(async move {
+                while let Some(delta) = delta_rx.recv().await {
+                    let payload = match delta {
+                        frankclaw_core::model::StreamDelta::Text(text) => serde_json::json!({
+                            "request_id": request_id,
+                            "kind": "text",
+                            "delta": text,
+                        }),
+                        frankclaw_core::model::StreamDelta::ToolCallStart { id, name } => serde_json::json!({
+                            "request_id": request_id,
+                            "kind": "tool_call_start",
+                            "tool_call_id": id,
+                            "tool_name": name,
+                        }),
+                        frankclaw_core::model::StreamDelta::ToolCallDelta { id, arguments } => serde_json::json!({
+                            "request_id": request_id,
+                            "kind": "tool_call_delta",
+                            "tool_call_id": id,
+                            "arguments_delta": arguments,
+                        }),
+                        frankclaw_core::model::StreamDelta::ToolCallEnd { id } => serde_json::json!({
+                            "request_id": request_id,
+                            "kind": "tool_call_end",
+                            "tool_call_id": id,
+                        }),
+                        frankclaw_core::model::StreamDelta::Done { usage } => serde_json::json!({
+                            "request_id": request_id,
+                            "kind": "done",
+                            "usage": usage,
+                        }),
+                        frankclaw_core::model::StreamDelta::Error(message) => serde_json::json!({
+                            "request_id": request_id,
+                            "kind": "error",
+                            "message": message,
+                        }),
+                    };
+                    let frame = Frame::Event(EventFrame {
+                        event: EventType::ChatDelta,
+                        payload,
+                    });
+                    if let Ok(json) = serde_json::to_string(&frame) {
+                        if client_tx.send(json).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+            delta_tx
+        })
+    } else {
+        None
+    };
 
     match state
         .runtime
@@ -172,6 +237,7 @@ pub async fn chat_send(
             model_id,
             max_tokens,
             temperature,
+            stream_tx,
         })
         .await
     {
@@ -179,6 +245,7 @@ pub async fn chat_send(
             let event = Frame::Event(EventFrame {
                 event: EventType::ChatComplete,
                 payload: serde_json::json!({
+                    "request_id": request_id,
                     "session_key": response.session_key.as_str(),
                     "model_id": response.model_id,
                     "content": response.content,
@@ -202,6 +269,7 @@ pub async fn chat_send(
             let event = Frame::Event(EventFrame {
                 event: EventType::ChatError,
                 payload: serde_json::json!({
+                    "request_id": request_id,
                     "message": err.to_string(),
                 }),
             });
@@ -503,13 +571,15 @@ mod tests {
     use frankclaw_channels::ChannelSet;
     use frankclaw_core::model::{
         CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi,
-        ModelCompat, ModelCost, ModelDef, ModelProvider, Usage,
+        ModelCompat, ModelCost, ModelDef, ModelProvider, StreamDelta, Usage,
     };
+    use frankclaw_core::auth::AuthRole;
     use frankclaw_core::protocol::Method;
     use frankclaw_core::session::{SessionEntry, SessionScoping, SessionStore, TranscriptEntry};
-    use frankclaw_core::types::{AgentId, ChannelId, RequestId, Role};
+    use frankclaw_core::types::{AgentId, ChannelId, ConnId, RequestId, Role};
     use frankclaw_media::MediaStore;
     use frankclaw_sessions::SqliteSessionStore;
+    use tokio::time::{Duration, timeout};
 
     use crate::delivery::{StoredReplyMetadata, set_last_reply_in_metadata};
     use crate::pairing::PairingStore;
@@ -561,8 +631,75 @@ mod tests {
         }
     }
 
+    struct StreamingMockProvider;
+
+    #[async_trait]
+    impl ModelProvider for StreamingMockProvider {
+        fn id(&self) -> &str {
+            "streaming-mock"
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+            stream_tx: Option<tokio::sync::mpsc::Sender<StreamDelta>>,
+        ) -> frankclaw_core::error::Result<CompletionResponse> {
+            if let Some(stream_tx) = stream_tx {
+                let _ = stream_tx.send(StreamDelta::Text("hello ".into())).await;
+                let _ = stream_tx.send(StreamDelta::Text("world".into())).await;
+                let _ = stream_tx
+                    .send(StreamDelta::Done {
+                        usage: Some(Usage {
+                            input_tokens: 1,
+                            output_tokens: 2,
+                            cache_read_tokens: None,
+                            cache_write_tokens: None,
+                        }),
+                    })
+                    .await;
+            }
+
+            Ok(CompletionResponse {
+                content: "hello world".into(),
+                tool_calls: Vec::new(),
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                },
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn list_models(&self) -> frankclaw_core::error::Result<Vec<ModelDef>> {
+            Ok(vec![ModelDef {
+                id: "mock-model".into(),
+                name: "mock-model".into(),
+                api: ModelApi::OpenaiResponses,
+                reasoning: false,
+                input: vec![InputModality::Text],
+                cost: ModelCost::default(),
+                context_window: 4096,
+                max_output_tokens: 1024,
+                compat: ModelCompat::default(),
+            }])
+        }
+
+        async fn health(&self) -> bool {
+            true
+        }
+    }
+
     async fn build_test_state(
         temp_dir: &PathBuf,
+    ) -> (Arc<GatewayState>, Arc<SqliteSessionStore>) {
+        build_test_state_with_providers(temp_dir, vec![Arc::new(MockProvider)]).await
+    }
+
+    async fn build_test_state_with_providers(
+        temp_dir: &PathBuf,
+        providers: Vec<Arc<dyn ModelProvider>>,
     ) -> (Arc<GatewayState>, Arc<SqliteSessionStore>) {
         std::fs::create_dir_all(temp_dir).expect("temp dir should exist");
 
@@ -583,7 +720,7 @@ mod tests {
             frankclaw_runtime::Runtime::from_providers(
                 &config,
                 sessions.clone() as Arc<dyn SessionStore>,
-                vec![Arc::new(MockProvider)],
+                providers,
             )
             .await
             .expect("runtime should build"),
@@ -716,6 +853,88 @@ mod tests {
             .expect("transcript should load");
         assert!(transcript.is_empty());
 
+        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
+        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn chat_send_streams_delta_events_to_requesting_client() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-stream-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, _sessions) = build_test_state_with_providers(
+            &temp_dir,
+            vec![Arc::new(StreamingMockProvider)],
+        )
+        .await;
+        let conn_id = ConnId(42);
+        let (client_tx, mut client_rx) = tokio::sync::mpsc::channel(16);
+        state.clients.insert(
+            conn_id,
+            crate::state::ClientState {
+                tx: client_tx,
+                role: AuthRole::Editor,
+                remote_addr: None,
+                connected_at: chrono::Utc::now(),
+            },
+        );
+
+        let response = chat_send(
+            &state,
+            conn_id,
+            RequestFrame {
+                id: RequestId::Text("stream-1".into()),
+                method: Method::ChatSend,
+                params: serde_json::json!({
+                    "message": "hello",
+                    "stream": true,
+                }),
+            },
+        )
+        .await;
+
+        assert!(response.error.is_none());
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|value| value["content"].as_str()),
+            Some("hello world")
+        );
+
+        let first = timeout(Duration::from_secs(1), client_rx.recv())
+            .await
+            .expect("first delta should arrive")
+            .expect("client should receive first delta");
+        let second = timeout(Duration::from_secs(1), client_rx.recv())
+            .await
+            .expect("second delta should arrive")
+            .expect("client should receive second delta");
+        let third = timeout(Duration::from_secs(1), client_rx.recv())
+            .await
+            .expect("done event should arrive")
+            .expect("client should receive done event");
+
+        for (frame, expected_kind, expected_text) in [
+            (first, "text", Some("hello ")),
+            (second, "text", Some("world")),
+            (third, "done", None),
+        ] {
+            let frame: Frame = serde_json::from_str(&frame).expect("frame should deserialize");
+            let Frame::Event(event) = frame else {
+                panic!("expected event frame");
+            };
+            assert_eq!(event.event, frankclaw_core::protocol::EventType::ChatDelta);
+            assert_eq!(event.payload["request_id"], serde_json::json!("stream-1"));
+            assert_eq!(event.payload["kind"], serde_json::json!(expected_kind));
+            if let Some(expected_text) = expected_text {
+                assert_eq!(event.payload["delta"], serde_json::json!(expected_text));
+            }
+        }
+
+        state.clients.remove(&conn_id);
         let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
         let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
         let _ = std::fs::remove_dir_all(temp_dir);

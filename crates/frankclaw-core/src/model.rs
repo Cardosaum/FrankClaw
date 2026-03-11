@@ -86,7 +86,7 @@ pub struct ToolDef {
 }
 
 /// Streaming delta from a model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamDelta {
     Text(String),
     ToolCallStart { id: String, name: String },
@@ -97,7 +97,7 @@ pub enum StreamDelta {
 }
 
 /// Token usage stats.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,

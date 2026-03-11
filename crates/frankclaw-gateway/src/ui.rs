@@ -249,6 +249,48 @@ pub async fn index() -> Html<&'static str> {
       letter-spacing: 0.08em;
     }
 
+    .bubble-body {
+      display: grid;
+      gap: 10px;
+    }
+
+    .bubble-text {
+      white-space: pre-wrap;
+    }
+
+    .bubble-attachments {
+      display: grid;
+      gap: 8px;
+    }
+
+    .bubble-attachment {
+      display: grid;
+      gap: 6px;
+      padding: 10px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(247,244,238,0.92);
+      color: var(--ink);
+      text-decoration: none;
+    }
+
+    .bubble-attachment a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 700;
+    }
+
+    .bubble-attachment img,
+    .bubble-attachment video {
+      max-width: min(100%, 360px);
+      border-radius: 10px;
+      border: 1px solid var(--line);
+    }
+
+    .bubble-attachment audio {
+      width: min(100%, 360px);
+    }
+
     .muted {
       color: var(--muted);
     }
@@ -403,6 +445,7 @@ pub async fn index() -> Html<&'static str> {
       socket: null,
       nextId: 1,
       pending: new Map(),
+      activeStreams: new Map(),
       selectedSession: "",
       currentCanvas: null,
       pendingAttachments: [],
@@ -453,12 +496,88 @@ pub async fn index() -> Html<&'static str> {
       els.status.style.color = isConnected ? "var(--accent)" : "var(--warn)";
     }
 
-    function appendBubble(label, content) {
+    function renderBubbleContent(root, content, attachments = []) {
+      root.innerHTML = "";
+      const body = document.createElement("div");
+      body.className = "bubble-body";
+
+      const text = String(content || "").trim();
+      if (text) {
+        const textNode = document.createElement("div");
+        textNode.className = "bubble-text";
+        textNode.textContent = text;
+        body.appendChild(textNode);
+      }
+
+      if (attachments.length) {
+        const attachmentList = document.createElement("div");
+        attachmentList.className = "bubble-attachments";
+        for (const attachment of attachments) {
+          attachmentList.appendChild(buildAttachmentCard(attachment));
+        }
+        body.appendChild(attachmentList);
+      }
+
+      if (!text && !attachments.length) {
+        const empty = document.createElement("div");
+        empty.className = "bubble-text muted";
+        empty.textContent = "<empty>";
+        body.appendChild(empty);
+      }
+
+      root.appendChild(body);
+    }
+
+    function buildAttachmentCard(attachment) {
+      const card = document.createElement("div");
+      card.className = "bubble-attachment";
+      const mimeType = String(attachment?.mime_type || "application/octet-stream");
+      const filename = String(attachment?.filename || attachment?.media_id || "attachment");
+      const url = attachment?.url || null;
+
+      const label = document.createElement(url ? "a" : "div");
+      if (url) {
+        label.href = url;
+        label.target = "_blank";
+        label.rel = "noreferrer";
+      }
+      label.textContent = filename;
+      card.appendChild(label);
+
+      const meta = document.createElement("div");
+      meta.className = "muted";
+      meta.textContent = mimeType;
+      card.appendChild(meta);
+
+      if (url && mimeType.startsWith("image/")) {
+        const img = document.createElement("img");
+        img.src = url;
+        img.alt = filename;
+        img.loading = "lazy";
+        card.appendChild(img);
+      } else if (url && mimeType.startsWith("audio/")) {
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.src = url;
+        card.appendChild(audio);
+      } else if (url && mimeType.startsWith("video/")) {
+        const video = document.createElement("video");
+        video.controls = true;
+        video.src = url;
+        card.appendChild(video);
+      }
+
+      return card;
+    }
+
+    function appendBubble(label, content, attachments = []) {
       const div = document.createElement("div");
       div.className = "bubble";
-      div.innerHTML = `<small>${label}</small><div></div>`;
-      div.querySelector("div").textContent = content;
+      div.innerHTML = `<small></small><div></div>`;
+      div.querySelector("small").textContent = label;
+      renderBubbleContent(div.querySelector("div"), content, attachments);
       els.feed.prepend(div);
+      return div;
     }
 
     function loadWebClientId() {
@@ -803,9 +922,40 @@ pub async fn index() -> Html<&'static str> {
       }
 
       if (frame.type === "event" && frame.event === "chat_complete") {
-        if (frame.payload?.content) {
+        const requestId = String(frame.payload?.request_id || "");
+        if (requestId && state.activeStreams.has(requestId)) {
+          const bubble = state.activeStreams.get(requestId);
+          renderBubbleContent(bubble.querySelector("div"), frame.payload?.content || "", []);
+          state.activeStreams.delete(requestId);
+        } else if (frame.payload?.content) {
           appendBubble("assistant", frame.payload.content);
         }
+      }
+      if (frame.type === "event" && frame.event === "chat_delta") {
+        const requestId = String(frame.payload?.request_id || "");
+        if (!requestId || frame.payload?.kind !== "text") {
+          return;
+        }
+        let bubble = state.activeStreams.get(requestId);
+        if (!bubble) {
+          bubble = appendBubble("assistant", "");
+          state.activeStreams.set(requestId, bubble);
+        }
+        const root = bubble.querySelector("div");
+        const currentText = root.querySelector(".bubble-text")?.textContent || "";
+        renderBubbleContent(root, currentText + String(frame.payload?.delta || ""), []);
+        return;
+      }
+      if (frame.type === "event" && frame.event === "chat_error") {
+        const requestId = String(frame.payload?.request_id || "");
+        if (requestId && state.activeStreams.has(requestId)) {
+          state.activeStreams.get(requestId).remove();
+          state.activeStreams.delete(requestId);
+        }
+        if (frame.payload?.message) {
+          appendBubble("error", frame.payload.message);
+        }
+        return;
       }
       if (frame.type === "event" && frame.event === "canvas_updated") {
         if (frame.payload?.canvas) {
@@ -892,9 +1042,7 @@ pub async fn index() -> Html<&'static str> {
         }
         const outbound = await drainWebOutbound();
         for (const item of outbound) {
-          if (item.text) {
-            appendBubble("assistant", item.text);
-          }
+          appendBubble("assistant", item.text, item.attachments || []);
         }
       } else {
         const params = { message };
@@ -904,9 +1052,6 @@ pub async fn index() -> Html<&'static str> {
         if (response.session_key) {
           state.selectedSession = response.session_key;
           els.session.value = response.session_key;
-        }
-        if (response.content) {
-          appendBubble("assistant", response.content);
         }
       }
       els.message.value = "";

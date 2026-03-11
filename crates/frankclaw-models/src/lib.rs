@@ -4,6 +4,7 @@ mod failover;
 mod openai;
 mod anthropic;
 mod ollama;
+mod sse;
 
 pub use failover::{FailoverChain, ProviderHealth};
 pub use openai::OpenAiProvider;

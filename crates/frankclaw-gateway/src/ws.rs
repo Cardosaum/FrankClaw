@@ -159,7 +159,7 @@ async fn dispatch_method(
             ResponseFrame::ok(request.id, safe_config)
         }
         Method::ChatSend => {
-            crate::methods::chat_send(state, request).await
+            crate::methods::chat_send(state, _conn_id, request).await
         }
         Method::SessionsList => {
             crate::methods::sessions_list(state, request).await
