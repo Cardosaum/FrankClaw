@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![doc = "Core types, traits, and error hierarchy for FrankClaw."]
 
+pub mod api_keys;
 pub mod auth;
 pub mod channel;
 pub mod config;

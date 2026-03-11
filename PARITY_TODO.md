@@ -128,9 +128,9 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
   capabilities) for OpenAI and Anthropic models. Enrichment fallback for unknown models with
   conservative API-specific defaults. (`frankclaw-models/src/catalog.rs`)
 
-- [ ] **Auth Profile Rotation** — Multi-profile provider auth
-  OpenClaw supports multiple auth profiles per provider with cooldown auto-expiry, round-robin
-  ordering, runtime snapshots, failure tracking. FrankClaw has single-key-per-provider auth.
+- [x] **Auth Profile Rotation** — Multi-key per provider with round-robin selection, exponential
+  backoff on failure, automatic recovery on cooldown expiry, and provider-level key management.
+  (`frankclaw-core/src/api_keys.rs`)
 
 - [ ] **Vector Memory Backend** — Persistent memory search
   OpenClaw's context engine supports vector memory for long-term knowledge retrieval.
@@ -256,7 +256,7 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 5. ~~Subagent system~~ ✅
 6. ~~Auto-reply command system~~ ✅
 7. ~~Model catalog/discovery~~ ✅
-8. Auth profile rotation (production reliability)
+8. ~~Auth profile rotation~~ ✅
 
 ### Tier 3 — Extensibility
 
