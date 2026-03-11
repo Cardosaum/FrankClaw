@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -17,6 +17,7 @@ use frankclaw_core::types::{AgentId, ChannelId, Role, SessionKey};
 use frankclaw_models::{
     AnthropicProvider, FailoverChain, OllamaProvider, OpenAiProvider,
 };
+use frankclaw_plugin_sdk::{SkillManifest, load_workspace_skills};
 use frankclaw_tools::{ToolContext, ToolOutput, ToolRegistry};
 
 pub struct Runtime {
@@ -26,6 +27,7 @@ pub struct Runtime {
     model_defs: Vec<ModelDef>,
     channel_ids: Vec<ChannelId>,
     tools: ToolRegistry,
+    skill_manifests: HashMap<AgentId, Vec<SkillManifest>>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +99,7 @@ impl Runtime {
                 }
             })?;
         }
+        let skill_manifests = load_agent_skills(config)?;
 
         Ok(Self {
             config: config.clone(),
@@ -105,6 +108,7 @@ impl Runtime {
             model_defs,
             channel_ids,
             tools,
+            skill_manifests,
         })
     }
 
@@ -119,6 +123,15 @@ impl Runtime {
     pub fn list_tools(&self, agent_id: Option<&AgentId>) -> Result<Vec<frankclaw_core::model::ToolDef>> {
         let (_, agent) = self.resolve_agent(agent_id)?;
         self.tools.definitions(&agent.tools)
+    }
+
+    pub fn list_skills(&self, agent_id: Option<&AgentId>) -> Result<&[SkillManifest]> {
+        let (agent_id, _) = self.resolve_agent(agent_id)?;
+        Ok(self
+            .skill_manifests
+            .get(&agent_id)
+            .map(|skills| skills.as_slice())
+            .unwrap_or(&[]))
     }
 
     pub fn session_key_for_inbound(
@@ -187,7 +200,7 @@ impl Runtime {
                     messages: request_messages,
                     max_tokens: request.max_tokens,
                     temperature: request.temperature,
-                    system: agent.system_prompt.clone(),
+                    system: self.build_system_prompt(&agent_id, &agent),
                     tools: Vec::new(),
                 },
                 None,
@@ -245,6 +258,30 @@ impl Runtime {
                 agent_id: agent_id.clone(),
             })?;
         Ok((agent_id, agent))
+    }
+
+    fn build_system_prompt(&self, agent_id: &AgentId, agent: &AgentDef) -> Option<String> {
+        let skill_prompts = self
+            .skill_manifests
+            .get(agent_id)
+            .map(|skills| {
+                skills
+                    .iter()
+                    .map(|skill| format!("[Skill: {}]\n{}", skill.name, skill.prompt.trim()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        match (agent.system_prompt.as_deref(), skill_prompts.is_empty()) {
+            (None, true) => None,
+            (Some(system), true) => Some(system.to_string()),
+            (None, false) => Some(skill_prompts.join("\n\n")),
+            (Some(system), false) => Some(format!(
+                "{}\n\n{}",
+                system.trim(),
+                skill_prompts.join("\n\n")
+            )),
+        }
     }
 
     fn resolve_model_id(
@@ -373,6 +410,37 @@ fn build_providers(
     Ok(providers)
 }
 
+fn load_agent_skills(config: &FrankClawConfig) -> Result<HashMap<AgentId, Vec<SkillManifest>>> {
+    let mut manifests = HashMap::new();
+
+    for (agent_id, agent) in &config.agents.agents {
+        if agent.skills.is_empty() {
+            manifests.insert(agent_id.clone(), Vec::new());
+            continue;
+        }
+
+        let workspace = agent.workspace.as_ref().ok_or_else(|| FrankClawError::ConfigValidation {
+            msg: format!("agent '{}' declares skills but has no workspace", agent_id),
+        })?;
+        let skills = load_workspace_skills(workspace, &agent.skills)?;
+        for skill in &skills {
+            for tool in &skill.tools {
+                if !agent.tools.iter().any(|allowed| allowed == tool) {
+                    return Err(FrankClawError::ConfigValidation {
+                        msg: format!(
+                            "agent '{}' skill '{}' requires tool '{}' but the agent does not allow it",
+                            agent_id, skill.id, tool
+                        ),
+                    });
+                }
+            }
+        }
+        manifests.insert(agent_id.clone(), skills);
+    }
+
+    Ok(manifests)
+}
+
 fn resolve_secret(provider: &ProviderConfig, default_env: &str) -> Result<SecretString> {
     let env_key = provider
         .api_key_ref
@@ -413,11 +481,13 @@ mod tests {
     };
     use frankclaw_core::session::SessionStore;
     use frankclaw_sessions::SqliteSessionStore;
+    use std::sync::Mutex;
 
     struct MockProvider {
         id: String,
         model_id: String,
         response: Option<String>,
+        seen_system: Mutex<Vec<Option<String>>>,
     }
 
     #[async_trait]
@@ -428,9 +498,13 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: CompletionRequest,
+            request: CompletionRequest,
             _stream_tx: Option<tokio::sync::mpsc::Sender<frankclaw_core::model::StreamDelta>>,
         ) -> Result<CompletionResponse> {
+            self.seen_system
+                .lock()
+                .expect("system capture should lock")
+                .push(request.system.clone());
             match &self.response {
                 Some(content) => Ok(CompletionResponse {
                     content: content.clone(),
@@ -501,11 +575,13 @@ mod tests {
                     id: "primary".into(),
                     model_id: "mock-primary".into(),
                     response: None,
+                    seen_system: Mutex::new(Vec::new()),
                 }),
                 Arc::new(MockProvider {
                     id: "secondary".into(),
                     model_id: "mock-secondary".into(),
                     response: Some("fallback reply".into()),
+                    seen_system: Mutex::new(Vec::new()),
                 }),
             ],
         )
@@ -553,6 +629,7 @@ mod tests {
                 id: "primary".into(),
                 model_id: "mock-primary".into(),
                 response: Some("reply".into()),
+                seen_system: Mutex::new(Vec::new()),
             })],
         )
         .await
@@ -587,5 +664,71 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(temp);
+    }
+
+    #[tokio::test]
+    async fn runtime_includes_skill_prompt_in_system_message() {
+        let temp = std::env::temp_dir().join(format!(
+            "frankclaw-runtime-skill-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = temp.join("workspace");
+        let skill_dir = workspace.join(".frankclaw/skills/briefing");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        std::fs::write(
+            skill_dir.join("skill.json"),
+            serde_json::json!({
+                "id": "briefing",
+                "name": "Briefing",
+                "prompt": "Summarize in a terse operational style.",
+                "tools": []
+            })
+            .to_string(),
+        )
+        .expect("skill manifest should write");
+
+        let sessions = Arc::new(SqliteSessionStore::open(&temp.join("sessions.db"), None).expect("sessions should open"));
+        let mut config = FrankClawConfig::default();
+        let agent = config.agents.agents.get_mut(&AgentId::default_agent()).unwrap();
+        agent.workspace = Some(workspace.clone());
+        agent.system_prompt = Some("Base system".into());
+        agent.skills = vec!["briefing".into()];
+
+        let provider = Arc::new(MockProvider {
+            id: "primary".into(),
+            model_id: "mock-primary".into(),
+            response: Some("reply".into()),
+            seen_system: Mutex::new(Vec::new()),
+        });
+        let runtime = Runtime::from_providers(
+            &config,
+            sessions as Arc<dyn SessionStore>,
+            vec![provider.clone()],
+        )
+        .await
+        .expect("runtime should build");
+
+        runtime
+            .chat(ChatRequest {
+                agent_id: None,
+                session_key: None,
+                message: "hello".into(),
+                model_id: Some("mock-primary".into()),
+                max_tokens: None,
+                temperature: None,
+            })
+            .await
+            .expect("chat should succeed");
+
+        let seen = provider.seen_system.lock().expect("system capture should lock");
+        let system = seen
+            .last()
+            .and_then(|value| value.clone())
+            .expect("system prompt should be captured");
+        assert!(system.contains("Base system"));
+        assert!(system.contains("[Skill: Briefing]"));
+        assert!(system.contains("Summarize in a terse operational style."));
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 }

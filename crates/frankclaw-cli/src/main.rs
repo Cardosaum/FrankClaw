@@ -114,6 +114,13 @@ enum Command {
         args: Option<String>,
     },
 
+    /// List validated skills for an agent.
+    SkillsList {
+        /// Agent ID to inspect.
+        #[arg(long)]
+        agent: Option<String>,
+    },
+
     /// Session inspection commands.
     SessionsList {
         /// Agent ID to list sessions for.
@@ -429,6 +436,29 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&output.output)?);
+        }
+
+        Command::SkillsList { agent } => {
+            let config = load_config(cli.config.as_deref(), &state_dir)?;
+            config.validate()?;
+            let sessions = open_sessions(&state_dir)?;
+            let runtime = build_runtime(&config, sessions).await?;
+            let skills = runtime.list_skills(
+                agent
+                    .as_ref()
+                    .map(|value| frankclaw_core::types::AgentId::new(value.clone()))
+                    .as_ref(),
+            )?;
+
+            for skill in skills {
+                println!("{} - {}", skill.id, skill.name);
+                if let Some(description) = &skill.description {
+                    println!("  {}", description);
+                }
+                if !skill.tools.is_empty() {
+                    println!("  tools: {}", skill.tools.join(", "));
+                }
+            }
         }
 
         Command::SessionsList {

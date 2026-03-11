@@ -1,10 +1,13 @@
 #![forbid(unsafe_code)]
 #![doc = "Plugin SDK for extending FrankClaw with custom channels, tools, and memory backends."]
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use frankclaw_core::channel::{ChannelPlugin, InboundMessage};
+use frankclaw_core::error::{FrankClawError, Result};
+use serde::{Deserialize, Serialize};
 use frankclaw_core::types::ChannelId;
 
 /// Registry of loaded plugins.
@@ -60,5 +63,157 @@ impl PluginRegistry {
 impl Default for PluginRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillManifest {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub prompt: String,
+    pub tools: Vec<String>,
+}
+
+impl Default for SkillManifest {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            description: None,
+            prompt: String::new(),
+            tools: Vec::new(),
+        }
+    }
+}
+
+pub fn load_workspace_skills(workspace: &Path, names: &[String]) -> Result<Vec<SkillManifest>> {
+    names
+        .iter()
+        .map(|name| load_workspace_skill(workspace, name))
+        .collect()
+}
+
+pub fn load_workspace_skill(workspace: &Path, name: &str) -> Result<SkillManifest> {
+    validate_skill_name(name)?;
+    let path = resolve_skill_manifest_path(workspace, name)?;
+    let content = std::fs::read_to_string(&path).map_err(|e| FrankClawError::ConfigIo {
+        msg: format!("failed to read skill manifest '{}': {e}", path.display()),
+    })?;
+    let manifest: SkillManifest = serde_json::from_str(&content).map_err(|e| {
+        FrankClawError::ConfigValidation {
+            msg: format!("invalid skill manifest '{}': {e}", path.display()),
+        }
+    })?;
+    validate_manifest(name, &manifest)?;
+    Ok(manifest)
+}
+
+fn validate_skill_name(name: &str) -> Result<()> {
+    let valid = !name.trim().is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    if valid {
+        Ok(())
+    } else {
+        Err(FrankClawError::ConfigValidation {
+            msg: format!("invalid skill name '{}'", name),
+        })
+    }
+}
+
+fn validate_manifest(name: &str, manifest: &SkillManifest) -> Result<()> {
+    if manifest.id.trim().is_empty() {
+        return Err(FrankClawError::ConfigValidation {
+            msg: format!("skill '{}' manifest is missing id", name),
+        });
+    }
+    if manifest.id != name {
+        return Err(FrankClawError::ConfigValidation {
+            msg: format!(
+                "skill '{}' manifest id '{}' does not match requested skill name",
+                name, manifest.id
+            ),
+        });
+    }
+    if manifest.name.trim().is_empty() {
+        return Err(FrankClawError::ConfigValidation {
+            msg: format!("skill '{}' manifest is missing name", name),
+        });
+    }
+    if manifest.prompt.trim().is_empty() {
+        return Err(FrankClawError::ConfigValidation {
+            msg: format!("skill '{}' manifest is missing prompt", name),
+        });
+    }
+    for tool in &manifest.tools {
+        if tool.trim().is_empty() {
+            return Err(FrankClawError::ConfigValidation {
+                msg: format!("skill '{}' declares an empty tool name", name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn resolve_skill_manifest_path(workspace: &Path, name: &str) -> Result<PathBuf> {
+    let candidates = [
+        workspace.join(".frankclaw/skills").join(name).join("skill.json"),
+        workspace.join("skills").join(name).join("skill.json"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| FrankClawError::ConfigIo {
+            msg: format!(
+                "skill '{}' not found under '{}' or '{}'",
+                name,
+                workspace.join(".frankclaw/skills").display(),
+                workspace.join("skills").display()
+            ),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_workspace_skill_rejects_invalid_name() {
+        let err = load_workspace_skill(Path::new("."), "../escape").expect_err("skill should fail");
+        assert!(err.to_string().contains("invalid skill name"));
+    }
+
+    #[test]
+    fn load_workspace_skill_reads_hidden_skill_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "frankclaw-skill-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should work")
+                .as_nanos()
+        ));
+        let skill_dir = root.join(".frankclaw/skills/briefing");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        std::fs::write(
+            skill_dir.join("skill.json"),
+            serde_json::json!({
+                "id": "briefing",
+                "name": "Briefing",
+                "prompt": "Summarize clearly.",
+                "tools": ["session.inspect"]
+            })
+            .to_string(),
+        )
+        .expect("skill manifest should write");
+
+        let manifest = load_workspace_skill(&root, "briefing").expect("skill should load");
+        assert_eq!(manifest.id, "briefing");
+        assert_eq!(manifest.tools, vec!["session.inspect"]);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
