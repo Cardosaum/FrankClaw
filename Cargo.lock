@@ -698,6 +698,8 @@ dependencies = [
  "frankclaw-runtime",
  "frankclaw-sessions",
  "frankclaw-tools",
+ "reqwest",
+ "rusqlite",
  "secrecy",
  "serde",
  "serde_json",
@@ -715,6 +717,7 @@ dependencies = [
  "base64",
  "chrono",
  "frankclaw-core",
+ "frankclaw-crypto",
  "futures-util",
  "hmac",
  "reqwest",
@@ -821,10 +824,13 @@ dependencies = [
 name = "frankclaw-media"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "base64",
  "chrono",
  "frankclaw-core",
  "frankclaw-crypto",
  "reqwest",
+ "secrecy",
  "serde",
  "serde_json",
  "thiserror",
@@ -890,6 +896,7 @@ dependencies = [
  "frankclaw-sessions",
  "frankclaw-tools",
  "secrecy",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -928,6 +935,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tracing",
  "url",
  "uuid",
 ]

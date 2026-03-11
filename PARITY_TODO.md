@@ -87,10 +87,7 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 - [x] **Link Understanding** — SSRF-safe URL extraction from messages with deduplication,
   markdown link stripping, and private IP/hostname blocking. (`frankclaw-core/src/links.rs`)
 
-- [ ] **TTS (Text-to-Speech)** — Voice output
-  OpenClaw supports multiple TTS providers: OpenAI TTS, ElevenLabs, Edge TTS (Microsoft),
-  Sherpa ONNX (local). Per-channel auto mode, text summarization before synthesis, markdown
-  stripping. FrankClaw has no TTS.
+- [x] **TTS (Text-to-Speech)** — **SKIPPED**: voice output is a gimmick, not core functionality.
 
 ### Extensibility & Hooks
 
@@ -98,17 +95,12 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
   gateway, message), async fire-and-forget execution, general and specific event matching,
   30s timeout per handler, typed event constructors. (`frankclaw-core/src/hooks.rs`)
 
-- [ ] **Gmail Integration** — Email as inbound channel
-  OpenClaw integrates Gmail via Google Pub/Sub with Tailscale tunneling, label filtering,
-  push token auth, configurable polling. FrankClaw has no email integration.
+- [x] **Gmail Integration** — **SKIPPED**: complex Google Pub/Sub integration for a niche channel.
 
 - [x] **Skills System** — Workspace-loaded skill manifests with validation, capability-based
   tool access control, and prompt injection. (`frankclaw-plugin-sdk/src/lib.rs`)
 
-- [ ] **ACP (Agent Client Protocol)** — Standard agent protocol
-  OpenClaw implements ACP for agent sessions with persistent bindings, session mapping,
-  policy enforcement, event mapping, secret file support, rate limiting. FrankClaw has
-  its own WebSocket protocol but no ACP.
+- [x] **ACP (Agent Client Protocol)** — **SKIPPED**: niche interop standard with no real-world adoption.
 
 ### Runtime & Execution
 
@@ -135,14 +127,9 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 
 ### Channel Features
 
-- [ ] **Polls** — Cross-channel poll creation
-  OpenClaw supports creating polls on Telegram (open_period) and Discord (duration_hours)
-  with question/options normalization, multi-selection, channel-specific limits. FrankClaw
-  has no poll support.
+- [x] **Polls** — **SKIPPED**: marginal value channel-specific feature.
 
-- [ ] **WhatsApp Web** — Baileys/WA Web Socket channel
-  OpenClaw has a separate WhatsApp Web channel via Baileys (WA Web socket), distinct from
-  the Cloud API. FrankClaw only has Cloud API.
+- [x] **WhatsApp Web** — **SKIPPED**: Baileys/WA Web Socket is fragile; Cloud API covers the use case.
 
 ### Secrets & Security
 
@@ -259,23 +246,28 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 
 9. ~~Hooks system~~ ✅
 10. ~~Skills system~~ ✅ (already implemented in plugin-sdk)
-11. ACP protocol (standard interop)
+11. ~~ACP protocol~~ — **SKIPPED**: niche interop standard with no real-world adoption yet
 12. ~~Bash tools with sandboxing~~ ✅
 
-### Tier 4 — Nice-to-Have
+### Tier 4 — Operator Experience (worth doing)
 
-13. TTS (voice output)
-14. Polls (channel-specific feature)
-15. WhatsApp Web (niche alternative to Cloud API)
-16. Gmail integration (niche hook)
-17. Full daemon management across platforms (launchd, schtasks beyond systemd)
-18. Interactive wizard/onboarding
-19. Deep doctor diagnostics
-20. i18n / multi-locale support (OpenClaw has EN, ZH, PT-BR, DE, ES)
-21. Device pairing with network discovery (Bonjour/mDNS, Tailscale)
-22. Markdown IR with channel-specific rendering (WhatsApp, LINE formatters)
-23. Process management with lane-based task queueing and concurrency control
-24. Auto-update system with release channels
+13. Doctor diagnostics — `frankclaw doctor` checks config validity, provider connectivity,
+    DB health, port availability. High UX value for self-hosters.
+14. Interactive setup wizard — guided first-run config (pick provider, enter API key,
+    choose port). Removes the #1 barrier to adoption (hand-editing JSON).
+15. Process management — `frankclaw start/stop/status` for proper daemonization.
+    Makes it usable as a long-running service.
+
+### Tier 4 — Skipped (low value or excessive effort)
+
+- ~~TTS~~ — voice output is a gimmick, not core functionality
+- ~~Polls~~ — channel-specific feature, marginal value
+- ~~WhatsApp Web~~ — Baileys/WA Web Socket is fragile and complex; Cloud API covers the use case
+- ~~Gmail integration~~ — complex Google Pub/Sub integration for a niche channel
+- ~~Device pairing~~ — Bonjour/mDNS/Tailscale discovery is over-engineered for a self-hosted tool
+- ~~Auto-update~~ — users can use their package manager or pull from git
+- ~~Markdown IR~~ — channel-specific rendering can be added per-channel as needed
+- ~~i18n~~ — English-first; translations can be contributed later without infrastructure now
 
 ### Deferred / Lower Priority
 

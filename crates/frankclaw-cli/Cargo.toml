@@ -33,3 +33,5 @@ secrecy = { workspace = true }
 anyhow = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }

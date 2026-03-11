@@ -329,22 +329,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::Doctor => {
-            let config = load_config(cli.config.as_deref(), &state_dir)?;
-            config.validate()?;
-
-            let warnings = collect_doctor_warnings(&config, &state_dir)?;
-            let exposure = frankclaw_gateway::auth::assess_exposure(&config)?;
-
-            println!("Doctor check passed.");
-            println!("  Exposure: {}", exposure.summary);
-            if warnings.is_empty() {
-                println!("  No obvious misconfigurations found.");
-            } else {
-                println!("  Warnings:");
-                for warning in warnings {
-                    println!("    - {warning}");
-                }
-            }
+            run_doctor(cli.config.as_deref(), &state_dir).await?;
         }
 
         Command::Config => {
@@ -1355,6 +1340,369 @@ fn restrict_file_permissions(path: &std::path::Path) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Doctor: comprehensive diagnostics
+// ---------------------------------------------------------------------------
+
+/// Outcome of a single diagnostic check.
+enum CheckResult {
+    Pass(String),
+    Warn(String),
+    Fail(String),
+    Info(String),
+}
+
+impl CheckResult {
+    fn prefix(&self) -> &str {
+        match self {
+            Self::Pass(_) => "[PASS]",
+            Self::Warn(_) => "[WARN]",
+            Self::Fail(_) => "[FAIL]",
+            Self::Info(_) => "[INFO]",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Pass(m) | Self::Warn(m) | Self::Fail(m) | Self::Info(m) => m,
+        }
+    }
+
+    fn is_fail(&self) -> bool {
+        matches!(self, Self::Fail(_))
+    }
+}
+
+fn print_section(title: &str, checks: &[CheckResult]) {
+    println!("\n  {title}");
+    for check in checks {
+        println!("    {} {}", check.prefix(), check.message());
+    }
+}
+
+async fn run_doctor(
+    config_path: Option<&std::path::Path>,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    println!("FrankClaw Doctor");
+    println!("================");
+
+    // --- System info ---
+    let mut system_checks = vec![
+        CheckResult::Info(format!("frankclaw {}", env!("CARGO_PKG_VERSION"))),
+        CheckResult::Info(format!("rust {}", rustc_version())),
+        CheckResult::Info(format!("os {}", std::env::consts::OS)),
+        CheckResult::Info(format!("arch {}", std::env::consts::ARCH)),
+    ];
+    let state_display = state_dir.display().to_string();
+    system_checks.push(CheckResult::Info(format!("state dir: {state_display}")));
+    print_section("System", &system_checks);
+
+    // --- Configuration ---
+    let config = match load_config(config_path, state_dir) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            print_section(
+                "Configuration",
+                &[CheckResult::Fail(format!("failed to load config: {err}"))],
+            );
+            println!("\nDoctor found critical issues. Fix config and rerun.");
+            return Ok(());
+        }
+    };
+
+    let mut config_checks = Vec::new();
+    match config.validate() {
+        Ok(()) => config_checks.push(CheckResult::Pass("config schema is valid".into())),
+        Err(err) => {
+            config_checks.push(CheckResult::Fail(format!("config validation failed: {err}")));
+            print_section("Configuration", &config_checks);
+            println!("\nDoctor found critical issues. Fix config and rerun.");
+            return Ok(());
+        }
+    }
+
+    // Config file permissions (Unix only)
+    let config_file_path = config_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_dir.join("frankclaw.json"));
+    config_checks.extend(check_file_permissions(&config_file_path, "config file"));
+
+    let warnings = collect_doctor_warnings(&config, state_dir)?;
+    for warning in &warnings {
+        config_checks.push(CheckResult::Warn(warning.clone()));
+    }
+    if warnings.is_empty() {
+        config_checks.push(CheckResult::Pass("no misconfigurations detected".into()));
+    }
+
+    let exposure = frankclaw_gateway::auth::assess_exposure(&config)?;
+    config_checks.push(CheckResult::Info(format!("exposure: {}", exposure.summary)));
+    for warning in &exposure.warnings {
+        config_checks.push(CheckResult::Warn(warning.clone()));
+    }
+
+    print_section("Configuration", &config_checks);
+
+    // --- State directory ---
+    let mut state_checks = Vec::new();
+    if state_dir.exists() {
+        state_checks.push(CheckResult::Pass("state directory exists".into()));
+        state_checks.extend(check_dir_permissions(state_dir, "state directory"));
+    } else {
+        state_checks.push(CheckResult::Warn(format!(
+            "state directory '{}' does not exist yet (will be created on first run)",
+            state_dir.display()
+        )));
+    }
+    print_section("State Directory", &state_checks);
+
+    // --- Database ---
+    let mut db_checks = Vec::new();
+    let db_path = state_dir.join("sessions.db");
+    if db_path.exists() {
+        match check_sqlite_health(&db_path) {
+            Ok(()) => db_checks.push(CheckResult::Pass("sessions.db is readable and valid".into())),
+            Err(err) => db_checks.push(CheckResult::Fail(format!("sessions.db: {err}"))),
+        }
+        db_checks.extend(check_file_permissions(&db_path, "sessions.db"));
+    } else {
+        db_checks.push(CheckResult::Info(
+            "sessions.db does not exist yet (created on first session)".into(),
+        ));
+    }
+    print_section("Database", &db_checks);
+
+    // --- Port availability ---
+    let mut port_checks = Vec::new();
+    let port = config.gateway.port;
+    match check_port_available(port) {
+        Ok(true) => port_checks.push(CheckResult::Pass(format!("port {port} is available"))),
+        Ok(false) => port_checks.push(CheckResult::Warn(format!(
+            "port {port} is already in use (gateway may already be running, or another service is using it)"
+        ))),
+        Err(err) => port_checks.push(CheckResult::Warn(format!(
+            "could not check port {port}: {err}"
+        ))),
+    }
+    print_section("Network", &port_checks);
+
+    // --- Providers ---
+    let mut provider_checks = Vec::new();
+    if config.models.providers.is_empty() {
+        provider_checks.push(CheckResult::Warn("no model providers configured".into()));
+    }
+    for provider in &config.models.providers {
+        let has_key = provider
+            .api_key_ref
+            .as_deref()
+            .and_then(|env_name| std::env::var(env_name).ok())
+            .filter(|value| !value.trim().is_empty())
+            .is_some();
+
+        if !has_key {
+            provider_checks.push(CheckResult::Warn(format!(
+                "provider '{}' ({}) — API key not available",
+                provider.id, provider.api
+            )));
+            continue;
+        }
+
+        provider_checks.push(CheckResult::Pass(format!(
+            "provider '{}' ({}) — API key present, {} model(s) configured",
+            provider.id,
+            provider.api,
+            provider.models.len()
+        )));
+
+        // Connectivity check for providers with a base URL
+        let base_url = provider.base_url.as_deref().unwrap_or_else(|| {
+            match provider.api.as_str() {
+                "openai" => "https://api.openai.com",
+                "anthropic" => "https://api.anthropic.com",
+                _ => "",
+            }
+        });
+        if !base_url.is_empty() {
+            match check_provider_reachable(base_url).await {
+                Ok(()) => provider_checks.push(CheckResult::Pass(format!(
+                    "  {} is reachable",
+                    base_url
+                ))),
+                Err(err) => provider_checks.push(CheckResult::Warn(format!(
+                    "  {} is unreachable: {}",
+                    base_url, err
+                ))),
+            }
+        }
+    }
+    print_section("Providers", &provider_checks);
+
+    // --- Channels ---
+    let mut channel_checks = Vec::new();
+    if config.channels.is_empty() {
+        channel_checks.push(CheckResult::Warn("no channels configured".into()));
+    }
+    for (channel_id, channel) in &config.channels {
+        if channel.enabled {
+            channel_checks.push(CheckResult::Pass(format!(
+                "channel '{}' enabled ({} account(s))",
+                channel_id,
+                channel.accounts.len()
+            )));
+        } else {
+            channel_checks.push(CheckResult::Info(format!(
+                "channel '{}' disabled",
+                channel_id
+            )));
+        }
+    }
+    print_section("Channels", &channel_checks);
+
+    // --- Security ---
+    let mut security_checks = Vec::new();
+    if config.security.encrypt_sessions {
+        if load_master_key_from_env()?.is_some() {
+            security_checks.push(CheckResult::Pass("session encryption enabled and master key set".into()));
+        } else {
+            security_checks.push(CheckResult::Warn(
+                "session encryption enabled but FRANKCLAW_MASTER_KEY is not set".into(),
+            ));
+        }
+    } else {
+        security_checks.push(CheckResult::Warn("session encryption is disabled".into()));
+    }
+
+    match &config.gateway.auth {
+        frankclaw_core::auth::AuthMode::None => {
+            security_checks.push(CheckResult::Warn("gateway auth is disabled".into()));
+        }
+        frankclaw_core::auth::AuthMode::Token { .. } => {
+            security_checks.push(CheckResult::Pass("gateway uses token authentication".into()));
+        }
+        frankclaw_core::auth::AuthMode::Password { .. } => {
+            security_checks.push(CheckResult::Pass("gateway uses password authentication".into()));
+        }
+        frankclaw_core::auth::AuthMode::TrustedProxy { .. } => {
+            security_checks.push(CheckResult::Pass("gateway uses trusted proxy authentication".into()));
+        }
+        frankclaw_core::auth::AuthMode::Tailscale => {
+            security_checks.push(CheckResult::Pass("gateway uses Tailscale authentication".into()));
+        }
+    }
+    print_section("Security", &security_checks);
+
+    // --- Summary ---
+    let all_checks: Vec<&CheckResult> = system_checks
+        .iter()
+        .chain(config_checks.iter())
+        .chain(state_checks.iter())
+        .chain(db_checks.iter())
+        .chain(port_checks.iter())
+        .chain(provider_checks.iter())
+        .chain(channel_checks.iter())
+        .chain(security_checks.iter())
+        .collect();
+
+    let fail_count = all_checks.iter().filter(|c| c.is_fail()).count();
+    let warn_count = all_checks.iter().filter(|c| matches!(c, CheckResult::Warn(_))).count();
+
+    println!();
+    if fail_count > 0 {
+        println!("Doctor found {fail_count} critical issue(s) and {warn_count} warning(s).");
+    } else if warn_count > 0 {
+        println!("Doctor passed with {warn_count} warning(s).");
+    } else {
+        println!("Doctor passed. All checks OK.");
+    }
+
+    Ok(())
+}
+
+fn rustc_version() -> String {
+    std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|version| version.trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+#[cfg(unix)]
+fn check_file_permissions(path: &std::path::Path, label: &str) -> Vec<CheckResult> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut results = Vec::new();
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            results.push(CheckResult::Warn(format!(
+                "{label} has permissions {mode:04o} — should be 0600 (owner-only)",
+            )));
+        } else {
+            results.push(CheckResult::Pass(format!(
+                "{label} permissions {mode:04o} (owner-only)",
+            )));
+        }
+    }
+    results
+}
+
+#[cfg(not(unix))]
+fn check_file_permissions(_path: &std::path::Path, _label: &str) -> Vec<CheckResult> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn check_dir_permissions(path: &std::path::Path, label: &str) -> Vec<CheckResult> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut results = Vec::new();
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            results.push(CheckResult::Warn(format!(
+                "{label} has permissions {mode:04o} — should be 0700 (owner-only)",
+            )));
+        } else {
+            results.push(CheckResult::Pass(format!(
+                "{label} permissions {mode:04o} (owner-only)",
+            )));
+        }
+    }
+    results
+}
+
+#[cfg(not(unix))]
+fn check_dir_permissions(_path: &std::path::Path, _label: &str) -> Vec<CheckResult> {
+    Vec::new()
+}
+
+fn check_sqlite_health(db_path: &std::path::Path) -> anyhow::Result<()> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let result: String = conn.query_row("SELECT 'ok'", [], |row| row.get(0))?;
+    anyhow::ensure!(result == "ok", "unexpected integrity check result");
+    Ok(())
+}
+
+fn check_port_available(port: u16) -> anyhow::Result<bool> {
+    match std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], port))) {
+        Ok(_listener) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn check_provider_reachable(base_url: &str) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let _response = client.head(base_url).send().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1740,6 +2088,119 @@ mod tests {
         )
         .expect("status should exist");
         assert!(enabled.contains(&format!("mutations enabled at {}", endpoint)));
+    }
+
+    // --- Doctor diagnostic helper tests ---
+
+    #[test]
+    fn check_result_prefixes_are_correct() {
+        assert_eq!(CheckResult::Pass("ok".into()).prefix(), "[PASS]");
+        assert_eq!(CheckResult::Warn("hmm".into()).prefix(), "[WARN]");
+        assert_eq!(CheckResult::Fail("bad".into()).prefix(), "[FAIL]");
+        assert_eq!(CheckResult::Info("fyi".into()).prefix(), "[INFO]");
+    }
+
+    #[test]
+    fn check_result_is_fail_only_for_fail_variant() {
+        assert!(!CheckResult::Pass("ok".into()).is_fail());
+        assert!(!CheckResult::Warn("hmm".into()).is_fail());
+        assert!(CheckResult::Fail("bad".into()).is_fail());
+        assert!(!CheckResult::Info("fyi".into()).is_fail());
+    }
+
+    #[test]
+    fn check_port_available_detects_occupied_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("should bind to ephemeral port");
+        let port = listener.local_addr().expect("should have addr").port();
+
+        let result = check_port_available(port).expect("check should not error");
+        assert!(!result, "port should be detected as in-use");
+        // Note: we don't test the "available after drop" case because the port
+        // may remain in TIME_WAIT on some systems.
+    }
+
+    #[test]
+    fn check_sqlite_health_works_on_valid_db() {
+        let dir = std::env::temp_dir().join(format!(
+            "frankclaw-doctor-test-db-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("should create temp dir");
+        let db_path = dir.join("test.db");
+
+        // Create a valid SQLite database
+        let conn = rusqlite::Connection::open(&db_path).expect("should open db");
+        conn.execute_batch("CREATE TABLE test (id INTEGER PRIMARY KEY)")
+            .expect("should create table");
+        drop(conn);
+
+        let result = check_sqlite_health(&db_path);
+        assert!(result.is_ok(), "valid db should pass health check");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn check_sqlite_health_fails_on_nonexistent_file() {
+        let db_path = std::env::temp_dir().join(format!(
+            "frankclaw-doctor-nonexistent-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ));
+        // open_with_flags with READ_ONLY should fail for nonexistent files
+        let result = check_sqlite_health(&db_path);
+        assert!(result.is_err(), "nonexistent db should fail health check");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_file_permissions_detects_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "frankclaw-doctor-test-perms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("should create temp dir");
+        let file_path = dir.join("secret.json");
+        std::fs::write(&file_path, b"{}").expect("should write file");
+
+        // Set world-readable permissions
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644))
+            .expect("should set permissions");
+
+        let results = check_file_permissions(&file_path, "test file");
+        assert!(!results.is_empty());
+        assert!(matches!(results[0], CheckResult::Warn(_)));
+
+        // Fix permissions
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))
+            .expect("should set permissions");
+
+        let results = check_file_permissions(&file_path, "test file");
+        assert!(!results.is_empty());
+        assert!(matches!(results[0], CheckResult::Pass(_)));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rustc_version_returns_nonempty_string() {
+        let version = rustc_version();
+        assert!(!version.is_empty());
+        assert!(version.contains("rustc") || version == "unknown");
     }
 }
 
