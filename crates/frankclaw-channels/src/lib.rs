@@ -4,6 +4,7 @@ pub mod discord;
 pub mod signal;
 pub mod slack;
 pub mod telegram;
+pub mod whatsapp;
 pub mod web;
 
 use std::collections::HashMap;
@@ -20,14 +21,16 @@ use frankclaw_core::types::ChannelId;
 pub struct ChannelSet {
     channels: HashMap<ChannelId, Arc<dyn ChannelPlugin>>,
     web: Option<Arc<web::WebChannel>>,
+    whatsapp: Option<Arc<whatsapp::WhatsAppChannel>>,
 }
 
 impl ChannelSet {
     pub fn from_parts(
         channels: HashMap<ChannelId, Arc<dyn ChannelPlugin>>,
         web: Option<Arc<web::WebChannel>>,
+        whatsapp: Option<Arc<whatsapp::WhatsAppChannel>>,
     ) -> Self {
-        Self { channels, web }
+        Self { channels, web, whatsapp }
     }
 
     pub fn channels(&self) -> &HashMap<ChannelId, Arc<dyn ChannelPlugin>> {
@@ -41,11 +44,16 @@ impl ChannelSet {
     pub fn web(&self) -> Option<Arc<web::WebChannel>> {
         self.web.clone()
     }
+
+    pub fn whatsapp(&self) -> Option<Arc<whatsapp::WhatsAppChannel>> {
+        self.whatsapp.clone()
+    }
 }
 
 pub fn load_from_config(config: &FrankClawConfig) -> Result<ChannelSet> {
     let mut channels: HashMap<ChannelId, Arc<dyn ChannelPlugin>> = HashMap::new();
     let mut web_handle = None;
+    let mut whatsapp_handle = None;
 
     for (channel_id, channel_config) in &config.channels {
         if !channel_config.enabled {
@@ -57,6 +65,10 @@ pub fn load_from_config(config: &FrankClawConfig) -> Result<ChannelSet> {
                 channels.insert(channel_id.clone(), web.clone());
                 web_handle = Some(web);
             }
+            LoadedChannel::WhatsApp(whatsapp) => {
+                channels.insert(channel_id.clone(), whatsapp.clone());
+                whatsapp_handle = Some(whatsapp);
+            }
             LoadedChannel::Standard(channel) => {
                 channels.insert(channel_id.clone(), channel);
             }
@@ -66,12 +78,14 @@ pub fn load_from_config(config: &FrankClawConfig) -> Result<ChannelSet> {
     Ok(ChannelSet::from_parts(
         channels,
         web_handle,
+        whatsapp_handle,
     ))
 }
 
 enum LoadedChannel {
     Standard(Arc<dyn ChannelPlugin>),
     Web(Arc<web::WebChannel>),
+    WhatsApp(Arc<whatsapp::WhatsAppChannel>),
 }
 
 fn build_channel(channel_id: &ChannelId, channel_config: &ChannelConfig) -> Result<LoadedChannel> {
@@ -122,6 +136,45 @@ fn build_channel(channel_id: &ChannelId, channel_config: &ChannelConfig) -> Resu
                 signal::SignalChannel::new(base_url, account_id),
             )))
         }
+        "whatsapp" => {
+            let account = first_account(channel_id, channel_config)?;
+            let access_token = resolve_channel_secret(
+                account,
+                &["access_token", "token"],
+                &["access_token_env", "token_env"],
+                "WHATSAPP_ACCESS_TOKEN",
+                "whatsapp",
+            )?;
+            let phone_number_id = resolve_channel_value(
+                account,
+                &["phone_number_id"],
+                &["phone_number_id_env"],
+                Some("WHATSAPP_PHONE_NUMBER_ID"),
+                "whatsapp",
+                "phone number id",
+            )?;
+            let verify_token = SecretString::from(resolve_channel_value(
+                account,
+                &["verify_token"],
+                &["verify_token_env"],
+                Some("WHATSAPP_VERIFY_TOKEN"),
+                "whatsapp",
+                "verify token",
+            )?);
+            let app_secret = resolve_optional_channel_secret(
+                account,
+                &["app_secret"],
+                &["app_secret_env"],
+            )?;
+            Ok(LoadedChannel::WhatsApp(Arc::new(
+                whatsapp::WhatsAppChannel::new(
+                    access_token,
+                    phone_number_id,
+                    verify_token,
+                    app_secret,
+                ),
+            )))
+        }
         "slack" => {
             let account = first_account(channel_id, channel_config)?;
             let app_token = resolve_channel_secret(
@@ -144,7 +197,7 @@ fn build_channel(channel_id: &ChannelId, channel_config: &ChannelConfig) -> Resu
         }
         other => Err(FrankClawError::ConfigValidation {
             msg: format!(
-                "unsupported enabled channel '{}'; currently supported: web, telegram, discord, signal, slack",
+                "unsupported enabled channel '{}'; currently supported: web, telegram, discord, signal, slack, whatsapp",
                 other
             ),
         }),
@@ -219,6 +272,15 @@ fn resolve_optional_channel_value(
     }
 
     Ok(None)
+}
+
+fn resolve_optional_channel_secret(
+    account: &Value,
+    inline_keys: &[&str],
+    env_keys: &[&str],
+) -> Result<Option<SecretString>> {
+    resolve_optional_channel_value(account, inline_keys, env_keys)
+        .map(|value| value.map(SecretString::from))
 }
 
 fn resolve_inline_value(account: &Value, keys: &[&str]) -> Option<String> {
@@ -358,5 +420,29 @@ mod tests {
             .get(&ChannelId::new("signal"))
             .expect("signal channel should exist");
         assert_eq!(channel.label(), "Signal");
+    }
+
+    #[test]
+    fn load_from_config_builds_whatsapp_from_inline_values() {
+        let mut config = FrankClawConfig::default();
+        config.channels.insert(
+            ChannelId::new("whatsapp"),
+            ChannelConfig {
+                enabled: true,
+                accounts: vec![serde_json::json!({
+                    "access_token": "test-token",
+                    "phone_number_id": "123456789",
+                    "verify_token": "verify-me"
+                })],
+                extra: serde_json::json!({}),
+            },
+        );
+
+        let channels = load_from_config(&config).expect("channels should load");
+        let channel = channels
+            .get(&ChannelId::new("whatsapp"))
+            .expect("whatsapp channel should exist");
+        assert_eq!(channel.label(), "WhatsApp");
+        assert!(channels.whatsapp().is_some());
     }
 }

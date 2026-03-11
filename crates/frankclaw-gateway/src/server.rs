@@ -85,6 +85,10 @@ fn build_router(
         // Local web channel ingress / polling.
         .route("/api/web/inbound", post(web_inbound_handler))
         .route("/api/web/outbound", get(web_outbound_handler))
+        .route(
+            "/api/whatsapp/webhook",
+            get(whatsapp_webhook_verify_handler).post(whatsapp_webhook_inbound_handler),
+        )
         .route("/api/pairing/pending", get(pairing_pending_handler))
         .route("/api/pairing/approve", post(pairing_approve_handler))
         .route("/hooks/{mapping_id}", post(webhook_handler))
@@ -328,6 +332,159 @@ async fn web_outbound_handler(
     (
         StatusCode::OK,
         Json(serde_json::json!({ "messages": messages })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WhatsAppVerifyQuery {
+    #[serde(rename = "hub.mode")]
+    hub_mode: Option<String>,
+    #[serde(rename = "hub.challenge")]
+    hub_challenge: Option<String>,
+    #[serde(rename = "hub.verify_token")]
+    hub_verify_token: Option<String>,
+}
+
+async fn whatsapp_webhook_verify_handler(
+    State(state): State<AppState>,
+    Query(query): Query<WhatsAppVerifyQuery>,
+) -> impl IntoResponse {
+    let Some(whatsapp) = state.gateway.whatsapp_channel() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    if query.hub_mode.as_deref() != Some("subscribe") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(verify_token) = query.hub_verify_token.as_deref() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !whatsapp.verify_token_matches(verify_token) {
+        log_failure(
+            "whatsapp.webhook.verify",
+            serde_json::json!({
+                "reason": "verify token mismatch",
+            }),
+        );
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let challenge = query.hub_challenge.unwrap_or_default();
+    log_event(
+        "whatsapp.webhook.verify",
+        "success",
+        serde_json::json!({
+            "challenge_len": challenge.len(),
+        }),
+    );
+    (StatusCode::OK, challenge).into_response()
+}
+
+async fn whatsapp_webhook_inbound_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Some(whatsapp) = state.gateway.whatsapp_channel() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "whatsapp channel not configured" })),
+        )
+            .into_response();
+    };
+
+    let config = state.gateway.current_config();
+    let max_body_bytes = config.security.max_webhook_body_bytes;
+    if body.len() > max_body_bytes {
+        log_failure(
+            "whatsapp.webhook.receive",
+            serde_json::json!({
+                "reason": "body too large",
+                "size_bytes": body.len(),
+                "max_body_bytes": max_body_bytes,
+            }),
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "webhook body too large" })),
+        )
+            .into_response();
+    }
+
+    if let Err(err) = whatsapp.verify_signature(
+        &body,
+        headers
+            .get("x-hub-signature-256")
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        log_failure(
+            "whatsapp.webhook.receive",
+            serde_json::json!({
+                "reason": err.to_string(),
+            }),
+        );
+        return (
+            StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::UNAUTHORIZED),
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response();
+    }
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(err) => {
+            log_failure(
+                "whatsapp.webhook.receive",
+                serde_json::json!({
+                    "reason": format!("invalid whatsapp webhook JSON: {err}"),
+                }),
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid whatsapp webhook JSON: {err}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let inbound = frankclaw_channels::whatsapp::parse_webhook_payload(&payload);
+    let message_count = inbound.len();
+    if inbound.is_empty() {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "status": "ignored" })),
+        )
+            .into_response();
+    }
+
+    for message in inbound {
+        if let Err(err) = process_inbound_message(state.gateway.clone(), message).await {
+            log_failure(
+                "whatsapp.webhook.receive",
+                serde_json::json!({
+                    "reason": err.to_string(),
+                }),
+            );
+            return (
+                StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    }
+
+    log_event(
+        "whatsapp.webhook.receive",
+        "success",
+        serde_json::json!({
+            "messages": message_count,
+        }),
+    );
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "accepted" })),
     )
         .into_response()
 }
@@ -994,7 +1151,7 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::{HeaderMap, HeaderValue};
     use axum::http::Request;
-    use frankclaw_channels::ChannelSet;
+    use frankclaw_channels::{ChannelSet, whatsapp::WhatsAppChannel};
     use frankclaw_core::channel::SendResult;
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
     use frankclaw_core::model::{
@@ -1328,7 +1485,7 @@ mod tests {
             frankclaw_core::types::ChannelId::new("discord"),
             capture.clone() as Arc<dyn frankclaw_core::channel::ChannelPlugin>,
         );
-        let channels = Arc::new(ChannelSet::from_parts(map, None));
+        let channels = Arc::new(ChannelSet::from_parts(map, None, None));
         let (state, sessions) = build_test_state(&temp_dir, config, channels).await;
 
         let inbound = InboundMessage {
@@ -1413,7 +1570,7 @@ mod tests {
             frankclaw_core::types::ChannelId::new("slack"),
             capture.clone() as Arc<dyn frankclaw_core::channel::ChannelPlugin>,
         );
-        let channels = Arc::new(ChannelSet::from_parts(map, None));
+        let channels = Arc::new(ChannelSet::from_parts(map, None, None));
         let (state, sessions) = build_test_state(&temp_dir, config, channels).await;
 
         let inbound = InboundMessage {
@@ -1501,7 +1658,7 @@ mod tests {
             frankclaw_core::types::ChannelId::new("signal"),
             capture.clone() as Arc<dyn frankclaw_core::channel::ChannelPlugin>,
         );
-        let channels = Arc::new(ChannelSet::from_parts(map, None));
+        let channels = Arc::new(ChannelSet::from_parts(map, None, None));
         let (state, sessions) = build_test_state(&temp_dir, config, channels).await;
 
         let inbound = InboundMessage {
@@ -1568,7 +1725,7 @@ mod tests {
             "id": "incoming",
             "session_key": "default:web:hook-control",
         })];
-        let channels = Arc::new(ChannelSet::from_parts(HashMap::new(), None));
+        let channels = Arc::new(ChannelSet::from_parts(HashMap::new(), None, None));
         let (state, sessions) = build_test_state(&temp_dir, config.clone(), channels).await;
         let app = build_router(
             state.clone(),
@@ -1603,6 +1760,122 @@ mod tests {
             .expect("transcript should load");
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript[0].content, "hello from http hook");
+        assert_eq!(transcript[1].content, "mock reply");
+
+        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
+        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn whatsapp_webhook_route_verifies_and_processes_inbound_messages() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-whatsapp-webhook-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = FrankClawConfig::default();
+        config.channels.insert(
+            frankclaw_core::types::ChannelId::new("whatsapp"),
+            ChannelConfig {
+                enabled: true,
+                accounts: vec![serde_json::json!({
+                    "access_token": "test-token",
+                    "phone_number_id": "12345",
+                    "verify_token": "verify-me"
+                })],
+                extra: serde_json::json!({
+                    "dm_policy": "open"
+                }),
+            },
+        );
+
+        let capture = Arc::new(CaptureChannel::new("whatsapp", "WhatsApp"));
+        let whatsapp = Arc::new(WhatsAppChannel::new(
+            secrecy::SecretString::from("test-token".to_string()),
+            "12345".into(),
+            secrecy::SecretString::from("verify-me".to_string()),
+            None,
+        ));
+        let mut map: HashMap<
+            frankclaw_core::types::ChannelId,
+            Arc<dyn frankclaw_core::channel::ChannelPlugin>,
+        > = HashMap::new();
+        map.insert(
+            frankclaw_core::types::ChannelId::new("whatsapp"),
+            capture.clone() as Arc<dyn frankclaw_core::channel::ChannelPlugin>,
+        );
+        let channels = Arc::new(ChannelSet::from_parts(map, None, Some(whatsapp)));
+        let (state, sessions) = build_test_state(&temp_dir, config.clone(), channels).await;
+        let app = build_router(
+            state.clone(),
+            Arc::new(AuthRateLimiter::new(config.gateway.rate_limit.clone())),
+        );
+
+        let verify = app
+            .clone()
+            .oneshot(
+                Request::get("/api/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=abc123")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("verify request should succeed");
+        assert_eq!(verify.status(), StatusCode::OK);
+
+        let body = serde_json::json!({
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "metadata": {
+                            "phone_number_id": "12345"
+                        },
+                        "contacts": [{
+                            "wa_id": "15551234567",
+                            "profile": {
+                                "name": "Alice"
+                            }
+                        }],
+                        "messages": [{
+                            "from": "15551234567",
+                            "id": "wamid.1",
+                            "timestamp": "1710000000",
+                            "type": "text",
+                            "text": {
+                                "body": "hello from whatsapp"
+                            }
+                        }]
+                    }
+                }]
+            }]
+        })
+        .to_string();
+
+        let response = app
+            .oneshot(
+                Request::post("/api/whatsapp/webhook")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("webhook request should succeed");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let outbound = capture.drain().await;
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].to, "15551234567");
+        assert_eq!(outbound[0].text, "mock reply");
+
+        let transcript = sessions
+            .get_transcript(
+                &frankclaw_core::types::SessionKey::from_raw("default:whatsapp:12345:15551234567"),
+                10,
+                None,
+            )
+            .await
+            .expect("transcript should load");
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].content, "hello from whatsapp");
         assert_eq!(transcript[1].content, "mock reply");
 
         let _ = std::fs::remove_file(temp_dir.join("sessions.db"));

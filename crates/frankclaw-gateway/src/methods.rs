@@ -377,7 +377,7 @@ mod tests {
             .await
             .expect("runtime should build"),
         );
-        let channels = Arc::new(ChannelSet::from_parts(HashMap::new(), None));
+        let channels = Arc::new(ChannelSet::from_parts(HashMap::new(), None, None));
         (
             GatewayState::new(config, sessions.clone(), runtime, channels, pairing),
             sessions,

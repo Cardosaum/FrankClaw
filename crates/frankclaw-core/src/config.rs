@@ -408,6 +408,29 @@ fn validate_channel_config(channel_id: &ChannelId, channel: &ChannelConfig) -> R
             &["base_url_env", "http_url_env"],
             "base URL",
         ),
+        "whatsapp" => {
+            validate_channel_account_value_source(
+                channel,
+                "whatsapp",
+                &["access_token", "token"],
+                &["access_token_env", "token_env"],
+                "access token",
+            )?;
+            validate_channel_account_value_source(
+                channel,
+                "whatsapp",
+                &["phone_number_id"],
+                &["phone_number_id_env"],
+                "phone number id",
+            )?;
+            validate_channel_account_value_source(
+                channel,
+                "whatsapp",
+                &["verify_token"],
+                &["verify_token_env"],
+                "verify token",
+            )
+        }
         "slack" => {
             validate_channel_account_value_source(
                 channel,
@@ -426,7 +449,7 @@ fn validate_channel_config(channel_id: &ChannelId, channel: &ChannelConfig) -> R
         }
         other => Err(FrankClawError::ConfigValidation {
             msg: format!(
-                "unsupported enabled channel '{}'; currently supported: web, telegram, discord, signal, slack",
+                "unsupported enabled channel '{}'; currently supported: web, telegram, discord, signal, slack, whatsapp",
                 other
             ),
         }),
@@ -815,6 +838,24 @@ mod tests {
                 enabled: true,
                 accounts: vec![serde_json::json!({
                     "account": "+15551234567"
+                })],
+                extra: serde_json::json!({}),
+            },
+        );
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn whatsapp_channel_requires_access_token_phone_number_and_verify_token() {
+        let mut config = FrankClawConfig::default();
+        config.channels.insert(
+            ChannelId::new("whatsapp"),
+            ChannelConfig {
+                enabled: true,
+                accounts: vec![serde_json::json!({
+                    "access_token": "test-token",
+                    "phone_number_id": "123456789"
                 })],
                 extra: serde_json::json!({}),
             },

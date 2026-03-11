@@ -4,7 +4,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 
-use frankclaw_channels::{web::WebChannel, ChannelSet};
+use frankclaw_channels::{web::WebChannel, whatsapp::WhatsAppChannel, ChannelSet};
 use frankclaw_core::channel::ChannelPlugin;
 use frankclaw_core::config::FrankClawConfig;
 use frankclaw_core::types::ChannelId;
@@ -107,5 +107,9 @@ impl GatewayState {
 
     pub fn web_channel(&self) -> Option<Arc<WebChannel>> {
         self.channels.web()
+    }
+
+    pub fn whatsapp_channel(&self) -> Option<Arc<WhatsAppChannel>> {
+        self.channels.whatsapp()
     }
 }
