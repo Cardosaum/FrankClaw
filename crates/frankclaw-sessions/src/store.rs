@@ -606,6 +606,62 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir_all(temp_dir);
     }
+
+    #[tokio::test]
+    async fn rewrite_last_assistant_message_returns_false_when_session_has_no_assistant_turn() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-sessions-test-no-assistant-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let path = temp_dir.join("sessions.db");
+        let store = SqliteSessionStore::open(&path, None).expect("store should open");
+        let key = SessionKey::from_raw("agent:main:test-no-assistant");
+
+        store
+            .upsert(&SessionEntry {
+                key: key.clone(),
+                agent_id: AgentId::default_agent(),
+                channel: ChannelId::new("web"),
+                account_id: "default".into(),
+                scoping: SessionScoping::PerChannelPeer,
+                created_at: Utc::now(),
+                last_message_at: Some(Utc::now()),
+                thread_id: None,
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .expect("session should upsert");
+        store
+            .append_transcript(
+                &key,
+                &TranscriptEntry {
+                    seq: 1,
+                    role: Role::User,
+                    content: "hello".into(),
+                    timestamp: Utc::now(),
+                    metadata: None,
+                },
+            )
+            .await
+            .expect("user transcript should append");
+
+        let updated = store
+            .rewrite_last_assistant_message(&key, "new")
+            .await
+            .expect("rewrite should succeed");
+        assert!(!updated);
+
+        let transcript = store
+            .get_transcript(&key, 10, None)
+            .await
+            .expect("transcript should load");
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript[0].content, "hello");
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
 }
 
 /// Extension trait for `rusqlite::Result<Option<T>>`.

@@ -486,7 +486,7 @@ async fn main() -> anyhow::Result<()> {
                 .get(&session_key)
                 .await?
                 .context("session not found")?;
-            let mut last_reply = frankclaw_gateway::delivery::last_reply_from_metadata(&entry.metadata)
+            let last_reply = frankclaw_gateway::delivery::last_reply_from_metadata(&entry.metadata)
                 .context("session has no tracked delivery metadata")?;
 
             if last_reply.chunks.len() > 1 {
@@ -524,13 +524,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("session has no assistant turn to rewrite");
             }
 
-            last_reply.content = text.clone();
-            if let Some(first_chunk) = last_reply.chunks.first_mut() {
-                first_chunk.content = text.clone();
-            }
-
-            frankclaw_gateway::delivery::set_last_reply_in_metadata(&mut entry.metadata, &last_reply)
-                .context("failed to update delivery metadata")?;
+            rewrite_last_reply_metadata_for_edit(&mut entry.metadata, &text)?;
             sessions.upsert(&entry).await?;
 
             println!("Edited last reply for session {}.", session_key);
@@ -548,7 +542,7 @@ async fn main() -> anyhow::Result<()> {
                 .get(&session_key)
                 .await?
                 .context("session not found")?;
-            let mut last_reply = frankclaw_gateway::delivery::last_reply_from_metadata(&entry.metadata)
+            let last_reply = frankclaw_gateway::delivery::last_reply_from_metadata(&entry.metadata)
                 .context("session has no tracked delivery metadata")?;
 
             let channels = frankclaw_channels::load_from_config(&config)
@@ -558,25 +552,7 @@ async fn main() -> anyhow::Result<()> {
                 .cloned()
                 .with_context(|| format!("channel '{}' is not configured", entry.channel))?;
 
-            let targets = if last_reply.chunks.is_empty() {
-                last_reply
-                    .platform_message_id
-                    .clone()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            } else {
-                last_reply
-                    .chunks
-                    .iter()
-                    .filter_map(|chunk| chunk.platform_message_id.clone())
-                    .collect::<Vec<_>>()
-            };
-
-            if targets.is_empty() {
-                anyhow::bail!("tracked reply is missing platform message ids");
-            }
-
-            for platform_message_id in targets {
+            for platform_message_id in delete_targets_from_last_reply(&last_reply)? {
                 channel
                     .delete_message(&DeleteMessageTarget {
                         account_id: last_reply.account_id.clone(),
@@ -587,14 +563,7 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
             }
 
-            last_reply.status = "deleted".into();
-            last_reply.platform_message_id = None;
-            for chunk in &mut last_reply.chunks {
-                chunk.status = "deleted".into();
-                chunk.platform_message_id = None;
-            }
-            frankclaw_gateway::delivery::set_last_reply_in_metadata(&mut entry.metadata, &last_reply)
-                .context("failed to update delivery metadata")?;
+            mark_last_reply_metadata_deleted(&mut entry.metadata)?;
             sessions.upsert(&entry).await?;
 
             println!("Deleted last reply for session {}.", session_key);
@@ -1234,6 +1203,69 @@ fn render_systemd_unit(
     )
 }
 
+fn rewrite_last_reply_metadata_for_edit(
+    metadata: &mut serde_json::Value,
+    new_text: &str,
+) -> anyhow::Result<frankclaw_gateway::delivery::StoredReplyMetadata> {
+    let mut last_reply = frankclaw_gateway::delivery::last_reply_from_metadata(metadata)
+        .context("session has no tracked delivery metadata")?;
+
+    if last_reply.chunks.len() > 1 {
+        anyhow::bail!("editing chunked replies is not supported yet");
+    }
+
+    last_reply.content = new_text.to_string();
+    if let Some(first_chunk) = last_reply.chunks.first_mut() {
+        first_chunk.content = new_text.to_string();
+    }
+
+    frankclaw_gateway::delivery::set_last_reply_in_metadata(metadata, &last_reply)
+        .context("failed to update delivery metadata")?;
+    Ok(last_reply)
+}
+
+fn delete_targets_from_last_reply(
+    last_reply: &frankclaw_gateway::delivery::StoredReplyMetadata,
+) -> anyhow::Result<Vec<String>> {
+    let targets = if last_reply.chunks.is_empty() {
+        last_reply
+            .platform_message_id
+            .clone()
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        last_reply
+            .chunks
+            .iter()
+            .filter_map(|chunk| chunk.platform_message_id.clone())
+            .collect::<Vec<_>>()
+    };
+
+    if targets.is_empty() {
+        anyhow::bail!("tracked reply is missing platform message ids");
+    }
+
+    Ok(targets)
+}
+
+fn mark_last_reply_metadata_deleted(
+    metadata: &mut serde_json::Value,
+) -> anyhow::Result<frankclaw_gateway::delivery::StoredReplyMetadata> {
+    let mut last_reply = frankclaw_gateway::delivery::last_reply_from_metadata(metadata)
+        .context("session has no tracked delivery metadata")?;
+
+    last_reply.status = "deleted".into();
+    last_reply.platform_message_id = None;
+    for chunk in &mut last_reply.chunks {
+        chunk.status = "deleted".into();
+        chunk.platform_message_id = None;
+    }
+
+    frankclaw_gateway::delivery::set_last_reply_in_metadata(metadata, &last_reply)
+        .context("failed to update delivery metadata")?;
+    Ok(last_reply)
+}
+
 fn display_skill_capability(
     capability: &frankclaw_plugin_sdk::SkillCapability,
 ) -> &'static str {
@@ -1319,6 +1351,34 @@ mod tests {
     use super::*;
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
     use frankclaw_core::types::ChannelId;
+
+    fn reply_metadata_json(
+        chunks: Vec<frankclaw_gateway::delivery::StoredReplyChunk>,
+    ) -> serde_json::Value {
+        let reply = frankclaw_gateway::delivery::StoredReplyMetadata {
+            channel: "telegram".into(),
+            account_id: "default".into(),
+            recipient_id: "user-1".into(),
+            thread_id: Some("thread-1".into()),
+            reply_to: Some("incoming-1".into()),
+            content: "old reply".into(),
+            platform_message_id: Some("msg-1".into()),
+            status: "sent".into(),
+            attempts: 1,
+            retry_after_secs: None,
+            error: None,
+            chunks,
+            recorded_at: chrono::Utc::now(),
+        };
+        serde_json::json!({
+            "delivery": {
+                "last_reply": reply
+            },
+            "other": {
+                "preserve": true
+            }
+        })
+    }
 
     #[test]
     fn onboard_whatsapp_profile_uses_env_refs_and_token_auth() {
@@ -1441,6 +1501,108 @@ mod tests {
             .any(|warning| warning.contains("accepts group messages without mention gating")));
 
         let _ = std::fs::remove_dir_all(existing_state_dir);
+    }
+
+    #[test]
+    fn rewrite_last_reply_metadata_for_edit_updates_content_and_preserves_other_metadata() {
+        let mut metadata = reply_metadata_json(vec![frankclaw_gateway::delivery::StoredReplyChunk {
+            content: "old reply".into(),
+            platform_message_id: Some("msg-1".into()),
+            status: "sent".into(),
+            attempts: 1,
+            retry_after_secs: None,
+            error: None,
+        }]);
+
+        let rewritten = rewrite_last_reply_metadata_for_edit(&mut metadata, "new reply")
+            .expect("metadata rewrite should succeed");
+
+        assert_eq!(rewritten.content, "new reply");
+        assert_eq!(rewritten.chunks[0].content, "new reply");
+        assert_eq!(metadata["other"]["preserve"], serde_json::json!(true));
+        assert_eq!(
+            frankclaw_gateway::delivery::last_reply_from_metadata(&metadata)
+                .expect("last reply should exist")
+                .content,
+            "new reply"
+        );
+    }
+
+    #[test]
+    fn rewrite_last_reply_metadata_for_edit_rejects_chunked_replies() {
+        let mut metadata = reply_metadata_json(vec![
+            frankclaw_gateway::delivery::StoredReplyChunk {
+                content: "first".into(),
+                platform_message_id: Some("msg-1".into()),
+                status: "sent".into(),
+                attempts: 1,
+                retry_after_secs: None,
+                error: None,
+            },
+            frankclaw_gateway::delivery::StoredReplyChunk {
+                content: "second".into(),
+                platform_message_id: Some("msg-2".into()),
+                status: "sent".into(),
+                attempts: 1,
+                retry_after_secs: None,
+                error: None,
+            },
+        ]);
+
+        let err = rewrite_last_reply_metadata_for_edit(&mut metadata, "new reply")
+            .expect_err("chunked replies should be rejected");
+
+        assert!(err.to_string().contains("chunked replies"));
+    }
+
+    #[test]
+    fn delete_targets_from_last_reply_prefers_chunk_ids_when_present() {
+        let metadata = reply_metadata_json(vec![
+            frankclaw_gateway::delivery::StoredReplyChunk {
+                content: "first".into(),
+                platform_message_id: Some("msg-1".into()),
+                status: "sent".into(),
+                attempts: 1,
+                retry_after_secs: None,
+                error: None,
+            },
+            frankclaw_gateway::delivery::StoredReplyChunk {
+                content: "second".into(),
+                platform_message_id: Some("msg-2".into()),
+                status: "sent".into(),
+                attempts: 1,
+                retry_after_secs: None,
+                error: None,
+            },
+        ]);
+        let last_reply = frankclaw_gateway::delivery::last_reply_from_metadata(&metadata)
+            .expect("last reply should exist");
+
+        let targets = delete_targets_from_last_reply(&last_reply)
+            .expect("delete targets should resolve");
+
+        assert_eq!(targets, vec!["msg-1".to_string(), "msg-2".to_string()]);
+    }
+
+    #[test]
+    fn mark_last_reply_metadata_deleted_clears_platform_ids_and_marks_chunks() {
+        let mut metadata = reply_metadata_json(vec![frankclaw_gateway::delivery::StoredReplyChunk {
+            content: "old reply".into(),
+            platform_message_id: Some("msg-1".into()),
+            status: "sent".into(),
+            attempts: 1,
+            retry_after_secs: None,
+            error: None,
+        }]);
+
+        let deleted = mark_last_reply_metadata_deleted(&mut metadata)
+            .expect("metadata delete should succeed");
+
+        assert_eq!(deleted.status, "deleted");
+        assert!(deleted.platform_message_id.is_none());
+        assert_eq!(deleted.chunks[0].status, "deleted");
+        assert!(deleted.chunks[0].platform_message_id.is_none());
+        assert_eq!(metadata["other"]["preserve"], serde_json::json!(true));
     }
 
     #[test]

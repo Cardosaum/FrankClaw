@@ -821,6 +821,46 @@ mod tests {
     }
 
     #[test]
+    fn set_last_reply_in_metadata_roundtrips_and_preserves_other_fields() {
+        let reply = StoredReplyMetadata {
+            channel: "telegram".into(),
+            account_id: "default".into(),
+            recipient_id: "user-1".into(),
+            thread_id: Some("thread-1".into()),
+            reply_to: Some("incoming-1".into()),
+            content: "hello".into(),
+            platform_message_id: Some("msg-1".into()),
+            status: "sent".into(),
+            attempts: 1,
+            retry_after_secs: None,
+            error: None,
+            chunks: vec![StoredReplyChunk {
+                content: "hello".into(),
+                platform_message_id: Some("msg-1".into()),
+                status: "sent".into(),
+                attempts: 1,
+                retry_after_secs: None,
+                error: None,
+            }],
+            recorded_at: chrono::Utc::now(),
+        };
+        let mut metadata = serde_json::json!({
+            "other": {
+                "keep": true
+            }
+        });
+
+        set_last_reply_in_metadata(&mut metadata, &reply)
+            .expect("metadata update should serialize");
+
+        let loaded = last_reply_from_metadata(&metadata)
+            .expect("stored reply metadata should roundtrip");
+        assert_eq!(loaded.content, "hello");
+        assert_eq!(loaded.platform_message_id.as_deref(), Some("msg-1"));
+        assert_eq!(metadata["other"]["keep"], serde_json::json!(true));
+    }
+
+    #[test]
     fn hydrate_outbound_attachments_loads_bytes_from_media_store() {
         let temp_dir = std::env::temp_dir().join(format!(
             "frankclaw-delivery-media-{}",

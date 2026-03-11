@@ -103,7 +103,7 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 - [x] Unit and gateway coverage for Canvas export snapshots
 - [x] Unit coverage for bounded Canvas component blocks
 - [x] Coverage for onboarding/install helpers
-- [ ] Regression-focused tests for delivery metadata and session rewrites
+- [x] Regression-focused tests for delivery metadata and session rewrites
 
 ### Still Missing OpenClaw Breadth
 
