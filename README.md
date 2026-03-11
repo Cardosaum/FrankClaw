@@ -11,6 +11,7 @@ Current scope and parity status:
 - operator onboarding and install helpers
 
 For the remaining distance to OpenClaw feature parity, see [PARITY_TODO.md](PARITY_TODO.md) and [FEATURE_PLANS.md](FEATURE_PLANS.md).
+For concrete setup snippets for the supported channels and browser runtime, see [CHANNEL_SETUP.md](CHANNEL_SETUP.md).
 
 ## Features
 
