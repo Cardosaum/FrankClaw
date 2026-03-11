@@ -19,6 +19,7 @@ frankclaw-channels = { workspace = true }
 frankclaw-memory = { workspace = true }
 frankclaw-cron = { workspace = true }
 frankclaw-media = { workspace = true }
+frankclaw-tools = { workspace = true }
 frankclaw-plugin-sdk = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

@@ -8,6 +8,7 @@ license.workspace = true
 frankclaw-core = { workspace = true }
 frankclaw-models = { workspace = true }
 frankclaw-sessions = { workspace = true }
+frankclaw-tools = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 secrecy = { workspace = true }

@@ -88,6 +88,32 @@ enum Command {
     /// List available models from configured providers.
     ModelsList,
 
+    /// List tools allowed for an agent.
+    ToolsList {
+        /// Agent ID to inspect.
+        #[arg(long)]
+        agent: Option<String>,
+    },
+
+    /// Invoke an allowed read-only tool locally.
+    ToolsInvoke {
+        /// Tool name.
+        #[arg(long)]
+        tool: String,
+
+        /// Agent ID whose tool policy should be used.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Optional session key for session-scoped tools.
+        #[arg(long)]
+        session: Option<String>,
+
+        /// JSON object of tool arguments.
+        #[arg(long)]
+        args: Option<String>,
+    },
+
     /// Session inspection commands.
     SessionsList {
         /// Agent ID to list sessions for.
@@ -359,6 +385,50 @@ async fn main() -> anyhow::Result<()> {
             for model in runtime.list_models() {
                 println!("{} ({:?})", model.id, model.api);
             }
+        }
+
+        Command::ToolsList { agent } => {
+            let config = load_config(cli.config.as_deref(), &state_dir)?;
+            config.validate()?;
+            let sessions = open_sessions(&state_dir)?;
+            let runtime = build_runtime(&config, sessions).await?;
+            let tools = runtime.list_tools(
+                agent
+                    .as_ref()
+                    .map(|value| frankclaw_core::types::AgentId::new(value.clone()))
+                    .as_ref(),
+            )?;
+
+            for tool in tools {
+                println!("{} - {}", tool.name, tool.description);
+            }
+        }
+
+        Command::ToolsInvoke {
+            tool,
+            agent,
+            session,
+            args,
+        } => {
+            let config = load_config(cli.config.as_deref(), &state_dir)?;
+            config.validate()?;
+            let sessions = open_sessions(&state_dir)?;
+            let runtime = build_runtime(&config, sessions).await?;
+            let arguments = match args {
+                Some(raw) => serde_json::from_str(&raw)
+                    .context("tool args must be a valid JSON object")?,
+                None => serde_json::json!({}),
+            };
+
+            let output = runtime
+                .invoke_tool(frankclaw_runtime::ToolRequest {
+                    agent_id: agent.map(frankclaw_core::types::AgentId::new),
+                    session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
+                    tool_name: tool,
+                    arguments,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&output.output)?);
         }
 
         Command::SessionsList {

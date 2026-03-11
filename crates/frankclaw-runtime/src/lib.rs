@@ -17,6 +17,7 @@ use frankclaw_core::types::{AgentId, ChannelId, Role, SessionKey};
 use frankclaw_models::{
     AnthropicProvider, FailoverChain, OllamaProvider, OpenAiProvider,
 };
+use frankclaw_tools::{ToolContext, ToolOutput, ToolRegistry};
 
 pub struct Runtime {
     config: FrankClawConfig,
@@ -24,6 +25,7 @@ pub struct Runtime {
     models: FailoverChain,
     model_defs: Vec<ModelDef>,
     channel_ids: Vec<ChannelId>,
+    tools: ToolRegistry,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +44,14 @@ pub struct ChatResponse {
     pub model_id: String,
     pub content: String,
     pub usage: Usage,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolRequest {
+    pub agent_id: Option<AgentId>,
+    pub session_key: Option<SessionKey>,
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
 }
 
 impl Runtime {
@@ -79,6 +89,14 @@ impl Runtime {
                 }
             })
             .collect();
+        let tools = ToolRegistry::with_builtins();
+        for (agent_id, agent) in &config.agents.agents {
+            tools.validate_names(&agent.tools).map_err(|err| {
+                FrankClawError::ConfigValidation {
+                    msg: format!("agent '{}' has invalid tool config: {}", agent_id, err),
+                }
+            })?;
+        }
 
         Ok(Self {
             config: config.clone(),
@@ -86,6 +104,7 @@ impl Runtime {
             models,
             model_defs,
             channel_ids,
+            tools,
         })
     }
 
@@ -95,6 +114,11 @@ impl Runtime {
 
     pub fn list_channels(&self) -> &[ChannelId] {
         &self.channel_ids
+    }
+
+    pub fn list_tools(&self, agent_id: Option<&AgentId>) -> Result<Vec<frankclaw_core::model::ToolDef>> {
+        let (_, agent) = self.resolve_agent(agent_id)?;
+        self.tools.definitions(&agent.tools)
     }
 
     pub fn session_key_for_inbound(
@@ -189,6 +213,22 @@ impl Runtime {
             content: response.content,
             usage: response.usage,
         })
+    }
+
+    pub async fn invoke_tool(&self, request: ToolRequest) -> Result<ToolOutput> {
+        let (agent_id, agent) = self.resolve_agent(request.agent_id.as_ref())?;
+        self.tools
+            .invoke_allowed(
+                &agent.tools,
+                &request.tool_name,
+                request.arguments,
+                ToolContext {
+                    agent_id,
+                    session_key: request.session_key,
+                    sessions: self.sessions.clone(),
+                },
+            )
+            .await
     }
 
     fn resolve_agent(&self, requested: Option<&AgentId>) -> Result<(AgentId, AgentDef)> {
@@ -492,6 +532,59 @@ mod tests {
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript[0].role, Role::User);
         assert_eq!(transcript[1].role, Role::Assistant);
+
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[tokio::test]
+    async fn runtime_invokes_allowed_tool() {
+        let temp = std::env::temp_dir().join(format!(
+            "frankclaw-runtime-tools-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let sessions = Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let mut config = FrankClawConfig::default();
+        config.agents.agents.get_mut(&AgentId::default_agent()).unwrap().tools =
+            vec!["session.inspect".into()];
+        let runtime = Runtime::from_providers(
+            &config,
+            sessions.clone() as Arc<dyn SessionStore>,
+            vec![Arc::new(MockProvider {
+                id: "primary".into(),
+                model_id: "mock-primary".into(),
+                response: Some("reply".into()),
+            })],
+        )
+        .await
+        .expect("runtime should build");
+
+        let chat = runtime
+            .chat(ChatRequest {
+                agent_id: None,
+                session_key: None,
+                message: "hello".into(),
+                model_id: Some("mock-primary".into()),
+                max_tokens: None,
+                temperature: None,
+            })
+            .await
+            .expect("chat should succeed");
+
+        let tool = runtime
+            .invoke_tool(ToolRequest {
+                agent_id: None,
+                session_key: Some(chat.session_key.clone()),
+                tool_name: "session.inspect".into(),
+                arguments: serde_json::json!({ "limit": 5 }),
+            })
+            .await
+            .expect("tool should run");
+
+        assert_eq!(tool.name, "session.inspect");
+        assert_eq!(
+            tool.output["session"]["key"],
+            serde_json::json!(chat.session_key.as_str())
+        );
 
         let _ = std::fs::remove_file(temp);
     }

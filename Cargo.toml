@@ -11,6 +11,7 @@ members = [
     "crates/frankclaw-memory",
     "crates/frankclaw-cron",
     "crates/frankclaw-media",
+    "crates/frankclaw-tools",
     "crates/frankclaw-plugin-sdk",
     "crates/frankclaw-cli",
 ]
@@ -118,6 +119,7 @@ frankclaw-channels = { path = "crates/frankclaw-channels" }
 frankclaw-memory = { path = "crates/frankclaw-memory" }
 frankclaw-cron = { path = "crates/frankclaw-cron" }
 frankclaw-media = { path = "crates/frankclaw-media" }
+frankclaw-tools = { path = "crates/frankclaw-tools" }
 frankclaw-plugin-sdk = { path = "crates/frankclaw-plugin-sdk" }
 
 [profile.release]

@@ -1,0 +1,15 @@
+[package]
+name = "frankclaw-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+frankclaw-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
