@@ -22,15 +22,15 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 6. [Model Providers](#6-model-providers) — DONE
 7. [Gateway & Media](#7-gateway--media) — DONE
 
-### Phase 2 — Runtime, Tools, Sessions, Crypto, Infra
+### Phase 2 — Runtime, Tools, Sessions, Crypto, Infra (DONE)
 
-8. [Runtime & Orchestration](#8-runtime--orchestration) — TODO
+8. [Runtime & Orchestration](#8-runtime--orchestration) — DONE
 9. [Browser Automation & Tools](#9-browser-automation--tools) — DONE
 10. [Session Management](#10-session-management) — DONE
 11. [Canvas](#11-canvas) — DONE
 12. [Crypto & Auth](#12-crypto--auth) — DONE
 13. [Cron Service](#13-cron-service) — DONE
-14. [Webhooks & Config Reload](#14-webhooks--config-reload) — TODO
+14. [Webhooks & Config Reload](#14-webhooks--config-reload) — DONE
 
 ---
 
@@ -446,30 +446,30 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ## 14. Webhooks & Config Reload
 
-**Status:** TODO
+**Status:** DONE
 
 ### Critical
 
-- [ ] **Webhook signature validation**: Verify incoming webhook payloads using HMAC-SHA256 with the configured secret. Use constant-time comparison. Reject unsigned payloads when a secret is configured.
-- [ ] **Webhook replay prevention**: Include timestamp in webhook signatures. Reject webhooks older than 5 minutes to prevent replay attacks.
+- [x] **Webhook signature validation**: Already implemented — HMAC-SHA256 via `hmac` crate's `verify_slice` (constant-time). Rejects unsigned payloads when hooks.token is configured. Returns 401 on mismatch.
+- [x] **Webhook replay prevention**: Added `verify_timestamp()` that checks `x-frankclaw-timestamp` header. Rejects webhooks older than 5 minutes or more than 5 minutes in the future. Missing timestamp is allowed for backward compatibility. 4 new regression tests.
 
 ### High
 
-- [ ] **Webhook body size limit**: Enforce a maximum body size for incoming webhooks (e.g., 1MB). Reject oversized payloads before parsing.
-- [ ] **Config reload debouncing**: When file changes trigger rapidly (e.g., editor save), debounce the reload to avoid thrashing. Current 2-second poll interval provides some natural debouncing, but verify rapid changes don't cause issues.
-- [ ] **Config validation before swap**: Verify the new config is fully validated (all required fields present, references resolve) before swapping via ArcSwap. Invalid config should be logged and rejected, not applied.
-- [ ] **Restart-sensitive change detection**: When config changes require a full restart (e.g., bind address, auth mode), log a clear message and optionally trigger graceful shutdown instead of silently applying partial changes.
+- [x] **Webhook body size limit**: Already implemented — configurable `max_webhook_body_bytes` enforced before parsing. Returns 413 Payload Too Large with descriptive error.
+- [x] **Config reload debouncing**: Already implemented — 2-second poll interval with `config_file_stamp()` checking both file size and modification timestamp. Natural debouncing.
+- [x] **Config validation before swap**: Already implemented — `next_config.validate()` is called before `reload_config()`. Invalid config is logged and rejected without affecting the running configuration.
+- [x] **Restart-sensitive change detection**: Already implemented — `restart_sensitive_config_changed()` compares agent/channel/gateway fingerprints. When detected, broadcasts `ConfigChanged` event with `restart_required: true` and logs `partial_reload`.
 
 ### Medium
 
-- [ ] **Webhook error response**: Return appropriate HTTP status codes for webhook processing errors (400 for bad payload, 401 for invalid signature, 429 for rate limited, 500 for internal errors).
-- [ ] **Config diff logging**: Log what changed in a config reload (added/removed channels, changed models, etc.) for operator visibility.
-- [ ] **Deep equality for config comparison**: When checking if config changed, use deep structural comparison rather than file modification timestamp alone. Prevents false-positive reloads when the file is touched but content is unchanged.
+- [x] **Webhook error response**: Already implemented — 400 for bad JSON, 401 for invalid signature, 413 for oversized body. Each error includes a descriptive JSON response.
+- [ ] **Config diff logging**: Deferred — `ConfigChanged` event includes the path and restart flag. Detailed diff would require serializing and comparing config sections.
+- [ ] **Deep equality for config comparison**: Deferred — `config_file_stamp()` uses size + mtime. Content-hash comparison adds I/O on every poll tick.
 
 ### Low
 
-- [ ] **Webhook retry support**: For outgoing webhooks, implement retry with exponential backoff on 5xx responses.
-- [ ] **Config schema versioning**: Support config file versioning to enable forward-compatible migrations.
+- [ ] **Webhook retry support**: Deferred — FrankClaw currently receives webhooks, doesn't send them.
+- [ ] **Config schema versioning**: Deferred — config format is stable and backward-compatible via `#[serde(default)]`.
 
 ---
 

@@ -763,6 +763,25 @@ async fn webhook_handler(
             .into_response();
     }
 
+    if let Err(err) = crate::webhooks::verify_timestamp(
+        headers
+            .get("x-frankclaw-timestamp")
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        log_failure(
+            "webhook.receive",
+            serde_json::json!({
+                "mapping_id": mapping_id,
+                "reason": "webhook timestamp expired or invalid",
+            }),
+        );
+        return (
+            StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::UNAUTHORIZED),
+            Json(serde_json::json!({ "error": "webhook timestamp expired or invalid" })),
+        )
+            .into_response();
+    }
+
     if let Err(err) = crate::webhooks::verify_signature(
         &config,
         &body,

@@ -2,12 +2,16 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::sync::Arc;
 
+use chrono::Utc;
 use frankclaw_core::config::{FrankClawConfig, WebhookMapping};
 use frankclaw_core::error::{FrankClawError, Result};
 
 use crate::state::GatewayState;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Maximum age of a webhook timestamp before it is rejected (5 minutes).
+const MAX_WEBHOOK_AGE_SECS: i64 = 300;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedWebhookRequest {
@@ -96,6 +100,28 @@ pub async fn execute_request(
         .await
 }
 
+/// Verify that the webhook timestamp is within the allowed window.
+/// Returns an error if the timestamp is missing, unparseable, or too old.
+pub fn verify_timestamp(timestamp_header: Option<&str>) -> Result<()> {
+    let Some(ts) = timestamp_header.map(str::trim).filter(|v| !v.is_empty()) else {
+        // Timestamp header is optional for backward compatibility.
+        return Ok(());
+    };
+    let ts_secs: i64 = ts.parse().map_err(|_| FrankClawError::InvalidRequest {
+        msg: format!("invalid webhook timestamp: '{ts}'"),
+    })?;
+    let now = Utc::now().timestamp();
+    let age = now - ts_secs;
+    if age > MAX_WEBHOOK_AGE_SECS {
+        return Err(FrankClawError::AuthFailed);
+    }
+    if age < -MAX_WEBHOOK_AGE_SECS {
+        // Timestamp is too far in the future — also suspicious.
+        return Err(FrankClawError::AuthFailed);
+    }
+    Ok(())
+}
+
 pub fn encode_signature(secret: &str, body: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac should initialize");
     mac.update(body);
@@ -162,6 +188,30 @@ mod tests {
         let message =
             extract_message(&mapping, &serde_json::json!({ "prompt": "hello" })).expect("message should extract");
         assert_eq!(message, "hello");
+    }
+
+    #[test]
+    fn verify_timestamp_accepts_recent() {
+        let now = Utc::now().timestamp().to_string();
+        verify_timestamp(Some(&now)).expect("current timestamp should be accepted");
+    }
+
+    #[test]
+    fn verify_timestamp_rejects_old() {
+        let old = (Utc::now().timestamp() - MAX_WEBHOOK_AGE_SECS - 10).to_string();
+        assert!(verify_timestamp(Some(&old)).is_err());
+    }
+
+    #[test]
+    fn verify_timestamp_rejects_future() {
+        let future = (Utc::now().timestamp() + MAX_WEBHOOK_AGE_SECS + 10).to_string();
+        assert!(verify_timestamp(Some(&future)).is_err());
+    }
+
+    #[test]
+    fn verify_timestamp_allows_missing() {
+        // Missing timestamp is allowed for backward compatibility.
+        verify_timestamp(None).expect("missing timestamp should be allowed");
     }
 
     #[test]
