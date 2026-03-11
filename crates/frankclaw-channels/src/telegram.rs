@@ -8,6 +8,7 @@ use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::types::ChannelId;
 
 use crate::media_text::text_or_attachment_placeholder;
+use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
@@ -366,9 +367,10 @@ fn encode_thread_id(chat_id: i64, topic_id: Option<i64>) -> String {
 
 fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
     let (chat_id, topic_id) = parse_target_thread(msg.thread_id.as_deref(), &msg.to);
+    let text = normalize_outbound_text(&msg.text, OutboundTextFlavor::Plain);
     let mut body = serde_json::json!({
         "chat_id": chat_id,
-        "text": msg.text,
+        "text": text,
         "parse_mode": "Markdown",
     });
 
@@ -388,6 +390,7 @@ fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
 
 fn build_edit_body(target: &EditMessageTarget, new_text: &str) -> Result<serde_json::Value> {
     let (chat_id, _) = parse_target_thread(target.thread_id.as_deref(), &target.to);
+    let text = normalize_outbound_text(new_text, OutboundTextFlavor::Plain);
     let message_id = target
         .platform_message_id
         .parse::<i64>()
@@ -399,7 +402,7 @@ fn build_edit_body(target: &EditMessageTarget, new_text: &str) -> Result<serde_j
     Ok(serde_json::json!({
         "chat_id": chat_id,
         "message_id": message_id,
-        "text": new_text,
+        "text": text,
         "parse_mode": "Markdown",
     }))
 }
@@ -506,6 +509,21 @@ mod tests {
         });
 
         assert_eq!(body["reply_to_message_id"], serde_json::json!(99));
+    }
+
+    #[test]
+    fn build_send_body_trims_plain_outbound_text() {
+        let body = build_send_body(&OutboundMessage {
+            channel: ChannelId::new("telegram"),
+            account_id: "default".into(),
+            to: "42".into(),
+            thread_id: None,
+            text: "\n hello \r\n".into(),
+            attachments: Vec::new(),
+            reply_to: None,
+        });
+
+        assert_eq!(body["text"], serde_json::json!("hello"));
     }
 
     #[test]

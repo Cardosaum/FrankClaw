@@ -10,6 +10,7 @@ use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::types::ChannelId;
 
 use crate::media_text::text_or_attachment_placeholder;
+use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
 
 const WHATSAPP_GRAPH_BASE: &str = "https://graph.facebook.com/v19.0";
 type HmacSha256 = Hmac<Sha256>;
@@ -291,13 +292,14 @@ fn build_inbound_attachments(message: &serde_json::Value) -> Vec<InboundAttachme
 }
 
 pub fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
+    let text = normalize_outbound_text(&msg.text, OutboundTextFlavor::WhatsApp);
     let mut body = serde_json::json!({
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
         "to": msg.to,
         "type": "text",
         "text": {
-            "body": msg.text,
+            "body": text,
             "preview_url": false
         }
     });
@@ -428,6 +430,36 @@ mod tests {
         assert_eq!(body["to"], serde_json::json!("15551234567"));
         assert_eq!(body["text"]["body"], serde_json::json!("hello"));
         assert_eq!(body["context"]["message_id"], serde_json::json!("wamid.1"));
+    }
+
+    #[test]
+    fn build_send_body_normalizes_whatsapp_text_formatting() {
+        let body = build_send_body(&OutboundMessage {
+            channel: ChannelId::new("whatsapp"),
+            account_id: "12345".into(),
+            to: "15551234567".into(),
+            thread_id: None,
+            text: "\n**bold** and ~~strike~~\n".into(),
+            attachments: Vec::new(),
+            reply_to: None,
+        });
+
+        assert_eq!(body["text"]["body"], serde_json::json!("*bold* and ~strike~"));
+    }
+
+    #[test]
+    fn build_send_body_drops_reasoning_preamble_when_final_text_is_present() {
+        let body = build_send_body(&OutboundMessage {
+            channel: ChannelId::new("whatsapp"),
+            account_id: "12345".into(),
+            to: "15551234567".into(),
+            thread_id: None,
+            text: "Reasoning:\n- private notes\n\nVisible answer".into(),
+            attachments: Vec::new(),
+            reply_to: None,
+        });
+
+        assert_eq!(body["text"]["body"], serde_json::json!("Visible answer"));
     }
 
     #[test]

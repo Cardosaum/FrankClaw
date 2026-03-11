@@ -8,6 +8,7 @@ use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::types::ChannelId;
 
 use crate::media_text::text_quote_or_attachment_placeholder;
+use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
 
 const SIGNAL_API_PATH_CHECK: &str = "/api/v1/check";
 const SIGNAL_API_PATH_EVENTS: &str = "/api/v1/events";
@@ -500,8 +501,9 @@ fn detect_group_mention(mentions: Option<&[SignalMention]>, configured_account: 
 }
 
 fn build_send_request(msg: &OutboundMessage, account: Option<&str>) -> serde_json::Value {
+    let text = normalize_outbound_text(&msg.text, OutboundTextFlavor::Plain);
     let mut params = serde_json::json!({
-        "message": msg.text,
+        "message": text,
     });
 
     if let Some(account) = account {
@@ -677,6 +679,24 @@ mod tests {
         assert_eq!(body["method"], serde_json::json!("send"));
         assert_eq!(body["params"]["groupId"], serde_json::json!("group-42"));
         assert_eq!(body["params"]["account"], serde_json::json!("+15551234567"));
+        assert_eq!(body["params"]["message"], serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn build_send_request_trims_plain_outbound_text() {
+        let body = build_send_request(
+            &OutboundMessage {
+                channel: ChannelId::new("signal"),
+                account_id: "default".into(),
+                to: "+15550001111".into(),
+                thread_id: None,
+                text: "\n hello \r\n".into(),
+                attachments: Vec::new(),
+                reply_to: None,
+            },
+            Some("+15551234567"),
+        );
+
         assert_eq!(body["params"]["message"], serde_json::json!("hello"));
     }
 }

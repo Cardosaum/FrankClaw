@@ -13,6 +13,8 @@ use frankclaw_core::channel::*;
 use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::types::ChannelId;
 
+use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
+
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const DISCORD_GATEWAY_VERSION: &str = "10";
 const DISCORD_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
@@ -477,8 +479,9 @@ fn parse_message_create(
 }
 
 fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
+    let text = normalize_outbound_text(&msg.text, OutboundTextFlavor::Plain);
     let mut body = serde_json::json!({
-        "content": msg.text,
+        "content": text,
         "allowed_mentions": {
             "parse": []
         }
@@ -493,9 +496,10 @@ fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
 }
 
 fn build_edit_request(target: &EditMessageTarget, new_text: &str) -> (String, serde_json::Value) {
+    let text = normalize_outbound_text(new_text, OutboundTextFlavor::Plain);
     (
         target.thread_id.clone().unwrap_or_else(|| target.to.clone()),
-        serde_json::json!({ "content": new_text }),
+        serde_json::json!({ "content": text }),
     )
 }
 
@@ -557,6 +561,21 @@ mod tests {
             to: "chan-1".into(),
             thread_id: None,
             text: "hello".into(),
+            attachments: Vec::new(),
+            reply_to: None,
+        });
+
+        assert_eq!(body["content"], serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn build_send_body_trims_plain_outbound_text() {
+        let body = build_send_body(&OutboundMessage {
+            channel: ChannelId::new("discord"),
+            account_id: "default".into(),
+            to: "chan-1".into(),
+            thread_id: None,
+            text: "\n hello \r\n".into(),
             attachments: Vec::new(),
             reply_to: None,
         });

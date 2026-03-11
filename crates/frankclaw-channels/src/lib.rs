@@ -2,6 +2,7 @@
 
 pub mod discord;
 mod media_text;
+mod outbound_text;
 pub mod signal;
 pub mod slack;
 pub mod telegram;
