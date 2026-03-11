@@ -10,7 +10,7 @@ use frankclaw_core::config::{AgentDef, FrankClawConfig, ProviderConfig};
 use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::channel::InboundMessage;
 use frankclaw_core::model::{
-    CompletionMessage, CompletionRequest, ModelDef, ModelProvider, Usage,
+    CompletionMessage, CompletionRequest, ModelDef, ModelProvider, ToolCallResponse, Usage,
 };
 use frankclaw_core::session::{SessionEntry, SessionStore, TranscriptEntry};
 use frankclaw_core::types::{AgentId, ChannelId, Role, SessionKey};
@@ -55,6 +55,9 @@ pub struct ToolRequest {
     pub tool_name: String,
     pub arguments: serde_json::Value,
 }
+
+const MAX_TOOL_ROUNDS: usize = 4;
+const MAX_TOOL_CALLS_PER_TURN: usize = 8;
 
 impl Runtime {
     pub async fn from_config(
@@ -163,11 +166,12 @@ impl Runtime {
         let model_id = self.resolve_model_id(&agent, request.model_id.as_deref())?;
         let session_key = self.resolve_session_key(&agent_id, request.session_key)?;
         let history = self.sessions.get_transcript(&session_key, 200, None).await?;
-        let next_seq = history.last().map(|entry| entry.seq + 1).unwrap_or(1);
+        let mut next_seq = history.last().map(|entry| entry.seq + 1).unwrap_or(1);
+        let allowed_tools = self.tools.definitions(&agent.tools)?;
 
         self.ensure_session(&session_key, &agent_id).await?;
 
-        let request_messages = history
+        let mut request_messages: Vec<CompletionMessage> = history
             .iter()
             .map(|entry| CompletionMessage {
                 role: entry.role,
@@ -179,52 +183,127 @@ impl Runtime {
             }))
             .collect();
 
-        self.sessions
-            .append_transcript(
+        self.append_transcript_entry(&session_key, next_seq, Role::User, request.message, None)
+            .await?;
+        next_seq += 1;
+
+        let system_prompt = self.build_system_prompt(&agent_id, &agent);
+        let mut remaining_tool_calls = MAX_TOOL_CALLS_PER_TURN;
+
+        for _round in 0..=MAX_TOOL_ROUNDS {
+            let response = self
+                .models
+                .complete(
+                    CompletionRequest {
+                        model_id: model_id.clone(),
+                        messages: request_messages.clone(),
+                        max_tokens: request.max_tokens,
+                        temperature: request.temperature,
+                        system: system_prompt.clone(),
+                        tools: allowed_tools.clone(),
+                    },
+                    None,
+                )
+                .await?;
+
+            if response.tool_calls.is_empty() {
+                self.append_transcript_entry(
+                    &session_key,
+                    next_seq,
+                    Role::Assistant,
+                    response.content.clone(),
+                    None,
+                )
+                .await?;
+                return Ok(ChatResponse {
+                    session_key,
+                    model_id,
+                    content: response.content,
+                    usage: response.usage,
+                });
+            }
+
+            if response.tool_calls.len() > remaining_tool_calls {
+                return Err(FrankClawError::AgentRuntime {
+                    msg: format!(
+                        "model requested too many tool calls in one turn (max {})",
+                        MAX_TOOL_CALLS_PER_TURN
+                    ),
+                });
+            }
+
+            let tool_call_count = response.tool_calls.len();
+            let assistant_message =
+                build_tool_request_message(&response.content, &response.tool_calls);
+            self.append_transcript_entry(
                 &session_key,
-                &TranscriptEntry {
-                    seq: next_seq,
-                    role: Role::User,
-                    content: request.message,
-                    timestamp: Utc::now(),
-                    metadata: None,
-                },
+                next_seq,
+                Role::Assistant,
+                assistant_message.clone(),
+                Some(serde_json::json!({
+                    "tool_calls": response
+                        .tool_calls
+                        .iter()
+                        .map(|call| serde_json::json!({
+                            "id": call.id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        }))
+                        .collect::<Vec<_>>(),
+                })),
             )
             .await?;
+            request_messages.push(CompletionMessage {
+                role: Role::Assistant,
+                content: assistant_message,
+            });
+            next_seq += 1;
 
-        let response = self
-            .models
-            .complete(
-                CompletionRequest {
-                    model_id: model_id.clone(),
-                    messages: request_messages,
-                    max_tokens: request.max_tokens,
-                    temperature: request.temperature,
-                    system: self.build_system_prompt(&agent_id, &agent),
-                    tools: Vec::new(),
-                },
-                None,
-            )
-            .await?;
+            for tool_call in response.tool_calls {
+                let arguments = parse_tool_arguments(&tool_call)?;
+                let tool_output = self
+                    .tools
+                    .invoke_allowed(
+                        &agent.tools,
+                        &tool_call.name,
+                        arguments,
+                        ToolContext {
+                            agent_id: agent_id.clone(),
+                            session_key: Some(session_key.clone()),
+                            sessions: self.sessions.clone(),
+                        },
+                    )
+                    .await?;
+                let tool_content = serde_json::to_string(&serde_json::json!({
+                    "tool": tool_output.name,
+                    "output": tool_output.output,
+                }))
+                .map_err(|err| FrankClawError::Internal {
+                    msg: format!("failed to serialize tool output: {err}"),
+                })?;
+                self.append_transcript_entry(
+                    &session_key,
+                    next_seq,
+                    Role::Tool,
+                    tool_content.clone(),
+                    Some(serde_json::json!({
+                        "tool_name": tool_call.name,
+                        "tool_call_id": tool_call.id,
+                    })),
+                )
+                .await?;
+                request_messages.push(CompletionMessage {
+                    role: Role::Tool,
+                    content: tool_content,
+                });
+                next_seq += 1;
+            }
 
-        self.sessions
-            .append_transcript(
-                &session_key,
-                &TranscriptEntry {
-                    seq: next_seq + 1,
-                    role: Role::Assistant,
-                    content: response.content.clone(),
-                    timestamp: Utc::now(),
-                    metadata: None,
-                },
-            )
-            .await?;
+            remaining_tool_calls -= tool_call_count;
+        }
 
-        Ok(ChatResponse {
-            session_key,
-            model_id,
-            content: response.content,
-            usage: response.usage,
+        Err(FrankClawError::AgentRuntime {
+            msg: format!("tool round limit exceeded (max {})", MAX_TOOL_ROUNDS),
         })
     }
 
@@ -360,6 +439,49 @@ impl Runtime {
             })
             .await
     }
+
+    async fn append_transcript_entry(
+        &self,
+        session_key: &SessionKey,
+        seq: u64,
+        role: Role,
+        content: String,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.sessions
+            .append_transcript(
+                session_key,
+                &TranscriptEntry {
+                    seq,
+                    role,
+                    content,
+                    timestamp: Utc::now(),
+                    metadata,
+                },
+            )
+            .await
+    }
+}
+
+fn build_tool_request_message(content: &str, tool_calls: &[ToolCallResponse]) -> String {
+    let mut segments = Vec::new();
+    let trimmed = content.trim();
+    if !trimmed.is_empty() {
+        segments.push(trimmed.to_string());
+    }
+    for call in tool_calls {
+        segments.push(format!("[tool_call:{} {}]", call.name, call.arguments));
+    }
+    segments.join("\n")
+}
+
+fn parse_tool_arguments(tool_call: &ToolCallResponse) -> Result<serde_json::Value> {
+    serde_json::from_str(&tool_call.arguments).map_err(|err| FrankClawError::AgentRuntime {
+        msg: format!(
+            "model produced invalid arguments for tool '{}': {}",
+            tool_call.name, err
+        ),
+    })
 }
 
 fn build_providers(
@@ -478,16 +600,65 @@ mod tests {
     use async_trait::async_trait;
     use frankclaw_core::model::{
         CompletionResponse, FinishReason, InputModality, ModelApi, ModelCompat, ModelCost,
+        ToolCallResponse, ToolDef,
     };
     use frankclaw_core::session::SessionStore;
     use frankclaw_sessions::SqliteSessionStore;
+    use std::collections::VecDeque;
     use std::sync::Mutex;
+
+    #[derive(Debug, Clone)]
+    struct CapturedRequest {
+        messages: Vec<CompletionMessage>,
+        system: Option<String>,
+        tools: Vec<ToolDef>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockResponse {
+        content: String,
+        tool_calls: Vec<ToolCallResponse>,
+        finish_reason: FinishReason,
+    }
 
     struct MockProvider {
         id: String,
         model_id: String,
-        response: Option<String>,
-        seen_system: Mutex<Vec<Option<String>>>,
+        responses: Mutex<VecDeque<Option<MockResponse>>>,
+        seen_requests: Mutex<Vec<CapturedRequest>>,
+    }
+
+    impl MockProvider {
+        fn reply(id: &str, model_id: &str, content: &str) -> Self {
+            Self {
+                id: id.into(),
+                model_id: model_id.into(),
+                responses: Mutex::new(VecDeque::from([Some(MockResponse {
+                    content: content.into(),
+                    tool_calls: Vec::new(),
+                    finish_reason: FinishReason::Stop,
+                })])),
+                seen_requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn failing(id: &str, model_id: &str) -> Self {
+            Self {
+                id: id.into(),
+                model_id: model_id.into(),
+                responses: Mutex::new(VecDeque::from([None])),
+                seen_requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn scripted(id: &str, model_id: &str, responses: Vec<Option<MockResponse>>) -> Self {
+            Self {
+                id: id.into(),
+                model_id: model_id.into(),
+                responses: Mutex::new(responses.into()),
+                seen_requests: Mutex::new(Vec::new()),
+            }
+        }
     }
 
     #[async_trait]
@@ -501,21 +672,31 @@ mod tests {
             request: CompletionRequest,
             _stream_tx: Option<tokio::sync::mpsc::Sender<frankclaw_core::model::StreamDelta>>,
         ) -> Result<CompletionResponse> {
-            self.seen_system
+            self.seen_requests
                 .lock()
-                .expect("system capture should lock")
-                .push(request.system.clone());
-            match &self.response {
-                Some(content) => Ok(CompletionResponse {
-                    content: content.clone(),
-                    tool_calls: Vec::new(),
+                .expect("request capture should lock")
+                .push(CapturedRequest {
+                    messages: request.messages.clone(),
+                    system: request.system.clone(),
+                    tools: request.tools.clone(),
+                });
+            match self
+                .responses
+                .lock()
+                .expect("response queue should lock")
+                .pop_front()
+                .unwrap_or(None)
+            {
+                Some(response) => Ok(CompletionResponse {
+                    content: response.content,
+                    tool_calls: response.tool_calls,
                     usage: Usage {
                         input_tokens: 4,
                         output_tokens: 2,
                         cache_read_tokens: None,
                         cache_write_tokens: None,
                     },
-                    finish_reason: FinishReason::Stop,
+                    finish_reason: response.finish_reason,
                 }),
                 None => Err(FrankClawError::AllProvidersFailed),
             }
@@ -572,17 +753,13 @@ mod tests {
             sessions.clone() as Arc<dyn SessionStore>,
             vec![
                 Arc::new(MockProvider {
-                    id: "primary".into(),
-                    model_id: "mock-primary".into(),
-                    response: None,
-                    seen_system: Mutex::new(Vec::new()),
+                    ..MockProvider::failing("primary", "mock-primary")
                 }),
-                Arc::new(MockProvider {
-                    id: "secondary".into(),
-                    model_id: "mock-secondary".into(),
-                    response: Some("fallback reply".into()),
-                    seen_system: Mutex::new(Vec::new()),
-                }),
+                Arc::new(MockProvider::reply(
+                    "secondary",
+                    "mock-secondary",
+                    "fallback reply",
+                )),
             ],
         )
         .await
@@ -625,12 +802,11 @@ mod tests {
         let runtime = Runtime::from_providers(
             &config,
             sessions.clone() as Arc<dyn SessionStore>,
-            vec![Arc::new(MockProvider {
-                id: "primary".into(),
-                model_id: "mock-primary".into(),
-                response: Some("reply".into()),
-                seen_system: Mutex::new(Vec::new()),
-            })],
+            vec![Arc::new(MockProvider::reply(
+                "primary",
+                "mock-primary",
+                "reply",
+            ))],
         )
         .await
         .expect("runtime should build");
@@ -695,10 +871,7 @@ mod tests {
         agent.skills = vec!["briefing".into()];
 
         let provider = Arc::new(MockProvider {
-            id: "primary".into(),
-            model_id: "mock-primary".into(),
-            response: Some("reply".into()),
-            seen_system: Mutex::new(Vec::new()),
+            ..MockProvider::reply("primary", "mock-primary", "reply")
         });
         let runtime = Runtime::from_providers(
             &config,
@@ -720,15 +893,105 @@ mod tests {
             .await
             .expect("chat should succeed");
 
-        let seen = provider.seen_system.lock().expect("system capture should lock");
+        let seen = provider
+            .seen_requests
+            .lock()
+            .expect("request capture should lock");
         let system = seen
             .last()
-            .and_then(|value| value.clone())
+            .and_then(|value| value.system.clone())
             .expect("system prompt should be captured");
         assert!(system.contains("Base system"));
         assert!(system.contains("[Skill: Briefing]"));
         assert!(system.contains("Summarize in a terse operational style."));
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn runtime_executes_model_requested_tools_and_persists_trace() {
+        let temp = std::env::temp_dir().join(format!(
+            "frankclaw-runtime-tool-loop-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let sessions = Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let mut config = FrankClawConfig::default();
+        config.agents.agents.get_mut(&AgentId::default_agent()).unwrap().tools =
+            vec!["session.inspect".into()];
+
+        let provider = Arc::new(MockProvider::scripted(
+            "primary",
+            "mock-primary",
+            vec![
+                Some(MockResponse {
+                    content: String::new(),
+                    tool_calls: vec![ToolCallResponse {
+                        id: "call-1".into(),
+                        name: "session.inspect".into(),
+                        arguments: r#"{"limit":2}"#.into(),
+                    }],
+                    finish_reason: FinishReason::ToolUse,
+                }),
+                Some(MockResponse {
+                    content: "tool-backed reply".into(),
+                    tool_calls: Vec::new(),
+                    finish_reason: FinishReason::Stop,
+                }),
+            ],
+        ));
+        let runtime = Runtime::from_providers(
+            &config,
+            sessions.clone() as Arc<dyn SessionStore>,
+            vec![provider.clone()],
+        )
+        .await
+        .expect("runtime should build");
+
+        let response = runtime
+            .chat(ChatRequest {
+                agent_id: None,
+                session_key: None,
+                message: "inspect this session".into(),
+                model_id: Some("mock-primary".into()),
+                max_tokens: None,
+                temperature: None,
+            })
+            .await
+            .expect("chat should succeed");
+
+        assert_eq!(response.content, "tool-backed reply");
+
+        let transcript = sessions
+            .get_transcript(&response.session_key, 10, None)
+            .await
+            .expect("transcript should load");
+        assert_eq!(transcript.len(), 4);
+        assert_eq!(transcript[0].role, Role::User);
+        assert_eq!(transcript[1].role, Role::Assistant);
+        assert_eq!(transcript[2].role, Role::Tool);
+        assert_eq!(transcript[3].role, Role::Assistant);
+        assert_eq!(
+            transcript[1]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata["tool_calls"].as_array())
+                .map(|calls| calls.len()),
+            Some(1)
+        );
+        assert!(transcript[2].content.contains("\"session\""));
+
+        let seen = provider
+            .seen_requests
+            .lock()
+            .expect("request capture should lock");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].tools.len(), 1);
+        assert_eq!(seen[0].tools[0].name, "session.inspect");
+        assert!(seen[1]
+            .messages
+            .iter()
+            .any(|message| message.role == Role::Tool && message.content.contains("\"entries\"")));
+
+        let _ = std::fs::remove_file(temp);
     }
 }
