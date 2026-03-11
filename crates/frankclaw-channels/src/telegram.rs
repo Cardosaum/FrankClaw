@@ -450,6 +450,10 @@ struct TelegramMediaRequest {
 }
 
 fn build_media_send_request(msg: &OutboundMessage) -> Result<TelegramMediaRequest> {
+    if msg.attachments.len() > 1 {
+        return build_media_group_request(msg);
+    }
+
     let channel = ChannelId::new("telegram");
     let attachment = require_single_attachment(&channel, &msg.attachments)?;
     let bytes = attachment_bytes(&channel, attachment)?;
@@ -492,6 +496,72 @@ fn build_media_send_request(msg: &OutboundMessage) -> Result<TelegramMediaReques
     }
 
     Ok(TelegramMediaRequest { method, form })
+}
+
+fn build_media_group_request(msg: &OutboundMessage) -> Result<TelegramMediaRequest> {
+    let channel = ChannelId::new("telegram");
+    let (chat_id, topic_id) = parse_target_thread(msg.thread_id.as_deref(), &msg.to);
+    let text = normalize_outbound_text(&msg.text, OutboundTextFlavor::Plain);
+    let mut media = Vec::with_capacity(msg.attachments.len());
+    let mut form = reqwest::multipart::Form::new().text("chat_id", chat_id);
+
+    for (index, attachment) in msg.attachments.iter().enumerate() {
+        let kind = attachment_kind(&attachment.mime_type);
+        if !matches!(kind, AttachmentKind::Image | AttachmentKind::Video) {
+            return Err(FrankClawError::Channel {
+                channel,
+                msg: "telegram media groups currently support only image and video attachments"
+                    .into(),
+            });
+        }
+
+        let field_name = format!("file{index}");
+        let part = reqwest::multipart::Part::bytes(attachment_bytes(&channel, attachment)?)
+            .file_name(attachment_filename(attachment))
+            .mime_str(&attachment.mime_type)
+            .map_err(|e| FrankClawError::Channel {
+                channel: channel.clone(),
+                msg: format!("invalid attachment mime type: {e}"),
+            })?;
+        form = form.part(field_name.clone(), part);
+
+        let mut item = serde_json::json!({
+            "type": match kind {
+                AttachmentKind::Image => "photo",
+                AttachmentKind::Video => "video",
+                AttachmentKind::Audio | AttachmentKind::Document => unreachable!(),
+            },
+            "media": format!("attach://{field_name}"),
+        });
+        if index == 0 && !text.is_empty() {
+            item["caption"] = serde_json::json!(text);
+            item["parse_mode"] = serde_json::json!("Markdown");
+        }
+        media.push(item);
+    }
+
+    form = form.text(
+        "media",
+        serde_json::to_string(&media).map_err(|e| FrankClawError::Channel {
+            channel: channel.clone(),
+            msg: format!("failed to serialize telegram media group: {e}"),
+        })?,
+    );
+    if let Some(topic_id) = topic_id {
+        form = form.text("message_thread_id", topic_id.to_string());
+    }
+    if let Some(reply_to) = msg
+        .reply_to
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        form = form.text("reply_to_message_id", reply_to.to_string());
+    }
+
+    Ok(TelegramMediaRequest {
+        method: "sendMediaGroup",
+        form,
+    })
 }
 
 fn build_edit_body(target: &EditMessageTarget, new_text: &str) -> Result<serde_json::Value> {
@@ -684,6 +754,68 @@ mod tests {
         .expect_err("missing bytes should fail");
 
         assert!(err.to_string().contains("missing inline bytes"));
+    }
+
+    #[test]
+    fn build_media_send_request_uses_media_group_for_multiple_images() {
+        let request = build_media_send_request(&OutboundMessage {
+            channel: ChannelId::new("telegram"),
+            account_id: "default".into(),
+            to: "42".into(),
+            thread_id: Some("-100123:topic:7".into()),
+            text: "album".into(),
+            attachments: vec![
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "image/png".into(),
+                    filename: Some("photo-1.png".into()),
+                    url: None,
+                    bytes: b"png1".to_vec(),
+                },
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "image/jpeg".into(),
+                    filename: Some("photo-2.jpg".into()),
+                    url: None,
+                    bytes: b"jpg2".to_vec(),
+                },
+            ],
+            reply_to: Some("77".into()),
+        })
+        .expect("media group request should build");
+
+        assert_eq!(request.method, "sendMediaGroup");
+    }
+
+    #[test]
+    fn build_media_send_request_rejects_unsupported_media_group_mix() {
+        let err = build_media_send_request(&OutboundMessage {
+            channel: ChannelId::new("telegram"),
+            account_id: "default".into(),
+            to: "42".into(),
+            thread_id: None,
+            text: "album".into(),
+            attachments: vec![
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "image/png".into(),
+                    filename: Some("photo-1.png".into()),
+                    url: None,
+                    bytes: b"png1".to_vec(),
+                },
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "application/pdf".into(),
+                    filename: Some("report.pdf".into()),
+                    url: None,
+                    bytes: b"%PDF".to_vec(),
+                },
+            ],
+            reply_to: None,
+        })
+        .expect_err("unsupported media group mix should fail");
+
+        assert!(err.to_string().contains("media groups"));
     }
 
     #[test]
