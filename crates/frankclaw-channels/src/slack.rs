@@ -418,6 +418,7 @@ fn parse_event_message(event: &serde_json::Value, bot_user_id: Option<&str>) -> 
 
 fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
     let (channel, thread_ts) = parse_thread_target(msg.thread_id.as_deref(), &msg.to);
+    let thread_ts = thread_ts.or_else(|| msg.reply_to.clone());
     let mut body = serde_json::json!({
         "channel": channel,
         "text": msg.text,
@@ -554,6 +555,23 @@ mod tests {
 
         assert_eq!(body["channel"], serde_json::json!("C123"));
         assert_eq!(body["thread_ts"], serde_json::json!("1710000000.000001"));
+    }
+
+    #[test]
+    fn build_send_body_uses_reply_to_as_thread_anchor_when_not_already_threaded() {
+        let body = build_send_body(&OutboundMessage {
+            channel: ChannelId::new("slack"),
+            account_id: "default".into(),
+            to: "C123".into(),
+            thread_id: None,
+            text: "hello".into(),
+            attachments: Vec::new(),
+            reply_to: Some("1710000000.123456".into()),
+        });
+
+        assert_eq!(body["channel"], serde_json::json!("C123"));
+        assert_eq!(body["thread_ts"], serde_json::json!("1710000000.123456"));
+        assert_eq!(body["reply_broadcast"], serde_json::json!(false));
     }
 
     #[test]

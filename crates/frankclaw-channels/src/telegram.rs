@@ -375,6 +375,13 @@ fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
     if let Some(topic_id) = topic_id {
         body["message_thread_id"] = serde_json::json!(topic_id);
     }
+    if let Some(reply_to) = msg
+        .reply_to
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        body["reply_to_message_id"] = serde_json::json!(reply_to);
+    }
 
     body
 }
@@ -484,6 +491,21 @@ mod tests {
 
         assert_eq!(body["chat_id"], serde_json::json!("42"));
         assert!(body.get("message_thread_id").is_none());
+    }
+
+    #[test]
+    fn build_send_body_includes_reply_to_message_id_when_present() {
+        let body = build_send_body(&OutboundMessage {
+            channel: ChannelId::new("telegram"),
+            account_id: "default".into(),
+            to: "42".into(),
+            thread_id: None,
+            text: "hello".into(),
+            attachments: Vec::new(),
+            reply_to: Some("99".into()),
+        });
+
+        assert_eq!(body["reply_to_message_id"], serde_json::json!(99));
     }
 
     #[test]
