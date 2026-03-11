@@ -816,6 +816,43 @@ mod tests {
     }
 
     #[test]
+    fn build_send_attachment_request_supports_multiple_attachments() {
+        let body = build_send_attachment_request(
+            &OutboundMessage {
+                channel: ChannelId::new("signal"),
+                account_id: "default".into(),
+                to: "+15550001111".into(),
+                thread_id: None,
+                text: "hello".into(),
+                attachments: vec![
+                    OutboundAttachment {
+                        media_id: frankclaw_core::types::MediaId::new(),
+                        mime_type: "image/png".into(),
+                        filename: Some("photo.png".into()),
+                        url: None,
+                        bytes: b"png".to_vec(),
+                    },
+                    OutboundAttachment {
+                        media_id: frankclaw_core::types::MediaId::new(),
+                        mime_type: "application/pdf".into(),
+                        filename: Some("report.pdf".into()),
+                        url: None,
+                        bytes: b"%PDF".to_vec(),
+                    },
+                ],
+                reply_to: None,
+            },
+            Some("+15551234567"),
+        )
+        .expect("attachment request should build");
+
+        assert_eq!(
+            body["base64_attachments"],
+            serde_json::json!(["cG5n", "JVBERg=="])
+        );
+    }
+
+    #[test]
     fn parse_receive_event_matches_contract_fixture_shape() {
         let inbound = parse_receive_event(
             &SignalSseEvent {

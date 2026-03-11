@@ -835,6 +835,36 @@ mod tests {
     }
 
     #[test]
+    fn build_complete_upload_request_supports_multiple_files() {
+        let body = build_complete_upload_request(
+            vec![
+                serde_json::json!({
+                    "id": "F123",
+                    "title": "report.pdf",
+                }),
+                serde_json::json!({
+                    "id": "F124",
+                    "title": "photo.png",
+                }),
+            ],
+            "C123",
+            None,
+            "",
+        );
+
+        assert_eq!(body["channel_id"], serde_json::json!("C123"));
+        assert!(body.get("thread_ts").is_none());
+        assert!(body.get("initial_comment").is_none());
+        assert_eq!(
+            body["files"],
+            serde_json::json!([
+                { "id": "F123", "title": "report.pdf" },
+                { "id": "F124", "title": "photo.png" }
+            ])
+        );
+    }
+
+    #[test]
     fn build_edit_body_uses_channel_from_thread_target() {
         let body = build_edit_body(
             &EditMessageTarget {

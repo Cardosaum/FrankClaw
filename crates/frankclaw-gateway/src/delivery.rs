@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use frankclaw_core::channel::{ChannelPlugin, OutboundMessage, SendResult};
+use frankclaw_core::channel::{ChannelPlugin, OutboundAttachment, OutboundMessage, SendResult};
 use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_media::MediaStore;
 use serde::{Deserialize, Serialize};
@@ -388,6 +388,12 @@ pub fn set_last_reply_in_metadata(
 }
 
 fn split_outbound_message(outbound: &OutboundMessage) -> Vec<OutboundMessage> {
+    let attachment_batches = split_attachment_batches(outbound);
+    if attachment_batches.len() > 1 {
+        return attachment_batches;
+    }
+
+    let outbound = &attachment_batches[0];
     let Some(max_chars) = max_chars_for_channel(outbound.channel.as_str()) else {
         return vec![outbound.clone()];
     };
@@ -408,6 +414,105 @@ fn split_outbound_message(outbound: &OutboundMessage) -> Vec<OutboundMessage> {
             ..outbound.clone()
         })
         .collect()
+}
+
+fn split_attachment_batches(outbound: &OutboundMessage) -> Vec<OutboundMessage> {
+    if outbound.attachments.is_empty() {
+        return vec![outbound.clone()];
+    }
+
+    let grouped = match outbound.channel.as_str() {
+        "whatsapp" => split_attachment_vec(outbound.attachments.clone(), 1),
+        "telegram" => split_telegram_attachment_batches(&outbound.attachments),
+        _ => return vec![outbound.clone()],
+    };
+    if grouped.len() <= 1 {
+        return vec![outbound.clone()];
+    }
+
+    grouped
+        .into_iter()
+        .enumerate()
+        .map(|(index, attachments)| OutboundMessage {
+            text: if index == 0 {
+                outbound.text.clone()
+            } else {
+                String::new()
+            },
+            attachments,
+            reply_to: if index == 0 {
+                outbound.reply_to.clone()
+            } else {
+                None
+            },
+            ..outbound.clone()
+        })
+        .collect()
+}
+
+fn split_telegram_attachment_batches(
+    attachments: &[OutboundAttachment],
+) -> Vec<Vec<OutboundAttachment>> {
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut current_kind = None;
+
+    for attachment in attachments {
+        let attachment_kind = telegram_attachment_batch_kind(&attachment.mime_type);
+        let compatible = current_kind
+            .map(|kind| kind == attachment_kind)
+            .unwrap_or(true);
+        if !compatible || current.len() >= 10 {
+            if !current.is_empty() {
+                batches.push(std::mem::take(&mut current));
+            }
+            current_kind = None;
+        }
+        if current_kind.is_none() {
+            current_kind = Some(attachment_kind);
+        }
+        current.push(attachment.clone());
+    }
+
+    if !current.is_empty() {
+        batches.push(current);
+    }
+
+    batches
+}
+
+fn split_attachment_vec(
+    attachments: Vec<OutboundAttachment>,
+    batch_size: usize,
+) -> Vec<Vec<OutboundAttachment>> {
+    let mut attachments = attachments.into_iter();
+    let mut batches = Vec::new();
+    loop {
+        let chunk: Vec<_> = attachments.by_ref().take(batch_size).collect();
+        if chunk.is_empty() {
+            break;
+        }
+        batches.push(chunk);
+    }
+    batches
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TelegramAttachmentBatchKind {
+    Visual,
+    Audio,
+    Document,
+}
+
+fn telegram_attachment_batch_kind(mime_type: &str) -> TelegramAttachmentBatchKind {
+    let mime_type = mime_type.trim().to_ascii_lowercase();
+    if mime_type.starts_with("image/") || mime_type.starts_with("video/") {
+        TelegramAttachmentBatchKind::Visual
+    } else if mime_type.starts_with("audio/") {
+        TelegramAttachmentBatchKind::Audio
+    } else {
+        TelegramAttachmentBatchKind::Document
+    }
 }
 
 fn max_chars_for_channel(channel_id: &str) -> Option<usize> {
@@ -818,6 +923,92 @@ mod tests {
     fn split_text_prefers_word_boundaries() {
         let chunks = split_text("one two three four five", 9);
         assert_eq!(chunks, vec!["one two", "three", "four five"]);
+    }
+
+    #[test]
+    fn split_outbound_message_batches_whatsapp_attachments_into_single_sends() {
+        let outbound = OutboundMessage {
+            channel: ChannelId::new("whatsapp"),
+            account_id: "default".into(),
+            to: "15550001111".into(),
+            thread_id: None,
+            text: "see attached".into(),
+            attachments: vec![
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "image/png".into(),
+                    filename: Some("photo.png".into()),
+                    url: None,
+                    bytes: b"png".to_vec(),
+                },
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "application/pdf".into(),
+                    filename: Some("report.pdf".into()),
+                    url: None,
+                    bytes: b"%PDF".to_vec(),
+                },
+            ],
+            reply_to: Some("incoming-1".into()),
+        };
+
+        let batches = split_outbound_message(&outbound);
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].attachments.len(), 1);
+        assert_eq!(batches[0].text, "see attached");
+        assert_eq!(batches[0].reply_to.as_deref(), Some("incoming-1"));
+        assert_eq!(batches[1].attachments.len(), 1);
+        assert!(batches[1].text.is_empty());
+        assert!(batches[1].reply_to.is_none());
+    }
+
+    #[test]
+    fn split_outbound_message_batches_telegram_attachments_by_kind_and_size() {
+        let mut attachments = Vec::new();
+        for index in 0..12 {
+            attachments.push(OutboundAttachment {
+                media_id: frankclaw_core::types::MediaId::new(),
+                mime_type: "image/png".into(),
+                filename: Some(format!("photo-{index}.png")),
+                url: None,
+                bytes: b"png".to_vec(),
+            });
+        }
+        attachments.push(OutboundAttachment {
+            media_id: frankclaw_core::types::MediaId::new(),
+            mime_type: "application/pdf".into(),
+            filename: Some("report.pdf".into()),
+            url: None,
+            bytes: b"%PDF".to_vec(),
+        });
+        attachments.push(OutboundAttachment {
+            media_id: frankclaw_core::types::MediaId::new(),
+            mime_type: "audio/ogg".into(),
+            filename: Some("voice.ogg".into()),
+            url: None,
+            bytes: b"ogg".to_vec(),
+        });
+
+        let batches = split_outbound_message(&OutboundMessage {
+            channel: ChannelId::new("telegram"),
+            account_id: "default".into(),
+            to: "42".into(),
+            thread_id: None,
+            text: "album".into(),
+            attachments,
+            reply_to: Some("88".into()),
+        });
+
+        assert_eq!(batches.len(), 4);
+        assert_eq!(batches[0].attachments.len(), 10);
+        assert_eq!(batches[1].attachments.len(), 2);
+        assert_eq!(batches[2].attachments.len(), 1);
+        assert_eq!(batches[3].attachments.len(), 1);
+        assert_eq!(batches[0].text, "album");
+        assert!(batches.iter().skip(1).all(|batch| batch.text.is_empty()));
+        assert_eq!(batches[0].reply_to.as_deref(), Some("88"));
+        assert!(batches.iter().skip(1).all(|batch| batch.reply_to.is_none()));
     }
 
     #[test]

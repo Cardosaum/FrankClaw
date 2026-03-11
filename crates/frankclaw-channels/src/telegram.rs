@@ -502,19 +502,10 @@ fn build_media_group_request(msg: &OutboundMessage) -> Result<TelegramMediaReque
     let channel = ChannelId::new("telegram");
     let (chat_id, topic_id) = parse_target_thread(msg.thread_id.as_deref(), &msg.to);
     let text = normalize_outbound_text(&msg.text, OutboundTextFlavor::Plain);
-    let mut media = Vec::with_capacity(msg.attachments.len());
+    let media = build_media_group_items(&channel, &msg.attachments, &text)?;
     let mut form = reqwest::multipart::Form::new().text("chat_id", chat_id);
 
     for (index, attachment) in msg.attachments.iter().enumerate() {
-        let kind = attachment_kind(&attachment.mime_type);
-        if !matches!(kind, AttachmentKind::Image | AttachmentKind::Video) {
-            return Err(FrankClawError::Channel {
-                channel,
-                msg: "telegram media groups currently support only image and video attachments"
-                    .into(),
-            });
-        }
-
         let field_name = format!("file{index}");
         let part = reqwest::multipart::Part::bytes(attachment_bytes(&channel, attachment)?)
             .file_name(attachment_filename(attachment))
@@ -524,20 +515,6 @@ fn build_media_group_request(msg: &OutboundMessage) -> Result<TelegramMediaReque
                 msg: format!("invalid attachment mime type: {e}"),
             })?;
         form = form.part(field_name.clone(), part);
-
-        let mut item = serde_json::json!({
-            "type": match kind {
-                AttachmentKind::Image => "photo",
-                AttachmentKind::Video => "video",
-                AttachmentKind::Audio | AttachmentKind::Document => unreachable!(),
-            },
-            "media": format!("attach://{field_name}"),
-        });
-        if index == 0 && !text.is_empty() {
-            item["caption"] = serde_json::json!(text);
-            item["parse_mode"] = serde_json::json!("Markdown");
-        }
-        media.push(item);
     }
 
     form = form.text(
@@ -562,6 +539,74 @@ fn build_media_group_request(msg: &OutboundMessage) -> Result<TelegramMediaReque
         method: "sendMediaGroup",
         form,
     })
+}
+
+fn build_media_group_items(
+    channel: &ChannelId,
+    attachments: &[OutboundAttachment],
+    text: &str,
+) -> Result<Vec<serde_json::Value>> {
+    if !(2..=10).contains(&attachments.len()) {
+        return Err(FrankClawError::Channel {
+            channel: channel.clone(),
+            msg: "telegram media groups require between 2 and 10 attachments".into(),
+        });
+    }
+
+    let mut media = Vec::with_capacity(attachments.len());
+    let mut group_kind = None;
+
+    for (index, attachment) in attachments.iter().enumerate() {
+        let kind = attachment_kind(&attachment.mime_type);
+        let next_group_kind = telegram_media_group_kind(kind);
+        if let Some(existing) = group_kind {
+            if existing != next_group_kind {
+                return Err(FrankClawError::Channel {
+                    channel: channel.clone(),
+                    msg: "telegram media groups must be all photos/videos, all audio, or all documents"
+                        .into(),
+                });
+            }
+        } else {
+            group_kind = Some(next_group_kind);
+        }
+
+        let mut item = serde_json::json!({
+            "type": telegram_media_item_type(kind),
+            "media": format!("attach://file{index}"),
+        });
+        if index == 0 && !text.is_empty() {
+            item["caption"] = serde_json::json!(text);
+            item["parse_mode"] = serde_json::json!("Markdown");
+        }
+        media.push(item);
+    }
+
+    Ok(media)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TelegramMediaGroupKind {
+    Visual,
+    Audio,
+    Document,
+}
+
+fn telegram_media_group_kind(kind: AttachmentKind) -> TelegramMediaGroupKind {
+    match kind {
+        AttachmentKind::Image | AttachmentKind::Video => TelegramMediaGroupKind::Visual,
+        AttachmentKind::Audio => TelegramMediaGroupKind::Audio,
+        AttachmentKind::Document => TelegramMediaGroupKind::Document,
+    }
+}
+
+fn telegram_media_item_type(kind: AttachmentKind) -> &'static str {
+    match kind {
+        AttachmentKind::Image => "photo",
+        AttachmentKind::Audio => "audio",
+        AttachmentKind::Video => "video",
+        AttachmentKind::Document => "document",
+    }
 }
 
 fn build_edit_body(target: &EditMessageTarget, new_text: &str) -> Result<serde_json::Value> {
@@ -788,21 +833,67 @@ mod tests {
     }
 
     #[test]
-    fn build_media_send_request_rejects_unsupported_media_group_mix() {
-        let err = build_media_send_request(&OutboundMessage {
-            channel: ChannelId::new("telegram"),
-            account_id: "default".into(),
-            to: "42".into(),
-            thread_id: None,
-            text: "album".into(),
-            attachments: vec![
+    fn build_media_group_items_support_document_groups() {
+        let items = build_media_group_items(
+            &ChannelId::new("telegram"),
+            &[
                 OutboundAttachment {
                     media_id: frankclaw_core::types::MediaId::new(),
-                    mime_type: "image/png".into(),
-                    filename: Some("photo-1.png".into()),
+                    mime_type: "application/pdf".into(),
+                    filename: Some("report-1.pdf".into()),
                     url: None,
-                    bytes: b"png1".to_vec(),
+                    bytes: b"%PDF-1".to_vec(),
                 },
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "application/pdf".into(),
+                    filename: Some("report-2.pdf".into()),
+                    url: None,
+                    bytes: b"%PDF-2".to_vec(),
+                },
+            ],
+            "docs",
+        )
+        .expect("document media group should build");
+
+        assert_eq!(items[0]["type"], serde_json::json!("document"));
+        assert_eq!(items[1]["type"], serde_json::json!("document"));
+        assert_eq!(items[0]["caption"], serde_json::json!("docs"));
+    }
+
+    #[test]
+    fn build_media_group_items_support_audio_groups() {
+        let items = build_media_group_items(
+            &ChannelId::new("telegram"),
+            &[
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "audio/ogg".into(),
+                    filename: Some("voice-1.ogg".into()),
+                    url: None,
+                    bytes: b"ogg1".to_vec(),
+                },
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "audio/mpeg".into(),
+                    filename: Some("voice-2.mp3".into()),
+                    url: None,
+                    bytes: b"mp3".to_vec(),
+                },
+            ],
+            "audio",
+        )
+        .expect("audio media group should build");
+
+        assert_eq!(items[0]["type"], serde_json::json!("audio"));
+        assert_eq!(items[1]["type"], serde_json::json!("audio"));
+    }
+
+    #[test]
+    fn build_media_group_items_rejects_mixed_document_and_audio_groups() {
+        let err = build_media_group_items(
+            &ChannelId::new("telegram"),
+            &[
                 OutboundAttachment {
                     media_id: frankclaw_core::types::MediaId::new(),
                     mime_type: "application/pdf".into(),
@@ -810,12 +901,38 @@ mod tests {
                     url: None,
                     bytes: b"%PDF".to_vec(),
                 },
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "audio/ogg".into(),
+                    filename: Some("voice.ogg".into()),
+                    url: None,
+                    bytes: b"ogg".to_vec(),
+                },
             ],
-            reply_to: None,
-        })
-        .expect_err("unsupported media group mix should fail");
+            "album",
+        )
+        .expect_err("mixed document/audio group should fail");
 
-        assert!(err.to_string().contains("media groups"));
+        assert!(err
+            .to_string()
+            .contains("all photos/videos, all audio, or all documents"));
+    }
+
+    #[test]
+    fn build_media_group_items_rejects_more_than_ten_attachments() {
+        let attachments: Vec<_> = (0..11)
+            .map(|index| OutboundAttachment {
+                media_id: frankclaw_core::types::MediaId::new(),
+                mime_type: "image/png".into(),
+                filename: Some(format!("photo-{index}.png")),
+                url: None,
+                bytes: b"png".to_vec(),
+            })
+            .collect();
+        let err = build_media_group_items(&ChannelId::new("telegram"), &attachments, "album")
+            .expect_err("more than 10 telegram media group items should fail");
+
+        assert!(err.to_string().contains("between 2 and 10"));
     }
 
     #[test]

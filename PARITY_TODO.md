@@ -53,7 +53,7 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 ### Rich Channel Behavior
 
 - [ ] Rich attachment/media handling across supported channels
-  Current slice: authenticated web media upload/download, console upload flow, attachment-capable web inbound turns, gateway-side attachment hydration from stored media, outbound media send flows for Telegram, Discord, Slack, Signal, and WhatsApp, plus Telegram media-group support for multi-image/video replies. Remaining depth is mostly the long tail of platform-specific media edge cases.
+  Current slice: authenticated web media upload/download, console upload flow, attachment-capable web inbound turns, gateway-side attachment hydration from stored media, outbound media send flows for Telegram, Discord, Slack, Signal, and WhatsApp, central batching for WhatsApp single-media sends, and Telegram media-group support for mixed photo/video albums plus same-type audio/document albums. Remaining depth is mostly the long tail of platform-specific media edge cases.
 - [x] Broader edit support beyond Telegram
 - [x] Delete support where platforms allow it
 - [x] Shared outbound text normalization and reply-safe formatting

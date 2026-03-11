@@ -737,6 +737,47 @@ mod tests {
     }
 
     #[test]
+    fn build_send_attachment_payload_supports_multiple_files() {
+        let (payload, specs) = build_send_attachment_payload(&OutboundMessage {
+            channel: ChannelId::new("discord"),
+            account_id: "default".into(),
+            to: "chan-1".into(),
+            thread_id: None,
+            text: "see attached".into(),
+            attachments: vec![
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "image/png".into(),
+                    filename: Some("photo.png".into()),
+                    url: None,
+                    bytes: b"png".to_vec(),
+                },
+                OutboundAttachment {
+                    media_id: frankclaw_core::types::MediaId::new(),
+                    mime_type: "application/pdf".into(),
+                    filename: Some("report.pdf".into()),
+                    url: None,
+                    bytes: b"%PDF".to_vec(),
+                },
+            ],
+            reply_to: Some("msg-42".into()),
+        })
+        .expect("attachment payload should build");
+
+        assert_eq!(
+            payload["attachments"],
+            serde_json::json!([
+                { "id": 0, "filename": "photo.png" },
+                { "id": 1, "filename": "report.pdf" }
+            ])
+        );
+        assert_eq!(payload["message_reference"]["message_id"], serde_json::json!("msg-42"));
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].field_name, "files[0]");
+        assert_eq!(specs[1].field_name, "files[1]");
+    }
+
+    #[test]
     fn build_send_attachment_payload_requires_inline_bytes() {
         let err = build_send_attachment_payload(&OutboundMessage {
             channel: ChannelId::new("discord"),
