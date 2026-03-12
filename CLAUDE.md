@@ -8,7 +8,7 @@ FrankClaw is a security-hardened Rust rewrite of OpenClaw (a TypeScript AI assis
 
 ```bash
 cargo check          # Type-check the whole workspace
-cargo test           # Run all tests (~467)
+cargo test           # Run all tests (~492)
 cargo build          # Build everything (debug)
 cargo build -r       # Build release (LTO, stripped)
 cargo build -p frankclaw  # Build just the CLI binary
@@ -67,6 +67,9 @@ The binary is at `target/debug/frankclaw` (or `target/release/frankclaw`).
 - Bash tool execution controlled by `BashPolicy` (deny-all default) + optional `ai-jail` sandbox
 - `FRANKCLAW_SANDBOX=ai-jail` or `ai-jail-lockdown` wraps commands in bubblewrap+landlock isolation
 - `frankclaw audit` reports severity-rated findings (CRIT/HIGH/MED/LOW/INFO) with CI exit codes
+- Prompt injection sanitization: Unicode control/format chars (Cc, Cf) stripped from all user input and tool output before LLM ingestion
+- Total prompt size hard-capped at 2 MB (`MAX_PROMPT_BYTES`) to prevent token exhaustion DoS
+- External content wrapping: `wrap_untrusted_text()` and `wrap_external_content()` for marking data boundaries
 
 ## Key Paths
 
@@ -112,9 +115,21 @@ System prompts are built from config values and static templates only (`crates/f
 
 When the LLM returns tool calls, the tool name and arguments are attacker-influenced. Tool names are validated against the agent's allowlist before invocation. Tool arguments are JSON-parsed and passed to tool implementations. Each tool must validate its own arguments defensively — never trust shape, size, or content of LLM-generated tool args.
 
-### Rule 6: Subagent task/label are truncated
+### Rule 6: Subagent task/label are sanitized and truncated
 
-Subagent spawn requests include `task` and `label` strings that get embedded in the subagent's system prompt context. These are truncated to 2000 chars in `build_subagent_context()`. If you add new fields to `SpawnRequest` that flow into prompts, apply the same truncation.
+Subagent spawn requests include `task` and `label` strings that get embedded in the subagent's system prompt context. These are sanitized (Unicode control chars stripped) and truncated to 2000 chars in `build_subagent_context()`. If you add new fields to `SpawnRequest` that flow into prompts, apply `sanitize_for_prompt()` and truncation.
+
+### Rule 6a: All text entering the LLM context must be sanitized
+
+User messages, tool outputs, subagent tasks, and any other text that flows into the LLM prompt must pass through `sanitize::sanitize_for_prompt()` from `frankclaw-runtime/src/sanitize.rs`. This strips Unicode control characters (Cc category) and format characters (Cf category — zero-width chars, bidi overrides, soft hyphens, etc.) that can be used for prompt injection. Whitespace characters (\t, \n, \r) are preserved. If you add a new input path that feeds text into `CompletionMessage` content, sanitize it.
+
+### Rule 6b: External content must be wrapped in boundary tags
+
+When fetching external content (URLs, media, API responses) that will be shown to the LLM, wrap it with `sanitize::wrap_external_content(source, content)`. This applies sanitization and adds `<external-content>` tags that create a semantic boundary. For user-provided text that isn't a direct chat message, use `sanitize::wrap_untrusted_text(text)`. These helpers are in `frankclaw-runtime/src/sanitize.rs`.
+
+### Rule 6c: Total prompt size must be bounded
+
+The total prompt (system + all messages) must not exceed `MAX_PROMPT_BYTES` (2 MB). This is enforced in `Runtime::chat()` via `sanitize::check_prompt_size()`. If you add a new chat path or allow direct prompt construction, enforce this limit.
 
 ### Rule 7: All SQL queries must use parameterized statements
 
@@ -142,6 +157,9 @@ When adding any feature that handles external data, verify:
 - [ ] URLs from users go through SSRF validation
 - [ ] File names from users go through sanitization
 - [ ] Tool arguments are validated defensively
+- [ ] Text entering LLM context is sanitized via `sanitize_for_prompt()`
+- [ ] External/fetched content is wrapped with `wrap_external_content()`
+- [ ] Total prompt size is checked against `MAX_PROMPT_BYTES`
 - [ ] Tests cover rejection of oversized/malicious inputs
 
 ## Adding a New Channel

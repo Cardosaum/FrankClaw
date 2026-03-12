@@ -349,15 +349,18 @@ pub fn build_subagent_context(record: &RunRecord, max_depth: u32) -> String {
         ("max_depth", &max_depth_str),
     ]));
 
-    // Truncate task/label to prevent memory abuse and reduce prompt injection
-    // surface — these could originate from LLM-generated spawn requests.
+    // Truncate and sanitize task/label to prevent memory abuse and prompt
+    // injection — these could originate from LLM-generated spawn requests.
+    use crate::sanitize;
     const MAX_TASK_LEN: usize = 2000;
     if let Some(ref label) = record.label {
-        let safe_label = if label.len() > MAX_TASK_LEN { &label[..MAX_TASK_LEN] } else { label };
+        let safe_label = sanitize::sanitize_for_prompt(label);
+        let safe_label = if safe_label.len() > MAX_TASK_LEN { &safe_label[..MAX_TASK_LEN] } else { &safe_label };
         parts.push(format!("Task label: {safe_label}"));
     }
 
-    let safe_task = if record.task.len() > MAX_TASK_LEN { &record.task[..MAX_TASK_LEN] } else { &record.task };
+    let safe_task = sanitize::sanitize_for_prompt(&record.task);
+    let safe_task = if safe_task.len() > MAX_TASK_LEN { &safe_task[..MAX_TASK_LEN] } else { &safe_task };
     parts.push(format!("Task: {safe_task}"));
 
     let timeout_str = record.timeout_secs.to_string();

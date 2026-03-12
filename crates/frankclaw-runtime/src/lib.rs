@@ -3,6 +3,7 @@
 pub mod commands;
 pub mod context;
 pub mod prompts;
+pub mod sanitize;
 pub mod subagent;
 
 use std::collections::{HashMap, HashSet};
@@ -207,6 +208,10 @@ impl Runtime {
             });
         }
 
+        // Sanitize user message: strip Unicode control/format chars that could
+        // be used for prompt injection (bidi overrides, zero-width chars, etc.).
+        let sanitized_message = sanitize::sanitize_for_prompt(&request.message);
+
         let (agent_id, agent) = self.resolve_agent(request.agent_id.as_ref())?;
         let model_id = self.resolve_model_id(&agent, request.model_id.as_deref())?;
         let session_key = self.resolve_session_key(&agent_id, request.session_key)?;
@@ -245,7 +250,7 @@ impl Runtime {
             })
             .chain(std::iter::once(CompletionMessage {
                 role: Role::User,
-                content: request.message.clone(),
+                content: sanitized_message.clone(),
             }))
             .collect();
 
@@ -267,6 +272,16 @@ impl Runtime {
         }
         let mut request_messages = context_result.messages;
 
+        // Enforce hard prompt size limit to prevent token exhaustion / memory abuse.
+        if !sanitize::check_prompt_size(&request_messages, system_prompt.as_deref()) {
+            return Err(FrankClawError::InvalidRequest {
+                msg: format!(
+                    "total prompt size exceeds maximum ({} bytes)",
+                    sanitize::MAX_PROMPT_BYTES
+                ),
+            });
+        }
+
         let user_metadata = (!request.attachments.is_empty()).then(|| {
             serde_json::json!({
                 "attachments": request.attachments,
@@ -276,7 +291,7 @@ impl Runtime {
             &session_key,
             next_seq,
             Role::User,
-            request.message,
+            sanitized_message,
             user_metadata,
         )
         .await?;
@@ -690,12 +705,16 @@ impl ToolCallTracker {
     }
 }
 
-/// Truncate tool output to prevent context window overflow.
+/// Truncate and sanitize tool output to prevent context window overflow
+/// and prompt injection from external command results.
 /// Preserves the beginning and end of the output with an omission marker.
 fn truncate_tool_output(output: &str) -> String {
-    let char_count = output.chars().count();
+    // Sanitize first: tool outputs come from external processes and could
+    // contain Unicode control/format chars designed to manipulate the LLM.
+    let sanitized = sanitize::sanitize_for_prompt(output);
+    let char_count = sanitized.chars().count();
     if char_count <= MAX_TOOL_RESULT_CHARS {
-        return output.to_string();
+        return sanitized;
     }
 
     // Keep 80% head, 20% tail with omission marker in between.
@@ -703,8 +722,8 @@ fn truncate_tool_output(output: &str) -> String {
     let tail_chars = MAX_TOOL_RESULT_CHARS / 5;
     let omitted = char_count - head_chars - tail_chars;
 
-    let head: String = output.chars().take(head_chars).collect();
-    let tail: String = output.chars().skip(char_count - tail_chars).collect();
+    let head: String = sanitized.chars().take(head_chars).collect();
+    let tail: String = sanitized.chars().skip(char_count - tail_chars).collect();
 
     format!(
         "{}\n\n... ({} characters omitted) ...\n\n{}",
