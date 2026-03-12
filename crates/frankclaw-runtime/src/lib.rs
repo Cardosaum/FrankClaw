@@ -564,6 +564,38 @@ impl Runtime {
             }
 
             remaining_tool_calls -= tool_call_count;
+
+            // Mid-loop context compaction: re-check token budget after tool results
+            // accumulate. If over budget, re-run optimize_context to prune old messages
+            // and prevent context overflow errors on the next model call.
+            let mid_tokens = context::estimate_messages_tokens(&request_messages);
+            let mid_budget = context::available_input_budget(&model_def, system_prompt.as_deref());
+            if mid_tokens > mid_budget {
+                tracing::info!(
+                    session = %session_key,
+                    tokens = mid_tokens,
+                    budget = mid_budget,
+                    "mid-loop context exceeds budget — re-compacting"
+                );
+                let compacted = context::optimize_context(
+                    request_messages,
+                    &model_def,
+                    system_prompt.as_deref(),
+                );
+                request_messages = compacted.messages;
+
+                // If still over budget after compaction, return a graceful error
+                // instead of letting the provider fail with a raw context overflow.
+                let post_tokens = context::estimate_messages_tokens(&request_messages);
+                if post_tokens > mid_budget {
+                    return Err(FrankClawError::AgentRuntime {
+                        msg: format!(
+                            "context too large after compaction ({} tokens, budget {})",
+                            post_tokens, mid_budget
+                        ),
+                    });
+                }
+            }
         }
 
         Err(FrankClawError::AgentRuntime {
@@ -1957,6 +1989,74 @@ mod tests {
             received_intermediate,
             "should have received intermediate text during tool round"
         );
+
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[tokio::test]
+    async fn runtime_compacts_context_mid_loop_when_over_budget() {
+        let temp = std::env::temp_dir().join(format!(
+            "frankclaw-runtime-midcompact-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let sessions = Arc::new(
+            SqliteSessionStore::open(&temp, None).expect("sessions should open"),
+        );
+        let mut config = FrankClawConfig::default();
+        config
+            .agents
+            .agents
+            .get_mut(&AgentId::default_agent())
+            .unwrap()
+            .tools = vec!["session.inspect".into()];
+
+        // Round 1: tool call with large output that should trigger mid-loop compaction
+        // Round 2: final response
+        let provider = Arc::new(MockProvider::scripted(
+            "primary",
+            "mock-primary",
+            vec![
+                Some(MockResponse {
+                    content: "checking".into(),
+                    tool_calls: vec![ToolCallResponse {
+                        id: "call-1".into(),
+                        name: "session.inspect".into(),
+                        arguments: r#"{"limit": 5}"#.into(),
+                    }],
+                    finish_reason: FinishReason::ToolUse,
+                }),
+                Some(MockResponse {
+                    content: "done".into(),
+                    tool_calls: Vec::new(),
+                    finish_reason: FinishReason::Stop,
+                }),
+            ],
+        ));
+
+        let runtime = Runtime::from_providers(
+            &config,
+            sessions.clone() as Arc<dyn SessionStore>,
+            vec![provider],
+        )
+        .await
+        .expect("runtime should build");
+
+        let response = runtime
+            .chat(ChatRequest {
+                agent_id: None,
+                session_key: None,
+                message: "check".into(),
+                attachments: Vec::new(),
+                model_id: Some("mock-primary".into()),
+                max_tokens: None,
+                temperature: None,
+                stream_tx: None,
+                thinking_budget: None,
+            })
+            .await
+            .expect("chat should succeed");
+
+        assert_eq!(response.content, "done");
 
         let _ = std::fs::remove_file(temp);
     }
