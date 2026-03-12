@@ -1,3 +1,14 @@
+# FrankClaw Docker Compose
+#
+# Usage:
+#   cp .env.docker.example .env.docker
+#   # Edit .env.docker with your API keys and tokens
+#   docker compose up -d
+#
+# All three services start together. The gateway does NOT expose ports
+# to the host — cloudflared reaches it over the internal Docker network.
+# For local debugging, uncomment the ports section on the gateway service.
+
 services:
   gateway:
     build:
@@ -5,23 +16,63 @@ services:
       dockerfile: docker/frankclaw/Dockerfile
     container_name: frankclaw-gateway
     depends_on:
-      - chromium
+      chromium:
+        condition: service_healthy
+    env_file:
+      - path: .env.docker
+        required: false
     environment:
       FRANKCLAW_CONFIG: /config/frankclaw.json
       FRANKCLAW_STATE_DIR: /var/lib/frankclaw
       FRANKCLAW_BROWSER_DEVTOOLS_URL: http://chromium:9222/
-    ports:
-      - "127.0.0.1:18789:18789"
+      FRANKCLAW_BASH_POLICY: deny-all
     volumes:
       - ./frankclaw.json:/config/frankclaw.json:ro
-      - ./state:/var/lib/frankclaw
+      - frankclaw-state:/var/lib/frankclaw
+    # Uncomment to access the gateway directly from the host:
+    # ports:
+    #   - "127.0.0.1:18789:18789"
+    networks:
+      - frankclaw
     restart: unless-stopped
+
   chromium:
     build:
       context: .
       dockerfile: docker/chromium/Dockerfile
     container_name: frankclaw-chromium
-    ports:
-      - "127.0.0.1:9222:9222"
     shm_size: "1gb"
+    networks:
+      - frankclaw
     restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: frankclaw-cloudflared
+    depends_on:
+      gateway:
+        condition: service_healthy
+    # Locally-managed tunnel: mounts credentials from ~/.cloudflared and
+    # uses a docker-specific config that routes to http://gateway:18789
+    # (instead of localhost). Copy your credentials JSON to docker/cloudflared/.
+    #
+    # Setup:
+    #   cp docker/cloudflared/config.yml.example docker/cloudflared/config.yml
+    #   cp ~/.cloudflared/<tunnel-id>.json docker/cloudflared/credentials.json
+    #   cp ~/.cloudflared/cert.pem docker/cloudflared/cert.pem
+    #   # Edit config.yml with your hostname
+    command: tunnel --no-autoupdate --origincert /etc/cloudflared/cert.pem --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./docker/cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      - ./docker/cloudflared/credentials.json:/etc/cloudflared/credentials.json:ro
+      - ./docker/cloudflared/cert.pem:/etc/cloudflared/cert.pem:ro
+    networks:
+      - frankclaw
+    restart: unless-stopped
+
+networks:
+  frankclaw:
+    driver: bridge
+
+volumes:
+  frankclaw-state:

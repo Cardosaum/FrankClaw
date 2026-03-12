@@ -1,0 +1,14 @@
+# Docker-specific cloudflared config.
+# Copy to config.yml and fill in your hostname:
+#   cp docker/cloudflared/config.yml.example docker/cloudflared/config.yml
+#
+# Also copy your tunnel credentials:
+#   cp ~/.cloudflared/<tunnel-id>.json docker/cloudflared/credentials.json
+
+tunnel: frankclaw
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: your-hostname.example.com
+    service: http://gateway:18789
+  - service: http_status:404

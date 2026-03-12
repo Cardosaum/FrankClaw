@@ -52,7 +52,7 @@ For channel setup, see [CHANNEL_SETUP.md](docs/CHANNEL_SETUP.md), `examples/chan
 - **Bash tool** — Shell command execution with timeout, output truncation, and configurable security policy (deny-all, allowlist, or allow-all)
 - **Optional sandbox** — [ai-jail](https://github.com/akitaonrails/ai-jail) integration (bubblewrap + landlock) for OS-level command isolation, complementary to the bash allowlist
 - **Operator support** — interactive setup wizard, doctor diagnostics, security audit with severity ratings, process management (start/stop daemon), status, remote exposure checks, onboarding, and systemd unit generation
-- **Docker runtime** — `docker compose up gateway chromium` starts the gateway plus a local DevTools endpoint for browser tools
+- **Docker runtime** — `docker compose up -d` starts the gateway, headless Chromium, and Cloudflare tunnel in one command
 - **Prompt templates** — All LLM-facing text lives in editable markdown files, embedded at compile time
 - **Media pipeline** — File handling with SSRF protection, filename sanitization, and optional VirusTotal malware scanning
 - **Internationalized CLI** — 9 locales (en, pt-BR, pt-PT, es, fr, de, it, ja, ko) via `FRANKCLAW_LANG`
@@ -240,18 +240,29 @@ chromium \
 
 ### Docker Compose Mode
 
-```bash
-cp examples/channels/web.json frankclaw.json
-docker compose up -d gateway chromium
-```
-
-This starts a local Chromium container exposing DevTools on `127.0.0.1:9222`.
-
-If you need a non-default endpoint, set:
+`docker compose up -d` starts three services: the FrankClaw gateway, headless Chromium (for browser tools), and a Cloudflare tunnel (for webhook exposure). All services communicate over an internal Docker network.
 
 ```bash
-export FRANKCLAW_BROWSER_DEVTOOLS_URL="http://127.0.0.1:9222/"
+# 1. Create your config from the example
+cp frankclaw.json.example frankclaw.json
+# Edit frankclaw.json — enable channels, set auth token, add tools
+
+# 2. Set up secrets
+cp .env.docker.example .env.docker
+# Edit .env.docker — add API keys, channel tokens
+
+# 3. Set up Cloudflare tunnel (for public webhook access)
+cp docker/cloudflared/config.yml.example docker/cloudflared/config.yml
+# Edit config.yml — set your hostname
+cp ~/.cloudflared/<tunnel-id>.json docker/cloudflared/credentials.json
+cp ~/.cloudflared/cert.pem docker/cloudflared/cert.pem
+chmod 644 docker/cloudflared/credentials.json docker/cloudflared/cert.pem
+
+# 4. Start everything
+docker compose up -d
 ```
+
+The gateway binds to `0.0.0.0` inside the container (LAN mode) so cloudflared can reach it. Auth is required — set a token in `frankclaw.json`. To access the gateway directly from the host (for debugging), uncomment the `ports` section in `docker-compose.yml`.
 
 Then allow browser tools on an agent:
 
