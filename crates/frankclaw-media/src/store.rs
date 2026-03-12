@@ -1,21 +1,25 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use frankclaw_core::error::{FrankClawError, Result};
-use frankclaw_core::media::{MediaFile, mime_for_safe_extension, safe_extension_for_mime};
+use frankclaw_core::media::{FileScanService, MediaFile, ScanVerdict, mime_for_safe_extension, safe_extension_for_mime};
 use frankclaw_core::types::MediaId;
 
-/// File-based media store with TTL cleanup.
+/// File-based media store with TTL cleanup and optional malware scanning.
 ///
 /// Files are stored with owner-only permissions (0o600).
 /// Each file gets a UUID to prevent enumeration attacks.
+/// When a `FileScanService` is configured, files are scanned before storage
+/// and malicious files are rejected.
 pub struct MediaStore {
     base_dir: PathBuf,
     max_file_size: u64,
     ttl_hours: u64,
+    scanner: Option<Arc<dyn FileScanService>>,
 }
 
 pub struct StoredMediaContent {
@@ -48,11 +52,60 @@ impl MediaStore {
             base_dir,
             max_file_size,
             ttl_hours,
+            scanner: None,
         })
     }
 
-    /// Store bytes as a media file. Returns metadata.
-    pub fn store(
+    /// Attach a file scanning service (e.g., VirusTotal).
+    /// When set, all files are scanned before storage, and malicious
+    /// files are rejected with `MalwareDetected`.
+    pub fn with_scanner(mut self, scanner: Arc<dyn FileScanService>) -> Self {
+        self.scanner = Some(scanner);
+        self
+    }
+
+    /// Store bytes as a media file, scanning for malware first if a scanner
+    /// is configured. Returns metadata on success, or `MalwareDetected` if
+    /// the file is flagged.
+    ///
+    /// This is the primary entry point — prefer this over `store_unscanned()`
+    /// unless you have a reason to skip scanning.
+    pub async fn store(
+        &self,
+        original_name: &str,
+        mime_type: &str,
+        data: &[u8],
+    ) -> Result<MediaFile> {
+        // Scan before writing to disk — reject malware before it touches storage.
+        if let Some(ref scanner) = self.scanner {
+            let verdict = scanner.scan(original_name, data).await?;
+            if !verdict.safe {
+                warn!(
+                    filename = original_name,
+                    malicious = verdict.malicious_count,
+                    total = verdict.total_engines,
+                    threats = ?verdict.threat_names,
+                    "malware detected, rejecting file"
+                );
+                return Err(FrankClawError::MalwareDetected {
+                    filename: original_name.to_string(),
+                    detail: verdict.summary,
+                });
+            }
+            info!(
+                filename = original_name,
+                "file scan clean ({}/{})",
+                verdict.malicious_count,
+                verdict.total_engines
+            );
+        }
+        self.store_unscanned(original_name, mime_type, data)
+    }
+
+    /// Store bytes without malware scanning. Use this only when the data
+    /// source is fully trusted (e.g., internally generated screenshots)
+    /// or when you've already scanned the file separately.
+    pub fn store_unscanned(
         &self,
         original_name: &str,
         mime_type: &str,
@@ -101,6 +154,28 @@ impl MediaStore {
             created_at: now,
             expires_at: now + chrono::Duration::hours(self.ttl_hours as i64),
         })
+    }
+
+    /// Scan file bytes for malware without storing. Returns the verdict,
+    /// or `None` if no scanner is configured.
+    ///
+    /// Use this to scan files that are being forwarded to a user
+    /// (e.g., from an email attachment or downloaded URL) without
+    /// storing them in the media store.
+    pub async fn scan_file(
+        &self,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<Option<ScanVerdict>> {
+        match self.scanner {
+            Some(ref scanner) => Ok(Some(scanner.scan(filename, data).await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Check whether a file scanning service is configured.
+    pub fn has_scanner(&self) -> bool {
+        self.scanner.is_some()
     }
 
     /// Delete expired media files.
@@ -302,8 +377,8 @@ mod tests {
         assert_eq!(safe_extension_for_mime("audio/mp4"), "m4a");
     }
 
-    #[test]
-    fn read_returns_bytes_and_inferred_mime() {
+    #[tokio::test]
+    async fn read_returns_bytes_and_inferred_mime() {
         let temp_dir = std::env::temp_dir().join(format!(
             "frankclaw-media-read-{}",
             uuid::Uuid::new_v4()
@@ -311,6 +386,7 @@ mod tests {
         let store = MediaStore::new(temp_dir.clone(), 1024, 1).expect("store should create");
         let media = store
             .store("note.txt", "text/plain", b"hello")
+            .await
             .expect("media should store");
 
         let loaded = store
@@ -324,8 +400,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
-    #[test]
-    fn read_falls_back_when_metadata_sidecar_is_missing() {
+    #[tokio::test]
+    async fn read_falls_back_when_metadata_sidecar_is_missing() {
         let temp_dir = std::env::temp_dir().join(format!(
             "frankclaw-media-fallback-{}",
             uuid::Uuid::new_v4()
@@ -333,6 +409,7 @@ mod tests {
         let store = MediaStore::new(temp_dir.clone(), 1024, 1).expect("store should create");
         let media = store
             .store("note.txt", "text/plain", b"hello")
+            .await
             .expect("media should store");
         let metadata_path = metadata_path_for(&media.path);
         std::fs::remove_file(&metadata_path).expect("metadata should delete");
@@ -348,8 +425,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
-    #[test]
-    fn cleanup_removes_sidecar_metadata_with_media_file() {
+    #[tokio::test]
+    async fn cleanup_removes_sidecar_metadata_with_media_file() {
         let temp_dir = std::env::temp_dir().join(format!(
             "frankclaw-media-cleanup-{}",
             uuid::Uuid::new_v4()
@@ -357,6 +434,7 @@ mod tests {
         let store = MediaStore::new(temp_dir.clone(), 1024, 0).expect("store should create");
         let media = store
             .store("note.txt", "text/plain", b"hello")
+            .await
             .expect("media should store");
         let metadata_path = metadata_path_for(&media.path);
 
@@ -367,6 +445,90 @@ mod tests {
         assert_eq!(deleted, 1);
         assert!(!media.path.exists());
         assert!(!metadata_path.exists());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn store_with_scanner_rejects_malware() {
+        use frankclaw_core::media::FileScanService;
+
+        struct FakeMalwareScanner;
+
+        #[async_trait::async_trait]
+        impl FileScanService for FakeMalwareScanner {
+            async fn scan(&self, _filename: &str, _data: &[u8]) -> frankclaw_core::error::Result<ScanVerdict> {
+                Ok(ScanVerdict {
+                    safe: false,
+                    malicious_count: 15,
+                    total_engines: 72,
+                    summary: "15/72 engines flagged as malicious".into(),
+                    threat_names: vec!["Trojan.Test".into()],
+                })
+            }
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-media-scanner-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = MediaStore::new(temp_dir.clone(), 1024, 1)
+            .expect("store should create")
+            .with_scanner(std::sync::Arc::new(FakeMalwareScanner));
+
+        let result = store.store("evil.exe", "application/octet-stream", b"MZ\x00").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("malware detected"), "expected malware error, got: {msg}");
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn store_with_scanner_accepts_clean_files() {
+        use frankclaw_core::media::FileScanService;
+
+        struct FakeCleanScanner;
+
+        #[async_trait::async_trait]
+        impl FileScanService for FakeCleanScanner {
+            async fn scan(&self, _filename: &str, _data: &[u8]) -> frankclaw_core::error::Result<ScanVerdict> {
+                Ok(ScanVerdict {
+                    safe: true,
+                    malicious_count: 0,
+                    total_engines: 72,
+                    summary: "0/72 engines flagged".into(),
+                    threat_names: Vec::new(),
+                })
+            }
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-media-clean-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = MediaStore::new(temp_dir.clone(), 1024, 1)
+            .expect("store should create")
+            .with_scanner(std::sync::Arc::new(FakeCleanScanner));
+
+        let result = store.store("clean.txt", "text/plain", b"hello").await;
+        assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn store_without_scanner_skips_scan() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-media-noscan-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = MediaStore::new(temp_dir.clone(), 1024, 1).expect("store should create");
+        assert!(!store.has_scanner());
+
+        let result = store.store("file.txt", "text/plain", b"data").await;
+        assert!(result.is_ok());
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

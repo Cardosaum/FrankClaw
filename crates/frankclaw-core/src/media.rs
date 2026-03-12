@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+use crate::error::Result;
 use crate::types::MediaId;
 
 /// Classification of media content by broad kind.
@@ -134,6 +135,34 @@ pub fn infer_mime_from_name(name: &str) -> Option<&'static str> {
     } else {
         Some(mime)
     }
+}
+
+/// Result of scanning a file for malware/threats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanVerdict {
+    /// Whether the file is considered safe.
+    pub safe: bool,
+    /// Number of engines that flagged the file as malicious.
+    pub malicious_count: u32,
+    /// Total number of engines that scanned the file.
+    pub total_engines: u32,
+    /// Human-readable summary of the scan result.
+    pub summary: String,
+    /// Specific threat names detected (e.g., "Trojan.GenericKD.12345").
+    pub threat_names: Vec<String>,
+}
+
+/// Trait for file scanning services (VirusTotal, ClamAV, etc.).
+///
+/// Implementations must be Send + Sync for use in async contexts.
+#[async_trait::async_trait]
+pub trait FileScanService: Send + Sync {
+    /// Scan file bytes for malware. Returns the scan verdict.
+    ///
+    /// Implementations should handle their own timeouts and retries.
+    /// If the service is unavailable or times out, return an error
+    /// rather than a false `safe: true` verdict.
+    async fn scan(&self, filename: &str, data: &[u8]) -> Result<ScanVerdict>;
 }
 
 fn normalize_mime(mime: &str) -> &str {

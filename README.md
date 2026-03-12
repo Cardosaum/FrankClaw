@@ -26,7 +26,7 @@ For concrete setup snippets for the supported channels and browser runtime, see 
 - **Operator support** — interactive setup wizard, doctor diagnostics, security audit with severity ratings, process management (start/stop daemon), status, remote exposure checks, onboarding, and systemd unit generation
 - **Docker runtime** — `docker compose up gateway chromium` starts the gateway plus a local DevTools endpoint for browser tools
 - **Prompt templates** — All LLM-facing text lives in editable markdown files, embedded at compile time
-- **Media pipeline** — File handling with SSRF protection and filename sanitization
+- **Media pipeline** — File handling with SSRF protection, filename sanitization, and optional VirusTotal malware scanning
 - **Plugin system** — Trait-based channel and provider adapters
 - **Zero unsafe code** — `#![forbid(unsafe_code)]` on every crate
 
@@ -73,7 +73,7 @@ For concrete setup snippets for the supported channels and browser runtime, see 
 | `frankclaw-tools` | Tool registry, bash execution (with optional ai-jail sandbox), browser tools |
 | `frankclaw-memory` | Vector search traits for long-term memory |
 | `frankclaw-cron` | Scheduled job service |
-| `frankclaw-media` | File storage with SSRF-safe HTTP fetcher |
+| `frankclaw-media` | File storage with SSRF-safe HTTP fetcher and optional VirusTotal malware scanning |
 | `frankclaw-plugin-sdk` | Plugin registry for extending channels and tools |
 | `frankclaw-cli` | CLI binary with all subcommands |
 
@@ -481,6 +481,7 @@ FrankClaw uses a single JSON config file. All fields have secure defaults.
 | `FRANKCLAW_SANDBOX` | Optional sandbox: `ai-jail` or `ai-jail-lockdown` (requires [ai-jail](https://github.com/akitaonrails/ai-jail)) |
 | `FRANKCLAW_ALLOW_BROWSER_MUTATIONS` | Set to `1` to enable browser click/type/press tools |
 | `FRANKCLAW_BROWSER_DEVTOOLS_URL` | Chromium DevTools endpoint (default: `http://127.0.0.1:9222/`) |
+| `VIRUSTOTAL_API_KEY` | Optional VirusTotal API key — enables malware scanning on all file uploads |
 
 ## Development
 

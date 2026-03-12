@@ -445,7 +445,7 @@ async fn media_upload_handler(
         .filter(|value| !value.is_empty())
         .unwrap_or("upload.bin");
 
-    match state.gateway.media.store(filename, content_type, &body) {
+    match state.gateway.media.store(filename, content_type, &body).await {
         Ok(media) => (
             StatusCode::CREATED,
             Json(serde_json::json!({

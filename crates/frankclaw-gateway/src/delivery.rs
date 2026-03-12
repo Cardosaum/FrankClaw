@@ -1051,8 +1051,8 @@ mod tests {
         assert_eq!(metadata["other"]["keep"], serde_json::json!(true));
     }
 
-    #[test]
-    fn hydrate_outbound_attachments_loads_bytes_from_media_store() {
+    #[tokio::test]
+    async fn hydrate_outbound_attachments_loads_bytes_from_media_store() {
         let temp_dir = std::env::temp_dir().join(format!(
             "frankclaw-delivery-media-{}",
             uuid::Uuid::new_v4()
@@ -1061,6 +1061,7 @@ mod tests {
             .expect("media store should create");
         let stored = media
             .store("report.pdf", "application/pdf", b"%PDF-1.4")
+            .await
             .expect("media should store");
 
         let outbound = hydrate_outbound_attachments(

@@ -1435,14 +1435,20 @@ fn open_media_store(
         .storage_path
         .clone()
         .unwrap_or_else(|| state_dir.join("media"));
-    Ok(std::sync::Arc::new(
-        frankclaw_media::MediaStore::new(
-            media_dir,
-            config.media.max_file_size_bytes,
-            config.media.ttl_hours,
-        )
-        .context("failed to open media store")?,
-    ))
+    let mut store = frankclaw_media::MediaStore::new(
+        media_dir,
+        config.media.max_file_size_bytes,
+        config.media.ttl_hours,
+    )
+    .context("failed to open media store")?;
+
+    // Attach VirusTotal scanner if API key is available.
+    if let Some(scanner) = frankclaw_media::virustotal::VirusTotalScanner::from_env() {
+        tracing::info!("VirusTotal file scanning enabled");
+        store = store.with_scanner(std::sync::Arc::new(scanner));
+    }
+
+    Ok(std::sync::Arc::new(store))
 }
 
 fn restrict_file_permissions(path: &std::path::Path) {
@@ -2209,6 +2215,9 @@ fn run_security_audit(
     // --- Tool policies ---
     audit_tool_policies(config, &mut findings);
 
+    // --- File scanning ---
+    audit_file_scanning(&mut findings);
+
     // --- File permissions ---
     audit_file_permissions(config_path, state_dir, &mut findings);
 
@@ -2657,6 +2666,24 @@ fn audit_tool_policies(
             category: "tools",
             message: "Browser mutation tools are enabled — agents can click, type, and navigate".into(),
             remediation: "Unset FRANKCLAW_ALLOW_BROWSER_MUTATIONS if browser interaction is not needed".into(),
+        });
+    }
+}
+
+fn audit_file_scanning(findings: &mut Vec<Finding>) {
+    if frankclaw_media::virustotal::VirusTotalScanner::from_env().is_some() {
+        findings.push(Finding {
+            severity: Severity::Info,
+            category: "media",
+            message: "VirusTotal file scanning is enabled — files are scanned for malware before storage".into(),
+            remediation: "No action needed".into(),
+        });
+    } else {
+        findings.push(Finding {
+            severity: Severity::Low,
+            category: "media",
+            message: "No file scanning service configured — files are stored without malware checks".into(),
+            remediation: "Set VIRUSTOTAL_API_KEY environment variable to enable VirusTotal scanning".into(),
         });
     }
 }

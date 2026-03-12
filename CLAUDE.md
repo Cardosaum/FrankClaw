@@ -8,7 +8,7 @@ FrankClaw is a security-hardened Rust rewrite of OpenClaw (a TypeScript AI assis
 
 ```bash
 cargo check          # Type-check the whole workspace
-cargo test           # Run all tests (~492)
+cargo test           # Run all tests (~498)
 cargo build          # Build everything (debug)
 cargo build -r       # Build release (LTO, stripped)
 cargo build -p frankclaw  # Build just the CLI binary
@@ -70,6 +70,7 @@ The binary is at `target/debug/frankclaw` (or `target/release/frankclaw`).
 - Prompt injection sanitization: Unicode control/format chars (Cc, Cf) stripped from all user input and tool output before LLM ingestion
 - Total prompt size hard-capped at 2 MB (`MAX_PROMPT_BYTES`) to prevent token exhaustion DoS
 - External content wrapping: `wrap_untrusted_text()` and `wrap_external_content()` for marking data boundaries
+- Optional VirusTotal malware scanning on file uploads (enabled via `VIRUSTOTAL_API_KEY`)
 
 ## Key Paths
 
@@ -90,6 +91,7 @@ The binary is at `target/debug/frankclaw` (or `target/release/frankclaw`).
 | `FRANKCLAW_SANDBOX` | `ai-jail` or `ai-jail-lockdown` (requires ai-jail binary) |
 | `FRANKCLAW_ALLOW_BROWSER_MUTATIONS` | `1` to enable browser click/type/press |
 | `FRANKCLAW_BROWSER_DEVTOOLS_URL` | Chromium DevTools endpoint |
+| `VIRUSTOTAL_API_KEY` | Optional — enables malware scanning on all file uploads |
 
 ## Input Validation & Injection Prevention
 
@@ -143,7 +145,11 @@ Any URL fetched on behalf of a user must go through `SafeFetcher::fetch()` or `v
 
 File uploads go through `sanitize_filename()` in `frankclaw-media/src/store.rs` which strips path separators, leading dots, and limits length to 60 chars. If you add a new file storage path, use the same sanitizer.
 
-### Rule 10: Canvas HTML is stripped on export
+### Rule 10: Files from untrusted sources should be scanned
+
+When a `FileScanService` is configured (currently VirusTotal via `VIRUSTOTAL_API_KEY`), `MediaStore::store()` automatically scans files before writing to disk. Use `store()` (not `store_unscanned()`) for any file originating from external sources: user uploads, channel attachments, downloaded URLs, email attachments. Use `store_unscanned()` only for internally generated content like screenshots or server-rendered outputs. The `scan_file()` method is available for scanning files that pass through without storage (forwarded attachments). The `FileScanService` trait in `frankclaw-core/src/media.rs` allows plugging in alternative scanners (ClamAV, etc.).
+
+### Rule 11: Canvas HTML is stripped on export
 
 Canvas content is stored as-is but `strip_html_tags()` runs on export to prevent XSS. If you add a new output path for canvas content (API endpoint, channel message), ensure HTML stripping runs before output.
 

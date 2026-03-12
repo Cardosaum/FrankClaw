@@ -87,6 +87,9 @@ pub enum FrankClawError {
     #[error("unsupported media type: {mime}")]
     UnsupportedMediaType { mime: String },
 
+    #[error("malware detected in file '{filename}': {detail}")]
+    MalwareDetected { filename: String, detail: String },
+
     // ── Crypto ───────────────────────────────────────────
     #[error("cryptographic operation failed: {0}")]
     Crypto(#[from] frankclaw_crypto::CryptoError),
@@ -127,6 +130,7 @@ impl FrankClawError {
             Self::RequestTooLarge { .. } => 413,
             Self::MediaTooLarge { .. } => 413,
             Self::MediaFetchBlocked { .. } => 403,
+            Self::MalwareDetected { .. } => 403,
             Self::ConfigValidation { .. } => 422,
             Self::SenderBlocked { .. } => 403,
             _ => 500,
