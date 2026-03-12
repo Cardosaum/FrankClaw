@@ -252,6 +252,24 @@ setup.start_gateway: "  4. ゲートウェイを起動:    frankclaw gateway"
 setup.title: FrankClaw セットアップ
 setup.verify_config: "  3. 設定を確認:            frankclaw doctor"
 setup.which_provider: "使用するAIプロバイダを選択してください:"
+repl.welcome: "FrankClaw インタラクティブチャット"
+repl.help_hint: "コマンド一覧は /help、終了は /quit と入力してください。"
+repl.goodbye: さようなら！
+repl.error_readline: 入力エラー
+repl.error_stream: ストリームエラー
+repl.error_chat: チャットエラー
+repl.error_internal: 内部エラー
+repl.session_cleared: セッションをクリアしました。次のメッセージで新しいセッションが開始されます。
+repl.current_session: "セッション"
+repl.no_session: アクティブなセッションがありません。
+repl.current_model: "モデル"
+repl.default_model: 設定のデフォルトモデルを使用しています。
+repl.model_set: "モデルを設定しました"
+repl.thinking_budget: "思考バジェット"
+repl.thinking_disabled: 拡張思考が無効です。
+repl.thinking_budget_set: "思考バジェットを設定しました"
+repl.thinking_usage: "使い方: /think <トークン数> または /think off"
+repl.unknown_command: "不明なコマンド"
 warn.channel_inline_secret: "チャンネル '%{channel}' の '%{key}' が設定ファイルに直接記述されています。シークレットには '%{env_key}' の環境変数参照を推奨します"
 warn.channel_missing_env: "チャンネル '%{channel}' が参照している環境変数 '%{env}' (%{key} 経由) が見つかりません"
 warn.channel_open_groups: "チャンネル '%{channel}' はメンション制限やグループ許可リストなしでグループメッセージを受け付けています"

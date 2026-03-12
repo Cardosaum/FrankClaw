@@ -252,6 +252,24 @@ setup.start_gateway: "  4. Inicie o gateway:          frankclaw gateway"
 setup.title: Configuração do FrankClaw
 setup.verify_config: "  3. Verifique a configuração:  frankclaw doctor"
 setup.which_provider: Qual provedor de IA?
+repl.welcome: "FrankClaw Chat Interativo"
+repl.help_hint: "Digite /help para comandos, /quit para sair."
+repl.goodbye: "Até logo!"
+repl.error_readline: erro de leitura
+repl.error_stream: erro de fluxo
+repl.error_chat: erro de chat
+repl.error_internal: erro interno
+repl.session_cleared: Sessão limpa. A próxima mensagem inicia uma nova sessão.
+repl.current_session: "Sessão"
+repl.no_session: Nenhuma sessão ativa.
+repl.current_model: "Modelo"
+repl.default_model: Usando modelo padrão da configuração.
+repl.model_set: "Modelo definido para"
+repl.thinking_budget: "Orçamento de pensamento"
+repl.thinking_disabled: Pensamento estendido desabilitado.
+repl.thinking_budget_set: "Orçamento de pensamento definido para"
+repl.thinking_usage: "Uso: /think <tokens> ou /think off"
+repl.unknown_command: "Comando desconhecido"
 warn.channel_inline_secret: "canal '%{channel}' armazena '%{key}' inline; prefira referências de ambiente '%{env_key}' para segredos"
 warn.channel_missing_env: "canal '%{channel}' referencia variável de ambiente ausente '%{env}' via %{key}"
 warn.channel_open_groups: "canal '%{channel}' aceita mensagens de grupo sem exigência de menção e sem lista de grupos permitidos"

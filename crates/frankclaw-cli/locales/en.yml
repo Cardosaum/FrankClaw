@@ -252,6 +252,24 @@ setup.start_gateway: "  4. Start the gateway:    frankclaw gateway"
 setup.title: FrankClaw Setup
 setup.verify_config: "  3. Verify config:        frankclaw doctor"
 setup.which_provider: Which AI provider?
+repl.welcome: "FrankClaw Interactive Chat"
+repl.help_hint: "Type /help for commands, /quit to exit."
+repl.goodbye: Goodbye!
+repl.error_readline: readline error
+repl.error_stream: stream error
+repl.error_chat: chat error
+repl.error_internal: internal error
+repl.session_cleared: Session cleared. Next message starts a new session.
+repl.current_session: "Session"
+repl.no_session: No active session.
+repl.current_model: "Model"
+repl.default_model: Using default model from config.
+repl.model_set: "Model set to"
+repl.thinking_budget: "Thinking budget"
+repl.thinking_disabled: Extended thinking disabled.
+repl.thinking_budget_set: "Thinking budget set to"
+repl.thinking_usage: "Usage: /think <tokens> or /think off"
+repl.unknown_command: "Unknown command"
 warn.channel_inline_secret: "channel '%{channel}' stores '%{key}' inline; prefer '%{env_key}' environment references for secrets"
 warn.channel_missing_env: "channel '%{channel}' references missing environment variable '%{env}' via %{key}"
 warn.channel_open_groups: "channel '%{channel}' accepts group messages without mention gating and without a groups allowlist"

@@ -8,7 +8,7 @@ FrankClaw is a security-hardened Rust rewrite of OpenClaw (a TypeScript AI assis
 
 ```bash
 cargo check          # Type-check the whole workspace
-cargo test           # Run all tests (~576)
+cargo test           # Run all tests (~621)
 cargo build          # Build everything (debug)
 cargo build -r       # Build release (LTO, stripped)
 cargo build -p frankclaw  # Build just the CLI binary

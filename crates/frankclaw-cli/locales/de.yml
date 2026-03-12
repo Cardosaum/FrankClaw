@@ -252,6 +252,24 @@ setup.start_gateway: "  4. Gateway starten:           frankclaw gateway"
 setup.title: FrankClaw Einrichtung
 setup.verify_config: "  3. Konfiguration prüfen:      frankclaw doctor"
 setup.which_provider: Welchen KI-Anbieter?
+repl.welcome: "FrankClaw Interaktiver Chat"
+repl.help_hint: "Geben Sie /help für Befehle ein, /quit zum Beenden."
+repl.goodbye: Auf Wiedersehen!
+repl.error_readline: Eingabefehler
+repl.error_stream: Stream-Fehler
+repl.error_chat: Chat-Fehler
+repl.error_internal: Interner Fehler
+repl.session_cleared: Sitzung gelöscht. Die nächste Nachricht startet eine neue Sitzung.
+repl.current_session: "Sitzung"
+repl.no_session: Keine aktive Sitzung.
+repl.current_model: "Modell"
+repl.default_model: Verwende Standardmodell aus der Konfiguration.
+repl.model_set: "Modell gesetzt auf"
+repl.thinking_budget: "Denkbudget"
+repl.thinking_disabled: Erweitertes Denken deaktiviert.
+repl.thinking_budget_set: "Denkbudget gesetzt auf"
+repl.thinking_usage: "Verwendung: /think <Tokens> oder /think off"
+repl.unknown_command: "Unbekannter Befehl"
 warn.channel_inline_secret: "Kanal '%{channel}' speichert '%{key}' direkt; bevorzugen Sie '%{env_key}'-Umgebungsreferenzen für Geheimnisse"
 warn.channel_missing_env: "Kanal '%{channel}' referenziert fehlende Umgebungsvariable '%{env}' über %{key}"
 warn.channel_open_groups: "Kanal '%{channel}' akzeptiert Gruppennachrichten ohne Erwähnungs-Gating und ohne Gruppen-Erlaubnisliste"

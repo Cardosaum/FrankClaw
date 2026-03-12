@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod repl;
+
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -45,6 +47,25 @@ enum Command {
         /// Override the listen port.
         #[arg(short, long)]
         port: Option<u16>,
+    },
+
+    /// Interactive chat REPL (no gateway needed).
+    Chat {
+        /// Target agent ID.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Resume an existing session.
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Override model ID.
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Extended thinking budget in tokens.
+        #[arg(long)]
+        think: Option<u32>,
     },
 
     /// Generate a secure auth token.
@@ -294,6 +315,29 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| default_state_dir());
 
     match cli.command {
+        Command::Chat {
+            agent,
+            session,
+            model,
+            think,
+        } => {
+            let config = load_config(cli.config.as_deref(), &state_dir)?;
+            config.validate()?;
+            let sessions = open_sessions(&state_dir)?;
+            let runtime = build_runtime(&config, sessions.clone()).await?;
+
+            repl::run_repl(
+                runtime,
+                repl::ReplConfig {
+                    agent_id: agent.map(frankclaw_core::types::AgentId::new),
+                    session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
+                    model_id: model,
+                    thinking_budget: think,
+                },
+            )
+            .await?;
+        }
+
         Command::Gateway { port } => {
             let config_path = cli
                 .config
