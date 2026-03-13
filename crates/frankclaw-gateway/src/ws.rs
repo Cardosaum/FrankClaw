@@ -219,6 +219,12 @@ async fn dispatch_method(
         Method::WebhooksTest => {
             crate::methods::webhooks_test(state, request).await
         }
+        Method::SessionsDelete => {
+            crate::methods::sessions_delete(state, request).await
+        }
+        Method::SessionsPatch => {
+            crate::methods::sessions_patch(state, request).await
+        }
         _ => ResponseFrame::err(
             request.id,
             501,

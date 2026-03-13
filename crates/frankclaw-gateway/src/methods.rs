@@ -629,6 +629,97 @@ fn parse_canvas_blocks(
     serde_json::from_value(value.clone()).map_err(|_| "invalid canvas blocks payload")
 }
 
+/// Handle `sessions.delete` method.
+pub async fn sessions_delete(
+    state: &Arc<GatewayState>,
+    request: RequestFrame,
+) -> ResponseFrame {
+    let session_key = match parse_session_key_param(&request) {
+        Ok(key) => key,
+        Err(response) => return response,
+    };
+
+    // Cancel any active chat run for this session.
+    let run_key = session_key.as_str().to_string();
+    if let Some((_, token)) = state.active_runs.remove(&run_key) {
+        token.cancel();
+    }
+
+    match state.sessions.delete(&session_key).await {
+        Ok(()) => {
+            let event = Frame::Event(EventFrame {
+                event: EventType::SessionUpdated,
+                payload: serde_json::json!({
+                    "session_key": session_key.as_str(),
+                    "action": "deleted",
+                }),
+            });
+            if let Ok(json) = serde_json::to_string(&event) {
+                let _ = state.broadcast.send(json);
+            }
+            ResponseFrame::ok(
+                request.id,
+                serde_json::json!({
+                    "session_key": session_key.as_str(),
+                    "status": "deleted",
+                }),
+            )
+        }
+        Err(err) => ResponseFrame::err(request.id, 500, err.to_string()),
+    }
+}
+
+/// Handle `sessions.patch` method — update session metadata fields.
+pub async fn sessions_patch(
+    state: &Arc<GatewayState>,
+    request: RequestFrame,
+) -> ResponseFrame {
+    let session_key = match parse_session_key_param(&request) {
+        Ok(key) => key,
+        Err(response) => return response,
+    };
+
+    // Get existing session.
+    let mut session = match state.sessions.get(&session_key).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return ResponseFrame::err(request.id, 404, "session not found"),
+        Err(err) => return ResponseFrame::err(request.id, 500, err.to_string()),
+    };
+
+    // Apply patch fields to metadata.
+    let patch = match request.params.get("patch") {
+        Some(patch) if patch.is_object() => patch.clone(),
+        _ => return ResponseFrame::err(request.id, 400, "patch object is required"),
+    };
+
+    // Merge patch into existing metadata.
+    if let (Some(existing), Some(incoming)) = (session.metadata.as_object_mut(), patch.as_object()) {
+        for (key, value) in incoming {
+            existing.insert(key.clone(), value.clone());
+        }
+    } else {
+        session.metadata = patch;
+    }
+
+    match state.sessions.upsert(&session).await {
+        Ok(()) => {
+            let event = Frame::Event(EventFrame {
+                event: EventType::SessionUpdated,
+                payload: serde_json::json!({
+                    "session_key": session_key.as_str(),
+                    "action": "patched",
+                }),
+            });
+            if let Ok(json) = serde_json::to_string(&event) {
+                let _ = state.broadcast.send(json);
+            }
+            let json = serde_json::to_value(&session).unwrap_or_default();
+            ResponseFrame::ok(request.id, serde_json::json!({ "session": json }))
+        }
+        Err(err) => ResponseFrame::err(request.id, 500, err.to_string()),
+    }
+}
+
 fn parse_session_key_param(
     request: &RequestFrame,
 ) -> std::result::Result<SessionKey, ResponseFrame> {
@@ -1300,6 +1391,139 @@ mod tests {
 
         let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
         let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn sessions_delete_removes_session() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-delete-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, sessions) = build_test_state(&temp_dir).await;
+        let session_key = SessionKey::from_raw("agent:main:web:default:user-del");
+
+        let entry = SessionEntry {
+            key: session_key.clone(),
+            agent_id: AgentId::default_agent(),
+            channel: ChannelId::new("web"),
+            account_id: "default".into(),
+            scoping: SessionScoping::PerChannelPeer,
+            created_at: chrono::Utc::now(),
+            last_message_at: None,
+            thread_id: None,
+            metadata: serde_json::json!({}),
+        };
+        sessions.upsert(&entry).await.expect("session should upsert");
+
+        // Delete.
+        let response = sessions_delete(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("del-1".into()),
+                method: Method::SessionsDelete,
+                params: serde_json::json!({ "session_key": session_key.as_str() }),
+            },
+        )
+        .await;
+        assert!(response.error.is_none(), "delete should succeed");
+        assert_eq!(response.result.as_ref().unwrap()["status"], "deleted");
+
+        // Verify it's gone.
+        let got = sessions.get(&session_key).await.expect("get should work");
+        assert!(got.is_none(), "session should be deleted");
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn sessions_delete_requires_session_key() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-delete-nokey-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, _sessions) = build_test_state(&temp_dir).await;
+
+        let response = sessions_delete(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("del-2".into()),
+                method: Method::SessionsDelete,
+                params: serde_json::json!({}),
+            },
+        )
+        .await;
+        assert_eq!(response.error.as_ref().map(|e| e.code), Some(400));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn sessions_patch_updates_metadata() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-patch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, sessions) = build_test_state(&temp_dir).await;
+        let session_key = SessionKey::from_raw("agent:main:web:default:user-patch");
+
+        let entry = SessionEntry {
+            key: session_key.clone(),
+            agent_id: AgentId::default_agent(),
+            channel: ChannelId::new("web"),
+            account_id: "default".into(),
+            scoping: SessionScoping::PerChannelPeer,
+            created_at: chrono::Utc::now(),
+            last_message_at: None,
+            thread_id: None,
+            metadata: serde_json::json!({"label": "old"}),
+        };
+        sessions.upsert(&entry).await.expect("session should upsert");
+
+        let response = sessions_patch(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("patch-1".into()),
+                method: Method::SessionsPatch,
+                params: serde_json::json!({
+                    "session_key": session_key.as_str(),
+                    "patch": { "label": "new", "extra": 42 },
+                }),
+            },
+        )
+        .await;
+        assert!(response.error.is_none(), "patch should succeed");
+
+        // Verify metadata was merged.
+        let updated = sessions.get(&session_key).await.unwrap().unwrap();
+        assert_eq!(updated.metadata["label"], "new");
+        assert_eq!(updated.metadata["extra"], 42);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn sessions_patch_returns_404_for_missing_session() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-patch-404-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, _sessions) = build_test_state(&temp_dir).await;
+
+        let response = sessions_patch(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("patch-2".into()),
+                method: Method::SessionsPatch,
+                params: serde_json::json!({
+                    "session_key": "nonexistent:session",
+                    "patch": { "label": "test" },
+                }),
+            },
+        )
+        .await;
+        assert_eq!(response.error.as_ref().map(|e| e.code), Some(404));
+
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 }
