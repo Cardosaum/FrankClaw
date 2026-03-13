@@ -90,6 +90,27 @@ impl frankclaw_core::tool_services::MessageSender for ChannelSet {
             other => Ok(format!("{:?}", other)),
         }
     }
+
+    async fn send_reaction(
+        &self,
+        channel: &str,
+        account_id: &str,
+        to: &str,
+        thread_id: Option<&str>,
+        platform_message_id: &str,
+        emoji: &str,
+    ) -> frankclaw_core::error::Result<()> {
+        let channel_id = ChannelId::new(channel);
+        let plugin = self.get(&channel_id).ok_or_else(|| {
+            FrankClawError::InvalidRequest {
+                msg: format!("channel '{}' not found or not enabled", channel),
+            }
+        })?;
+
+        plugin
+            .send_reaction(account_id, to, thread_id, platform_message_id, emoji)
+            .await
+    }
 }
 
 pub fn load_from_config(config: &FrankClawConfig) -> Result<ChannelSet> {

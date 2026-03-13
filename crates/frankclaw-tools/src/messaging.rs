@@ -118,6 +118,120 @@ impl Tool for MessageSendTool {
     }
 }
 
+pub struct MessageReactTool;
+
+#[async_trait]
+impl Tool for MessageReactTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "message.react".into(),
+            description: "Send an emoji reaction to a message on a channel."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["channel", "to", "message_id", "emoji"],
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "description": "Channel name (e.g., 'telegram', 'discord', 'slack')."
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "Chat/channel ID where the message lives."
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "Platform message ID to react to."
+                    },
+                    "emoji": {
+                        "type": "string",
+                        "description": "Emoji to react with (e.g., '👍', '❤️', '✅')."
+                    },
+                    "account_id": {
+                        "type": "string",
+                        "description": "Account ID to send from. Default: 'default'."
+                    },
+                    "thread_id": {
+                        "type": "string",
+                        "description": "Optional thread/topic ID."
+                    }
+                }
+            }),
+            risk_level: ToolRiskLevel::Mutating,
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let channels = ctx.channels.as_ref().ok_or_else(|| FrankClawError::AgentRuntime {
+            msg: "message.react is not available: no channel service configured".into(),
+        })?;
+
+        let channel = args
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| FrankClawError::InvalidRequest {
+                msg: "message.react requires a non-empty channel".into(),
+            })?;
+
+        let to = args
+            .get("to")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| FrankClawError::InvalidRequest {
+                msg: "message.react requires a non-empty 'to'".into(),
+            })?;
+
+        let message_id = args
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| FrankClawError::InvalidRequest {
+                msg: "message.react requires a message_id".into(),
+            })?;
+
+        let emoji = args
+            .get("emoji")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| FrankClawError::InvalidRequest {
+                msg: "message.react requires an emoji".into(),
+            })?;
+
+        // Sanity check: emoji should be short.
+        if emoji.len() > 32 {
+            return Err(FrankClawError::InvalidRequest {
+                msg: "emoji is too long".into(),
+            });
+        }
+
+        let account_id = args
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let thread_id = args
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty());
+
+        channels
+            .send_reaction(channel, account_id, to, thread_id, message_id, emoji)
+            .await?;
+
+        Ok(serde_json::json!({
+            "status": "reacted",
+            "channel": channel,
+            "message_id": message_id,
+            "emoji": emoji,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +241,14 @@ mod tests {
         let tool = MessageSendTool;
         let def = tool.definition();
         assert_eq!(def.name, "message.send");
+        assert_eq!(def.risk_level, ToolRiskLevel::Mutating);
+    }
+
+    #[test]
+    fn message_react_definition_is_valid() {
+        let tool = MessageReactTool;
+        let def = tool.definition();
+        assert_eq!(def.name, "message.react");
         assert_eq!(def.risk_level, ToolRiskLevel::Mutating);
     }
 }

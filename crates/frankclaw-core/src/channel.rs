@@ -188,6 +188,21 @@ pub trait ChannelPlugin: Send + Sync + 'static {
         })
     }
 
+    /// Send an emoji reaction to a message (if supported).
+    async fn send_reaction(
+        &self,
+        _account_id: &str,
+        _to: &str,
+        _thread_id: Option<&str>,
+        _platform_message_id: &str,
+        _emoji: &str,
+    ) -> Result<()> {
+        Err(crate::error::FrankClawError::Channel {
+            channel: self.id(),
+            msg: "reactions not supported".into(),
+        })
+    }
+
     /// Start streaming a response (if supported).
     async fn stream_start(
         &self,

@@ -34,6 +34,17 @@ pub trait MessageSender: Send + Sync + 'static {
         thread_id: Option<&str>,
         reply_to: Option<&str>,
     ) -> Result<String>;
+
+    /// Send an emoji reaction to a message.
+    async fn send_reaction(
+        &self,
+        channel: &str,
+        account_id: &str,
+        to: &str,
+        thread_id: Option<&str>,
+        platform_message_id: &str,
+        emoji: &str,
+    ) -> Result<()>;
 }
 
 /// Manage scheduled cron jobs.

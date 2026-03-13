@@ -153,6 +153,7 @@ impl ToolRegistry {
         registry.register(Arc::new(file::FileEditTool));
         // Messaging
         registry.register(Arc::new(messaging::MessageSendTool));
+        registry.register(Arc::new(messaging::MessageReactTool));
         // Cron tools
         registry.register(Arc::new(cron_tools::CronListTool));
         registry.register(Arc::new(cron_tools::CronAddTool));
@@ -337,7 +338,7 @@ fn truthy_env(name: &str) -> bool {
 pub fn tool_risk_level(tool_name: &str) -> ToolRiskLevel {
     match tool_name {
         "browser.click" | "browser.type" | "browser.press" | "browser.select_option" | "bash"
-        | "file.write" | "file.edit" | "message.send" | "cron.add" => {
+        | "file.write" | "file.edit" | "message.send" | "message.react" | "cron.add" => {
             ToolRiskLevel::Mutating
         }
         "cron.remove" => ToolRiskLevel::Destructive,
