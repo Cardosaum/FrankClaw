@@ -21,7 +21,7 @@ const MAX_WRITE_BYTES: usize = 1024 * 1024;
 /// - Rejects `..` components
 /// - Resolves to an absolute path inside the workspace
 /// - Rejects symlinks that escape the workspace
-fn validate_workspace_path(workspace: &Path, requested: &str) -> Result<PathBuf> {
+pub(crate) fn validate_workspace_path(workspace: &Path, requested: &str) -> Result<PathBuf> {
     let requested = requested.trim();
     if requested.is_empty() {
         return Err(FrankClawError::InvalidRequest {

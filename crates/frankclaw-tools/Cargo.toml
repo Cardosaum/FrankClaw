@@ -18,6 +18,7 @@ reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 html2text = { workspace = true }
+pdf-extract = { workspace = true }
 regex = { workspace = true }
 
 [dev-dependencies]

@@ -7,6 +7,7 @@ pub mod file;
 pub mod mcp;
 pub mod memory;
 pub mod messaging;
+pub mod pdf;
 pub mod sessions;
 pub mod web;
 
@@ -158,6 +159,8 @@ impl ToolRegistry {
         registry.register(Arc::new(config_tools::AgentsListTool));
         // Memory tools
         registry.register(Arc::new(memory::MemoryGetTool));
+        // PDF tools
+        registry.register(Arc::new(pdf::PdfReadTool));
         registry
     }
 

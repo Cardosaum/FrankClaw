@@ -107,6 +107,9 @@ url = { version = "2", features = ["serde"] }
 # HTML→text conversion
 html2text = "0.14"
 
+# PDF text extraction
+pdf-extract = "0.10"
+
 # Byte sizes
 bytesize = { version = "2", features = ["serde"] }
 
