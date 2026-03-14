@@ -93,7 +93,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # Error handling
 thiserror = "2"
 anyhow = "1"
-snafu = { version = "0.8", features = ["rust_1_81"] }
+snafu = "0.9"
 
 # Derive macros
 strum = { version = "0.26", features = ["derive"] }
