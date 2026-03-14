@@ -429,14 +429,7 @@ mod tests {
                 }],
             )],
             max_tokens: Some(1024),
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         };
         let body = build_request_body(&request);
         let msg = &body["messages"][0];
@@ -458,14 +451,7 @@ mod tests {
             model_id: "gpt-4o".into(),
             messages: vec![CompletionMessage::text(Role::User, "hello")],
             max_tokens: Some(1024),
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         };
         let body = build_request_body(&request);
         let msg = &body["messages"][0];
@@ -491,15 +477,7 @@ mod tests {
                     },
                 ],
             )],
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         };
         let body = build_request_body(&request);
         let content = body["messages"][0]["content"]
@@ -515,15 +493,8 @@ mod tests {
         let request = CompletionRequest {
             model_id: "gpt-4o".into(),
             messages: vec![CompletionMessage::text(Role::User, "hello")],
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
             parallel_tool_calls: Some(false),
-            seed: None,
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         };
         let body = build_request_body(&request);
         assert_eq!(body["parallel_tool_calls"], false);
@@ -534,15 +505,8 @@ mod tests {
         let request = CompletionRequest {
             model_id: "gpt-4o".into(),
             messages: vec![CompletionMessage::text(Role::User, "hello")],
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
             seed: Some(42),
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         };
         let body = build_request_body(&request);
         assert_eq!(body["seed"], 42);
@@ -553,15 +517,8 @@ mod tests {
         let request = CompletionRequest {
             model_id: "gpt-4o".into(),
             messages: vec![CompletionMessage::text(Role::User, "hello")],
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
             response_format: Some(ResponseFormat::JsonObject),
-            reasoning_effort: None,
+            ..Default::default()
         };
         let body = build_request_body(&request);
         assert_eq!(body["response_format"]["type"], "json_object");
@@ -572,15 +529,8 @@ mod tests {
         let request = CompletionRequest {
             model_id: "o3-mini".into(),
             messages: vec![CompletionMessage::text(Role::User, "hello")],
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
-            response_format: None,
             reasoning_effort: Some("high".into()),
+            ..Default::default()
         };
         let body = build_request_body(&request);
         assert_eq!(body["reasoning_effort"], "high");
@@ -591,15 +541,7 @@ mod tests {
         let request = CompletionRequest {
             model_id: "gpt-4o".into(),
             messages: vec![CompletionMessage::text(Role::User, "hello")],
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         };
         let body = build_request_body(&request);
         assert!(body.get("parallel_tool_calls").is_none());
