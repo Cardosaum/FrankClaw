@@ -475,12 +475,11 @@ mod tests {
     fn location_is_captured() {
         let error = AuthRequiredSnafu.build();
         let loc = error.location();
+        let loc_str = loc.to_string();
         assert!(
-            loc.file.contains("error.rs"),
-            "location should point to this file, got: {}",
-            loc.file
+            loc_str.contains("error.rs"),
+            "location should point to this file, got: {loc_str}",
         );
-        assert!(loc.line > 0, "line should be non-zero");
     }
 
     #[test]
@@ -489,11 +488,13 @@ mod tests {
         let error = InternalSnafu { msg: "test" }.build();
         let line_after = line!();
 
-        let loc = error.location();
+        let loc_str = error.location().to_string();
+        // Location format: "file:line:column"
+        let parts: Vec<&str> = loc_str.split(':').collect();
+        let loc_line: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
         assert!(
-            loc.line >= line_before && loc.line <= line_after,
-            "expected location line between {line_before} and {line_after}, got {}",
-            loc.line
+            loc_line >= line_before && loc_line <= line_after,
+            "expected location line between {line_before} and {line_after}, got {loc_str}",
         );
     }
 

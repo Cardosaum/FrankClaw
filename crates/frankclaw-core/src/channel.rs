@@ -171,12 +171,11 @@ pub trait ChannelPlugin: Send + Sync + 'static {
     /// Build a channel error for this adapter.
     #[track_caller]
     fn channel_err(&self, msg: String) -> crate::error::FrankClawError {
-        use snafu::IntoError;
         crate::error::ChannelSnafu {
             channel: self.id(),
             msg,
         }
-        .into_error(snafu::NoneError)
+        .build()
     }
 
     /// Edit a previously sent message (if supported).
