@@ -416,7 +416,7 @@ impl CopilotProvider {
             base_url,
             api_token,
             self.models.clone(),
-        );
+        )?;
 
         let mut inner = self.inner.write().await;
         *inner = Some(CopilotInner {

@@ -178,16 +178,19 @@ impl VisionProvider {
         api_base: impl Into<String>,
         api_key: secrecy::SecretString,
         model: impl Into<String>,
-    ) -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .build()
-                .expect("invariant: HTTP client build should not fail"),
+    ) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|e| FrankClawError::Internal {
+                msg: format!("failed to build HTTP client: {e}"),
+            })?;
+        Ok(Self {
+            client,
             api_base: api_base.into(),
             api_key,
             model: model.into(),
-        }
+        })
     }
 
     /// Build the OpenAI-compatible vision request body.
@@ -295,16 +298,19 @@ impl WhisperProvider {
         api_base: impl Into<String>,
         api_key: secrecy::SecretString,
         model: impl Into<String>,
-    ) -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .expect("invariant: HTTP client build should not fail"),
+    ) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| FrankClawError::Internal {
+                msg: format!("failed to build HTTP client: {e}"),
+            })?;
+        Ok(Self {
+            client,
             api_base: api_base.into(),
             api_key,
             model: model.into(),
-        }
+        })
     }
 }
 
@@ -671,7 +677,10 @@ impl UnderstandingChain {
                         .vision_model
                         .as_deref()
                         .unwrap_or("gpt-4o");
-                    providers.push(Box::new(VisionProvider::new(base_url, api_key, model)));
+                    match VisionProvider::new(base_url, api_key, model) {
+                        Ok(p) => providers.push(Box::new(p)),
+                        Err(e) => tracing::warn!(error = %e, "failed to build vision provider"),
+                    }
                 }
             }
             "anthropic" => {
@@ -713,7 +722,10 @@ impl UnderstandingChain {
                         .transcription_model
                         .as_deref()
                         .unwrap_or("whisper-1");
-                    providers.push(Box::new(WhisperProvider::new(base_url, api_key, model)));
+                    match WhisperProvider::new(base_url, api_key, model) {
+                        Ok(p) => providers.push(Box::new(p)),
+                        Err(e) => tracing::warn!(error = %e, "failed to build whisper provider"),
+                    }
                 }
             }
             _ => {}

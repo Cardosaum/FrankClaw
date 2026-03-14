@@ -2961,7 +2961,7 @@ mod tests {
             "12345".into(),
             secrecy::SecretString::from("verify-me".to_string()),
             None,
-        ));
+        ).expect("whatsapp channel should build"));
         let mut map: HashMap<
             frankclaw_core::types::ChannelId,
             Arc<dyn frankclaw_core::channel::ChannelPlugin>,
@@ -3078,7 +3078,7 @@ mod tests {
             "12345".into(),
             secrecy::SecretString::from("verify-me".to_string()),
             Some(secrecy::SecretString::from("app-secret".to_string())),
-        ));
+        ).expect("whatsapp channel should build"));
         let mut map: HashMap<
             frankclaw_core::types::ChannelId,
             Arc<dyn frankclaw_core::channel::ChannelPlugin>,

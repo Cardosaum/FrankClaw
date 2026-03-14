@@ -1823,7 +1823,13 @@ async fn fetch_image_attachments(
 ) -> Vec<ImageContent> {
     use base64::Engine;
 
-    let fetcher = frankclaw_media::SafeFetcher::new(MAX_VISION_IMAGE_BYTES);
+    let fetcher = match frankclaw_media::SafeFetcher::new(MAX_VISION_IMAGE_BYTES) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to build image fetcher");
+            return Vec::new();
+        }
+    };
     let mut images = Vec::new();
 
     for attachment in attachments {
@@ -1900,16 +1906,16 @@ fn build_providers(
                         .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
                     resolve_secret(provider, "OPENAI_API_KEY")?,
                     provider.models.clone(),
-                )),
+                )?),
                 "anthropic" => Arc::new(AnthropicProvider::new(
                     provider.id.clone(),
                     resolve_secret(provider, "ANTHROPIC_API_KEY")?,
                     provider.models.clone(),
-                )),
+                )?),
                 "ollama" => Arc::new(OllamaProvider::new(
                     provider.id.clone(),
                     provider.base_url.clone(),
-                )),
+                )?),
                 // OpenAI-compatible providers with default base URLs.
                 "google" | "gemini" => Arc::new(OpenAiProvider::new(
                     provider.id.clone(),
@@ -1919,7 +1925,7 @@ fn build_providers(
                         .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta/openai".to_string()),
                     resolve_secret(provider, "GOOGLE_API_KEY")?,
                     provider.models.clone(),
-                )),
+                )?),
                 "openrouter" => Arc::new(OpenAiProvider::new(
                     provider.id.clone(),
                     provider
@@ -1928,7 +1934,7 @@ fn build_providers(
                         .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string()),
                     resolve_secret(provider, "OPENROUTER_API_KEY")?,
                     provider.models.clone(),
-                )),
+                )?),
                 "groq" => Arc::new(OpenAiProvider::new(
                     provider.id.clone(),
                     provider
@@ -1937,7 +1943,7 @@ fn build_providers(
                         .unwrap_or_else(|| "https://api.groq.com/openai/v1".to_string()),
                     resolve_secret(provider, "GROQ_API_KEY")?,
                     provider.models.clone(),
-                )),
+                )?),
                 "together" => Arc::new(OpenAiProvider::new(
                     provider.id.clone(),
                     provider
@@ -1946,7 +1952,7 @@ fn build_providers(
                         .unwrap_or_else(|| "https://api.together.xyz/v1".to_string()),
                     resolve_secret(provider, "TOGETHER_API_KEY")?,
                     provider.models.clone(),
-                )),
+                )?),
                 "deepseek" => Arc::new(OpenAiProvider::new(
                     provider.id.clone(),
                     provider
@@ -1955,7 +1961,7 @@ fn build_providers(
                         .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
                     resolve_secret(provider, "DEEPSEEK_API_KEY")?,
                     provider.models.clone(),
-                )),
+                )?),
                 "github-copilot" | "copilot" => {
                     let state_dir = dirs::data_dir()
                         .unwrap_or_else(|| std::path::PathBuf::from("."))
