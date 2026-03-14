@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{InternalSnafu, Result};
 use frankclaw_core::media::{FileScanService, ScanVerdict};
 
 /// Minimum number of engines flagging a file to consider it malicious.
@@ -42,9 +42,9 @@ impl VirusTotalScanner {
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
-            .map_err(|e| FrankClawError::Internal {
+            .map_err(|e| InternalSnafu {
                 msg: format!("failed to build HTTP client: {e}"),
-            })?;
+            }.build())?;
         Ok(Self { client, api_key })
     }
 
@@ -73,22 +73,22 @@ impl VirusTotalScanner {
             .multipart(form)
             .send()
             .await
-            .map_err(|e| FrankClawError::Internal {
+            .map_err(|e| InternalSnafu {
                 msg: format!("VirusTotal upload failed: {e}"),
-            })?;
+            }.build())?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(FrankClawError::Internal {
+            return InternalSnafu {
                 msg: format!("VirusTotal upload returned {status}: {body}"),
-            });
+            }.fail();
         }
 
         let upload: VtUploadResponse = response.json().await.map_err(|e| {
-            FrankClawError::Internal {
+            InternalSnafu {
                 msg: format!("VirusTotal upload response parse failed: {e}"),
-            }
+            }.build()
         })?;
 
         Ok(upload.data.id)
@@ -101,9 +101,9 @@ impl VirusTotalScanner {
 
         loop {
             if tokio::time::Instant::now() >= deadline {
-                return Err(FrankClawError::Internal {
-                    msg: "VirusTotal analysis timed out".into(),
-                });
+                return InternalSnafu {
+                    msg: "VirusTotal analysis timed out",
+                }.fail();
             }
 
             let response = self.client
@@ -111,22 +111,22 @@ impl VirusTotalScanner {
                 .header("x-apikey", self.api_key.expose_secret())
                 .send()
                 .await
-                .map_err(|e| FrankClawError::Internal {
+                .map_err(|e| InternalSnafu {
                     msg: format!("VirusTotal poll failed: {e}"),
-                })?;
+                }.build())?;
 
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                return Err(FrankClawError::Internal {
+                return InternalSnafu {
                     msg: format!("VirusTotal analysis returned {status}: {body}"),
-                });
+                }.fail();
             }
 
             let analysis: VtAnalysisResponse = response.json().await.map_err(|e| {
-                FrankClawError::Internal {
+                InternalSnafu {
                     msg: format!("VirusTotal analysis response parse failed: {e}"),
-                }
+                }.build()
             })?;
 
             if analysis.data.attributes.status == "completed" {

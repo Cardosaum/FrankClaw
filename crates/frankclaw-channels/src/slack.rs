@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
 use frankclaw_core::channel::{ChannelPlugin, InboundMessage, OutboundMessage, SendResult, ChannelCapabilities, HealthStatus, EditMessageTarget, DeleteMessageTarget, InboundAttachment};
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{FrankClawError, Result, ChannelSnafu, RateLimitedSnafu};
 use frankclaw_core::types::ChannelId;
 
 use crate::inbound_media::infer_inbound_mime_type;
@@ -412,9 +412,9 @@ impl ChannelPlugin for SlackChannel {
                 thread_id: msg.thread_id.clone(),
                 draft_message_id: platform_message_id,
             }),
-            SendResult::RateLimited { retry_after_secs } => Err(FrankClawError::RateLimited {
+            SendResult::RateLimited { retry_after_secs } => RateLimitedSnafu {
                 retry_after_secs: retry_after_secs.unwrap_or(1),
-            }),
+            }.fail(),
             SendResult::Failed { reason } => Err(self.channel_err(reason)),
         }
     }
@@ -470,29 +470,29 @@ fn parse_socket_frame(channel_id: ChannelId, frame: Message) -> Result<serde_jso
     let text = match frame {
         Message::Text(text) => text,
         Message::Binary(bytes) => String::from_utf8(bytes.to_vec())
-            .map_err(|e| FrankClawError::Channel {
+            .map_err(|e| ChannelSnafu {
                 channel: channel_id.clone(),
                 msg: format!("slack socket mode sent invalid UTF-8: {e}"),
-            })?
+            }.build())?
             .into(),
         Message::Close(_) => {
-            return Err(FrankClawError::Channel {
+            return ChannelSnafu {
                 channel: channel_id,
-                msg: "slack socket mode closed".into(),
-            });
+                msg: "slack socket mode closed",
+            }.fail();
         }
         _ => {
-            return Err(FrankClawError::Channel {
+            return ChannelSnafu {
                 channel: channel_id,
-                msg: "slack socket mode sent unexpected frame type".into(),
-            });
+                msg: "slack socket mode sent unexpected frame type",
+            }.fail();
         }
     };
 
-    serde_json::from_str(text.as_ref()).map_err(|e| FrankClawError::Channel {
+    serde_json::from_str(text.as_ref()).map_err(|e| ChannelSnafu {
         channel: channel_id,
         msg: format!("slack socket mode sent invalid JSON: {e}"),
-    })
+    }.build())
 }
 
 fn parse_event_message(event: &serde_json::Value, bot_user_id: Option<&str>) -> Option<InboundMessage> {
@@ -914,37 +914,37 @@ mod tests {
 
     #[test]
     fn is_fatal_slack_error_detects_invalid_auth() {
-        let err = FrankClawError::Channel {
+        let err = ChannelSnafu {
             channel: ChannelId::new("slack"),
-            msg: "invalid_auth".into(),
-        };
+            msg: "invalid_auth",
+        }.build();
         assert!(is_fatal_slack_error(&err));
     }
 
     #[test]
     fn is_fatal_slack_error_detects_token_revoked() {
-        let err = FrankClawError::Channel {
+        let err = ChannelSnafu {
             channel: ChannelId::new("slack"),
-            msg: "token_revoked".into(),
-        };
+            msg: "token_revoked",
+        }.build();
         assert!(is_fatal_slack_error(&err));
     }
 
     #[test]
     fn is_fatal_slack_error_detects_account_inactive() {
-        let err = FrankClawError::Channel {
+        let err = ChannelSnafu {
             channel: ChannelId::new("slack"),
-            msg: "account_inactive".into(),
-        };
+            msg: "account_inactive",
+        }.build();
         assert!(is_fatal_slack_error(&err));
     }
 
     #[test]
     fn is_fatal_slack_error_does_not_match_transient_errors() {
-        let err = FrankClawError::Channel {
+        let err = ChannelSnafu {
             channel: ChannelId::new("slack"),
-            msg: "slack socket mode closed".into(),
-        };
+            msg: "slack socket mode closed",
+        }.build();
         assert!(!is_fatal_slack_error(&err));
     }
 

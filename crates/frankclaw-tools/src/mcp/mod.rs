@@ -22,7 +22,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, trace, warn};
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{AgentRuntimeSnafu, InternalSnafu, Result};
 use frankclaw_core::model::{ToolDef, ToolRiskLevel};
 
 use crate::{Tool, ToolContext};
@@ -84,9 +84,9 @@ impl McpClient {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|e| FrankClawError::Internal {
+            .map_err(|e| InternalSnafu {
                 msg: format!("failed to build HTTP client: {e}"),
-            })?;
+            }.build())?;
         Ok(Self {
             name,
             transport: McpTransportInner::Http {
@@ -116,17 +116,17 @@ impl McpClient {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| FrankClawError::Internal {
+            .map_err(|e| InternalSnafu {
                 msg: format!("failed to spawn MCP server '{command}': {e}"),
-            })?;
+            }.build())?;
 
-        let stdin = child.stdin.take().ok_or_else(|| FrankClawError::Internal {
-            msg: "failed to capture MCP server stdin".into(),
-        })?;
+        let stdin = child.stdin.take().ok_or_else(|| InternalSnafu {
+            msg: "failed to capture MCP server stdin",
+        }.build())?;
 
-        let stdout = child.stdout.take().ok_or_else(|| FrankClawError::Internal {
-            msg: "failed to capture MCP server stdout".into(),
-        })?;
+        let stdout = child.stdout.take().ok_or_else(|| InternalSnafu {
+            msg: "failed to capture MCP server stdout",
+        }.build())?;
 
         // Drain stderr in background to prevent blocking.
         if let Some(stderr) = child.stderr.take() {
@@ -185,41 +185,41 @@ impl McpClient {
                     builder = builder.header(k, v);
                 }
                 let body = serde_json::to_string(request).map_err(|e| {
-                    FrankClawError::Internal {
+                    InternalSnafu {
                         msg: format!("failed to serialize MCP request: {e}"),
-                    }
+                    }.build()
                 })?;
 
                 trace!(method = %request.method, "MCP HTTP request");
 
                 let resp = builder.body(body).send().await.map_err(|e| {
-                    FrankClawError::Internal {
+                    InternalSnafu {
                         msg: format!("MCP HTTP request failed: {e}"),
-                    }
+                    }.build()
                 })?;
 
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
                     let body = if body.len() > 200 { &body[..200] } else { &body };
-                    return Err(FrankClawError::Internal {
+                    return InternalSnafu {
                         msg: format!("MCP server returned {status}: {body}"),
-                    });
+                    }.fail();
                 }
 
-                let text = resp.text().await.map_err(|e| FrankClawError::Internal {
+                let text = resp.text().await.map_err(|e| InternalSnafu {
                     msg: format!("failed to read MCP response: {e}"),
-                })?;
+                }.build())?;
 
-                serde_json::from_str(&text).map_err(|e| FrankClawError::Internal {
+                serde_json::from_str(&text).map_err(|e| InternalSnafu {
                     msg: format!("failed to parse MCP response: {e}"),
-                })
+                }.build())
             }
             McpTransportInner::Stdio { stdin, stdout, .. } => {
                 let body = serde_json::to_string(request).map_err(|e| {
-                    FrankClawError::Internal {
+                    InternalSnafu {
                         msg: format!("failed to serialize MCP request: {e}"),
-                    }
+                    }.build()
                 })?;
 
                 trace!(method = %request.method, "MCP stdio request");
@@ -230,15 +230,15 @@ impl McpClient {
                     stdin_guard
                         .write_all(body.as_bytes())
                         .await
-                        .map_err(|e| FrankClawError::Internal {
+                        .map_err(|e| InternalSnafu {
                             msg: format!("MCP stdin write failed: {e}"),
-                        })?;
+                        }.build())?;
                     stdin_guard
                         .write_all(b"\n")
                         .await
-                        .map_err(|e| FrankClawError::Internal {
+                        .map_err(|e| InternalSnafu {
                             msg: format!("MCP stdin write failed: {e}"),
-                        })?;
+                        }.build())?;
                     let _ = stdin_guard.flush().await;
                     // Return a dummy response for notifications.
                     return Ok(McpResponse {
@@ -253,15 +253,15 @@ impl McpClient {
                 stdin_guard
                     .write_all(body.as_bytes())
                     .await
-                    .map_err(|e| FrankClawError::Internal {
+                    .map_err(|e| InternalSnafu {
                         msg: format!("MCP stdin write failed: {e}"),
-                    })?;
+                    }.build())?;
                 stdin_guard
                     .write_all(b"\n")
                     .await
-                    .map_err(|e| FrankClawError::Internal {
+                    .map_err(|e| InternalSnafu {
                         msg: format!("MCP stdin write failed: {e}"),
-                    })?;
+                    }.build())?;
                 let _ = stdin_guard.flush().await;
                 drop(stdin_guard);
 
@@ -275,20 +275,20 @@ impl McpClient {
                 .await;
 
                 match read_result {
-                    Ok(Ok(0)) => Err(FrankClawError::Internal {
-                        msg: "MCP server closed stdout".into(),
-                    }),
+                    Ok(Ok(0)) => InternalSnafu {
+                        msg: "MCP server closed stdout",
+                    }.fail(),
                     Ok(Ok(_)) => {
-                        serde_json::from_str(line.trim()).map_err(|e| FrankClawError::Internal {
+                        serde_json::from_str(line.trim()).map_err(|e| InternalSnafu {
                             msg: format!("failed to parse MCP response: {e}"),
-                        })
+                        }.build())
                     }
-                    Ok(Err(e)) => Err(FrankClawError::Internal {
+                    Ok(Err(e)) => InternalSnafu {
                         msg: format!("MCP stdout read failed: {e}"),
-                    }),
-                    Err(_) => Err(FrankClawError::Internal {
-                        msg: "MCP server response timed out (30s)".into(),
-                    }),
+                    }.fail(),
+                    Err(_) => InternalSnafu {
+                        msg: "MCP server response timed out (30s)",
+                    }.fail(),
                 }
             }
         }
@@ -313,9 +313,9 @@ impl McpClient {
         let resp = self.send(&McpRequest::initialize(id)).await?;
 
         if let Some(err) = resp.error {
-            return Err(FrankClawError::Internal {
+            return InternalSnafu {
                 msg: format!("MCP initialization failed: {err}"),
-            });
+            }.fail();
         }
 
         debug!(server = %self.name, "MCP server initialized");
@@ -343,16 +343,16 @@ impl McpClient {
         let resp = self.send(&McpRequest::list_tools(id)).await?;
 
         if let Some(err) = resp.error {
-            return Err(FrankClawError::Internal {
+            return InternalSnafu {
                 msg: format!("MCP tools/list failed: {err}"),
-            });
+            }.fail();
         }
 
         let result: ListToolsResult =
             serde_json::from_value(resp.result.unwrap_or_else(|| serde_json::json!({"tools": []}))).map_err(
-                |e| FrankClawError::Internal {
+                |e| InternalSnafu {
                     msg: format!("failed to parse tools/list result: {e}"),
-                },
+                }.build(),
             )?;
 
         debug!(server = %self.name, count = result.tools.len(), "MCP tools discovered");
@@ -379,16 +379,16 @@ impl McpClient {
         let resp = self.send(&McpRequest::call_tool(id, tool_name, arguments)).await?;
 
         if let Some(err) = resp.error {
-            return Err(FrankClawError::Internal {
+            return InternalSnafu {
                 msg: format!("MCP tools/call '{tool_name}' failed: {err}"),
-            });
+            }.fail();
         }
 
         let result: CallToolResult =
             serde_json::from_value(resp.result.unwrap_or_else(|| serde_json::json!({"content": []}))).map_err(
-                |e| FrankClawError::Internal {
+                |e| InternalSnafu {
                     msg: format!("failed to parse tools/call result: {e}"),
-                },
+                }.build(),
             )?;
 
         // Extract text content from blocks.
@@ -404,9 +404,9 @@ impl McpClient {
             .join("\n");
 
         if result.is_error {
-            return Err(FrankClawError::AgentRuntime {
+            return AgentRuntimeSnafu {
                 msg: format!("MCP tool '{tool_name}' returned error: {text}"),
-            });
+            }.fail();
         }
 
         Ok(text)

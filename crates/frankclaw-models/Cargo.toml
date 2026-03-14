@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+snafu = { workspace = true }
 async-trait = { workspace = true }
 secrecy = { workspace = true }
 futures-util = { workspace = true }

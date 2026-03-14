@@ -1,6 +1,8 @@
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
+use crate::error::ConfigValidationSnafu;
+
 /// How the gateway authenticates incoming connections.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -43,23 +45,26 @@ impl AuthMode {
                     .as_ref()
                     .is_none_or(|token| token.expose_secret().trim().is_empty())
                 {
-                    return Err(crate::error::FrankClawError::ConfigValidation {
-                        msg: "gateway.auth.mode=token requires a non-empty token".into(),
-                    });
+                    return ConfigValidationSnafu {
+                        msg: "gateway.auth.mode=token requires a non-empty token",
+                    }
+                    .fail();
                 }
             }
             Self::Password { hash } => {
                 if hash.trim().is_empty() {
-                    return Err(crate::error::FrankClawError::ConfigValidation {
-                        msg: "gateway.auth.mode=password requires a non-empty hash".into(),
-                    });
+                    return ConfigValidationSnafu {
+                        msg: "gateway.auth.mode=password requires a non-empty hash",
+                    }
+                    .fail();
                 }
             }
             Self::TrustedProxy { identity_header } => {
                 if identity_header.trim().is_empty() {
-                    return Err(crate::error::FrankClawError::ConfigValidation {
-                        msg: "trusted_proxy auth requires an identity_header".into(),
-                    });
+                    return ConfigValidationSnafu {
+                        msg: "trusted_proxy auth requires an identity_header",
+                    }
+                    .fail();
                 }
             }
             Self::None | Self::Tailscale => {}

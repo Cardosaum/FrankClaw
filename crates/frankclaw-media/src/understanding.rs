@@ -4,7 +4,7 @@
 //! injected into model context. Supports image description via vision-capable
 //! models and audio transcription via the OpenAI Whisper API.
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{InternalSnafu, ModelProviderSnafu, Result};
 use frankclaw_core::media::{classify_extension, classify_mime, MediaKind};
 
 use async_trait::async_trait;
@@ -182,9 +182,9 @@ impl VisionProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
-            .map_err(|e| FrankClawError::Internal {
+            .map_err(|e| InternalSnafu {
                 msg: format!("failed to build HTTP client: {e}"),
-            })?;
+            }.build())?;
         Ok(Self {
             client,
             api_base: api_base.into(),
@@ -242,25 +242,25 @@ impl UnderstandingProvider for VisionProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| FrankClawError::ModelProvider {
+            .map_err(|e| ModelProviderSnafu {
                 msg: format!("request failed: {e}"),
-            })?;
+            }.build())?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
-            return Err(FrankClawError::ModelProvider {
+            return ModelProviderSnafu {
                 msg: format!("HTTP {status}: {body_text}"),
-            });
+            }.fail();
         }
 
         let json: serde_json::Value =
             response
                 .json()
                 .await
-                .map_err(|e| FrankClawError::ModelProvider {
+                .map_err(|e| ModelProviderSnafu {
                     msg: format!("vision: invalid JSON response: {e}"),
-                })?;
+                }.build())?;
 
         let text = json["choices"][0]["message"]["content"]
             .as_str()
@@ -302,9 +302,9 @@ impl WhisperProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .map_err(|e| FrankClawError::Internal {
+            .map_err(|e| InternalSnafu {
                 msg: format!("failed to build HTTP client: {e}"),
-            })?;
+            }.build())?;
         Ok(Self {
             client,
             api_base: api_base.into(),
@@ -335,9 +335,9 @@ impl UnderstandingProvider for WhisperProvider {
         let file_part = reqwest::multipart::Part::bytes(attachment.data.clone())
             .file_name(filename)
             .mime_str(&attachment.mime)
-            .map_err(|e| FrankClawError::ModelProvider {
+            .map_err(|e| ModelProviderSnafu {
                 msg: format!("invalid MIME type: {e}"),
-            })?;
+            }.build())?;
 
         let form = reqwest::multipart::Form::new()
             .text("model", self.model.clone())
@@ -353,25 +353,25 @@ impl UnderstandingProvider for WhisperProvider {
             .multipart(form)
             .send()
             .await
-            .map_err(|e| FrankClawError::ModelProvider {
+            .map_err(|e| ModelProviderSnafu {
                 msg: format!("request failed: {e}"),
-            })?;
+            }.build())?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
-            return Err(FrankClawError::ModelProvider {
+            return ModelProviderSnafu {
                 msg: format!("HTTP {status}: {body_text}"),
-            });
+            }.fail();
         }
 
         let json: serde_json::Value =
             response
                 .json()
                 .await
-                .map_err(|e| FrankClawError::ModelProvider {
+                .map_err(|e| ModelProviderSnafu {
                     msg: format!("whisper: invalid JSON response: {e}"),
-                })?;
+                }.build())?;
 
         let text = json["text"]
             .as_str()
@@ -379,9 +379,9 @@ impl UnderstandingProvider for WhisperProvider {
             .to_string();
 
         if text.is_empty() {
-            return Err(FrankClawError::ModelProvider {
-                msg: "transcription returned empty text".into(),
-            });
+            return ModelProviderSnafu {
+                msg: "transcription returned empty text",
+            }.fail();
         }
 
         Ok(UnderstandingOutput {
@@ -554,9 +554,9 @@ mod tests {
             fn id(&self) -> &str { "failing" }
             fn handles(&self) -> MediaKind { MediaKind::Image }
             async fn process(&self, _att: &MediaAttachment) -> Result<UnderstandingOutput> {
-                Err(FrankClawError::ModelProvider {
-                    msg: "intentional test failure".into(),
-                })
+                ModelProviderSnafu {
+                    msg: "intentional test failure",
+                }.fail()
             }
         }
 

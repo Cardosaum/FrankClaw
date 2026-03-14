@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{ConfigIoSnafu, ConfigValidationSnafu, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingPairing {
@@ -29,9 +29,9 @@ pub struct PairingStore {
 impl PairingStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| FrankClawError::ConfigIo {
+            std::fs::create_dir_all(parent).map_err(|e| ConfigIoSnafu {
                 msg: format!("failed to create pairing directory: {e}"),
-            })?;
+            }.build())?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -40,12 +40,12 @@ impl PairingStore {
         }
 
         let state = if path.exists() {
-            let content = std::fs::read_to_string(path).map_err(|e| FrankClawError::ConfigIo {
+            let content = std::fs::read_to_string(path).map_err(|e| ConfigIoSnafu {
                 msg: format!("failed to read pairing file: {e}"),
-            })?;
-            serde_json::from_str(&content).map_err(|e| FrankClawError::ConfigIo {
+            }.build())?;
+            serde_json::from_str(&content).map_err(|e| ConfigIoSnafu {
                 msg: format!("failed to parse pairing file: {e}"),
-            })?
+            }.build())?
         } else {
             PairingState::default()
         };
@@ -124,9 +124,9 @@ impl PairingStore {
                     && account_id
                         .is_none_or(|value| value == pending.account_id)
             })
-            .ok_or_else(|| FrankClawError::ConfigValidation {
+            .ok_or_else(|| ConfigValidationSnafu {
                 msg: format!("no pending pairing found for code '{code}'"),
-            })?;
+            }.build())?;
 
         let pending = state.pending.remove(index);
         state
@@ -153,12 +153,12 @@ fn generate_code() -> String {
 }
 
 fn save_state(path: &Path, state: &PairingState) -> Result<()> {
-    let content = serde_json::to_string_pretty(state).map_err(|e| FrankClawError::ConfigIo {
+    let content = serde_json::to_string_pretty(state).map_err(|e| ConfigIoSnafu {
         msg: format!("failed to serialize pairing state: {e}"),
-    })?;
-    std::fs::write(path, content).map_err(|e| FrankClawError::ConfigIo {
+    }.build())?;
+    std::fs::write(path, content).map_err(|e| ConfigIoSnafu {
         msg: format!("failed to write pairing file: {e}"),
-    })?;
+    }.build())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

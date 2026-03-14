@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
 use frankclaw_core::channel::{ChannelPlugin, InboundMessage, OutboundMessage, SendResult, ChannelCapabilities, HealthStatus, EditMessageTarget, DeleteMessageTarget, InboundAttachment};
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{FrankClawError, Result, ChannelSnafu, RateLimitedSnafu};
 use frankclaw_core::types::ChannelId;
 
 use crate::inbound_media::infer_inbound_mime_type;
@@ -343,9 +343,9 @@ impl ChannelPlugin for DiscordChannel {
                 thread_id: msg.thread_id.clone(),
                 draft_message_id: platform_message_id,
             }),
-            SendResult::RateLimited { retry_after_secs } => Err(FrankClawError::RateLimited {
+            SendResult::RateLimited { retry_after_secs } => RateLimitedSnafu {
                 retry_after_secs: retry_after_secs.unwrap_or(1),
-            }),
+            }.fail(),
             SendResult::Failed { reason } => Err(self.channel_err(reason)),
         }
     }
@@ -409,45 +409,45 @@ async fn next_json_frame(
     >,
 ) -> Result<serde_json::Value> {
     let Some(frame) = ws_rx.next().await else {
-        return Err(FrankClawError::Channel {
+        return ChannelSnafu {
             channel: channel_id,
-            msg: "discord gateway closed".into(),
-        });
+            msg: "discord gateway closed",
+        }.fail();
     };
-    let frame = frame.map_err(|e| FrankClawError::Channel {
+    let frame = frame.map_err(|e| ChannelSnafu {
         channel: channel_id.clone(),
         msg: format!("discord gateway read failed: {e}"),
-    })?;
+    }.build())?;
     parse_gateway_message(channel_id, frame)
 }
 
 fn parse_gateway_message(channel_id: ChannelId, frame: Message) -> Result<serde_json::Value> {
     let text = match frame {
         Message::Text(text) => text,
-        Message::Binary(bytes) => String::from_utf8(bytes.to_vec()).map_err(|e| FrankClawError::Channel {
+        Message::Binary(bytes) => String::from_utf8(bytes.to_vec()).map_err(|e| ChannelSnafu {
             channel: channel_id.clone(),
             msg: format!("discord gateway sent invalid UTF-8: {e}"),
-        })?.into(),
+        }.build())?.into(),
         Message::Close(close_frame) => {
             let (code, reason) = close_frame
                 .map_or((0u16, String::new()), |cf| (cf.code.into(), cf.reason.to_string()));
-            return Err(FrankClawError::Channel {
+            return ChannelSnafu {
                 channel: channel_id,
                 msg: format!("discord gateway closed (code={code}, reason={reason})"),
-            });
+            }.fail();
         }
         _ => {
-            return Err(FrankClawError::Channel {
+            return ChannelSnafu {
                 channel: channel_id,
-                msg: "discord gateway sent unexpected frame type".into(),
-            });
+                msg: "discord gateway sent unexpected frame type",
+            }.fail();
         }
     };
 
-    serde_json::from_str(text.as_ref()).map_err(|e| FrankClawError::Channel {
+    serde_json::from_str(text.as_ref()).map_err(|e| ChannelSnafu {
         channel: channel_id,
         msg: format!("discord gateway sent invalid JSON: {e}"),
-    })
+    }.build())
 }
 
 fn parse_message_create(
@@ -532,10 +532,10 @@ fn build_send_form(msg: &OutboundMessage) -> Result<reqwest::multipart::Form> {
         let part = reqwest::multipart::Part::bytes(spec.bytes)
             .file_name(spec.filename)
             .mime_str(&spec.mime_type)
-            .map_err(|e| FrankClawError::Channel {
+            .map_err(|e| ChannelSnafu {
                 channel: ChannelId::new("discord"),
                 msg: format!("invalid attachment mime type: {e}"),
-            })?;
+            }.build())?;
         form = form.part(spec.field_name, part);
     }
     Ok(form)
@@ -972,37 +972,37 @@ mod tests {
 
     #[test]
     fn is_fatal_gateway_error_detects_disallowed_intents() {
-        let err = FrankClawError::Channel {
+        let err = ChannelSnafu {
             channel: ChannelId::new("discord"),
-            msg: "discord gateway closed (code=4014, reason=Disallowed intents)".into(),
-        };
+            msg: "discord gateway closed (code=4014, reason=Disallowed intents)",
+        }.build();
         assert!(is_fatal_gateway_error(&err));
     }
 
     #[test]
     fn is_fatal_gateway_error_detects_auth_failed() {
-        let err = FrankClawError::Channel {
+        let err = ChannelSnafu {
             channel: ChannelId::new("discord"),
-            msg: "discord gateway closed (code=4004, reason=Authentication failed)".into(),
-        };
+            msg: "discord gateway closed (code=4004, reason=Authentication failed)",
+        }.build();
         assert!(is_fatal_gateway_error(&err));
     }
 
     #[test]
     fn is_fatal_gateway_error_does_not_match_retriable_errors() {
-        let err = FrankClawError::Channel {
+        let err = ChannelSnafu {
             channel: ChannelId::new("discord"),
-            msg: "discord gateway closed (code=4000, reason=Unknown error)".into(),
-        };
+            msg: "discord gateway closed (code=4000, reason=Unknown error)",
+        }.build();
         assert!(!is_fatal_gateway_error(&err));
     }
 
     #[test]
     fn is_fatal_gateway_error_does_not_match_non_close_errors() {
-        let err = FrankClawError::Channel {
+        let err = ChannelSnafu {
             channel: ChannelId::new("discord"),
-            msg: "discord gateway HELLO timeout after 30s".into(),
-        };
+            msg: "discord gateway HELLO timeout after 30s",
+        }.build();
         assert!(!is_fatal_gateway_error(&err));
     }
 }

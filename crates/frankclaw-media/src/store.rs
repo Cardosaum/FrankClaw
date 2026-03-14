@@ -5,7 +5,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{InternalSnafu, MalwareDetectedSnafu, MediaTooLargeSnafu, Result};
 use frankclaw_core::media::{FileScanService, MediaFile, ScanVerdict, mime_for_safe_extension, safe_extension_for_mime};
 use frankclaw_core::types::MediaId;
 
@@ -36,9 +36,9 @@ struct MediaMetadata {
 
 impl MediaStore {
     pub fn new(base_dir: PathBuf, max_file_size: u64, ttl_hours: u64) -> Result<Self> {
-        std::fs::create_dir_all(&base_dir).map_err(|e| FrankClawError::Internal {
+        std::fs::create_dir_all(&base_dir).map_err(|e| InternalSnafu {
             msg: format!("failed to create media directory: {e}"),
-        })?;
+        }.build())?;
 
         // Set directory permissions to owner-only.
         #[cfg(unix)]
@@ -88,10 +88,10 @@ impl MediaStore {
                     threats = ?verdict.threat_names,
                     "malware detected, rejecting file"
                 );
-                return Err(FrankClawError::MalwareDetected {
+                return MalwareDetectedSnafu {
                     filename: original_name.to_string(),
                     detail: verdict.summary,
-                });
+                }.fail();
             }
             info!(
                 filename = original_name,
@@ -113,9 +113,9 @@ impl MediaStore {
         data: &[u8],
     ) -> Result<MediaFile> {
         if data.len() as u64 > self.max_file_size {
-            return Err(FrankClawError::MediaTooLarge {
+            return MediaTooLargeSnafu {
                 max_bytes: self.max_file_size,
-            });
+            }.fail();
         }
 
         let id = MediaId::new();
@@ -125,9 +125,9 @@ impl MediaStore {
         let metadata_path = metadata_path_for(&path);
         let sanitized_name = sanitize_filename(original_name);
 
-        std::fs::write(&path, data).map_err(|e| FrankClawError::Internal {
+        std::fs::write(&path, data).map_err(|e| InternalSnafu {
             msg: format!("failed to write media file: {e}"),
-        })?;
+        }.build())?;
         write_metadata(
             &metadata_path,
             &MediaMetadata {
@@ -184,9 +184,9 @@ impl MediaStore {
         let mut deleted = 0u64;
         let _now = Utc::now();
 
-        let entries = std::fs::read_dir(&self.base_dir).map_err(|e| FrankClawError::Internal {
+        let entries = std::fs::read_dir(&self.base_dir).map_err(|e| InternalSnafu {
             msg: format!("failed to read media directory: {e}"),
-        })?;
+        }.build())?;
 
         for entry in entries.flatten() {
             if is_metadata_path(&entry.path()) {
@@ -219,9 +219,9 @@ impl MediaStore {
         let Some(path) = self.resolve_path(id)? else {
             return Ok(None);
         };
-        let bytes = std::fs::read(&path).map_err(|e| FrankClawError::Internal {
+        let bytes = std::fs::read(&path).map_err(|e| InternalSnafu {
             msg: format!("failed to read media file: {e}"),
-        })?;
+        }.build())?;
         let metadata = read_metadata(&metadata_path_for(&path))?;
         let filename = metadata
             .as_ref()
@@ -253,9 +253,9 @@ impl MediaStore {
 
     fn resolve_path(&self, id: &MediaId) -> Result<Option<PathBuf>> {
         let prefix = id.to_string();
-        let entries = std::fs::read_dir(&self.base_dir).map_err(|e| FrankClawError::Internal {
+        let entries = std::fs::read_dir(&self.base_dir).map_err(|e| InternalSnafu {
             msg: format!("failed to read media directory: {e}"),
-        })?;
+        }.build())?;
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -289,24 +289,24 @@ fn is_metadata_path(path: &std::path::Path) -> bool {
 }
 
 fn write_metadata(path: &std::path::Path, metadata: &MediaMetadata) -> Result<()> {
-    let bytes = serde_json::to_vec(metadata).map_err(|e| FrankClawError::Internal {
+    let bytes = serde_json::to_vec(metadata).map_err(|e| InternalSnafu {
         msg: format!("failed to serialize media metadata: {e}"),
-    })?;
-    std::fs::write(path, bytes).map_err(|e| FrankClawError::Internal {
+    }.build())?;
+    std::fs::write(path, bytes).map_err(|e| InternalSnafu {
         msg: format!("failed to write media metadata: {e}"),
-    })
+    }.build())
 }
 
 fn read_metadata(path: &std::path::Path) -> Result<Option<MediaMetadata>> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = std::fs::read(path).map_err(|e| FrankClawError::Internal {
+    let bytes = std::fs::read(path).map_err(|e| InternalSnafu {
         msg: format!("failed to read media metadata: {e}"),
-    })?;
-    let metadata = serde_json::from_slice(&bytes).map_err(|e| FrankClawError::Internal {
+    }.build())?;
+    let metadata = serde_json::from_slice(&bytes).map_err(|e| InternalSnafu {
         msg: format!("failed to parse media metadata: {e}"),
-    })?;
+    }.build())?;
     Ok(Some(metadata))
 }
 

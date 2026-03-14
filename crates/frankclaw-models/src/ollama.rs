@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use tracing::debug;
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{InternalSnafu, ModelProviderSnafu, Result};
 use frankclaw_core::model::{ModelProvider, CompletionRequest, StreamDelta, CompletionResponse, ModelDef, ModelApi, InputModality, ModelCost, ModelCompat};
 
 use crate::openai_compat::{self, StreamState};
@@ -27,9 +27,9 @@ impl OllamaProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .map_err(|e| FrankClawError::Internal {
+            .map_err(|e| InternalSnafu {
                 msg: format!("failed to build HTTP client: {e}"),
-            })?;
+            }.build())?;
 
         let base_url = normalize_ollama_url(
             &base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string()),
@@ -71,9 +71,9 @@ impl ModelProvider for OllamaProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| FrankClawError::ModelProvider {
+            .map_err(|e| ModelProviderSnafu {
                 msg: format!("ollama request failed: {e}"),
-            })?;
+            }.build())?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -86,9 +86,9 @@ impl ModelProvider for OllamaProvider {
             let mut state = StreamState::default();
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| FrankClawError::ModelProvider {
+                let chunk = chunk.map_err(|e| ModelProviderSnafu {
                     msg: format!("failed to read ollama streaming response: {e}"),
-                })?;
+                }.build())?;
                 for event in decoder.push(chunk.as_ref()) {
                     for delta in openai_compat::apply_stream_event(&mut state, &event.data)? {
                         let _ = stream_tx.send(delta).await;
@@ -116,24 +116,24 @@ impl ModelProvider for OllamaProvider {
         }
 
         let data: serde_json::Value =
-            response.json().await.map_err(|e| FrankClawError::ModelProvider {
+            response.json().await.map_err(|e| ModelProviderSnafu {
                 msg: format!("invalid ollama response: {e}"),
-            })?;
+            }.build())?;
         openai_compat::parse_completion_response(&data)
     }
 
     async fn list_models(&self) -> Result<Vec<ModelDef>> {
         let url = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
         let response = self.client.get(&url).send().await.map_err(|e| {
-            FrankClawError::ModelProvider {
+            ModelProviderSnafu {
                 msg: format!("failed to list ollama models: {e}"),
-            }
+            }.build()
         })?;
 
         let data: serde_json::Value = response.json().await.map_err(|e| {
-            FrankClawError::ModelProvider {
+            ModelProviderSnafu {
                 msg: format!("invalid ollama response: {e}"),
-            }
+            }.build()
         })?;
 
         let models = data["models"]

@@ -6,7 +6,7 @@ use sha2::Sha256;
 use tracing::info;
 
 use frankclaw_core::channel::{OutboundAttachment, ChannelPlugin, ChannelCapabilities, InboundMessage, HealthStatus, OutboundMessage, SendResult, InboundAttachment};
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{Result, AuthRequiredSnafu, AuthFailedSnafu, InternalSnafu};
 use frankclaw_core::types::ChannelId;
 
 use crate::media_text::{normalize_mime_type, text_or_attachment_placeholder};
@@ -54,17 +54,17 @@ impl WhatsAppChannel {
         let Some(secret) = &self.app_secret else {
             return Ok(());
         };
-        let signature = signature_header.ok_or(FrankClawError::AuthRequired)?;
+        let signature = signature_header.ok_or_else(|| AuthRequiredSnafu.build())?;
         let signature = signature.strip_prefix("sha256=").unwrap_or(signature);
-        let provided = decode_hex(signature).ok_or(FrankClawError::AuthFailed)?;
+        let provided = decode_hex(signature).ok_or_else(|| AuthFailedSnafu.build())?;
 
         let mut mac = HmacSha256::new_from_slice(secret.expose_secret().as_bytes()).map_err(|_| {
-            FrankClawError::Internal {
-                msg: "failed to initialize whatsapp webhook signature verifier".into(),
-            }
+            InternalSnafu {
+                msg: "failed to initialize whatsapp webhook signature verifier",
+            }.build()
         })?;
         mac.update(body);
-        mac.verify_slice(&provided).map_err(|_| FrankClawError::AuthFailed)
+        mac.verify_slice(&provided).map_err(|_| AuthFailedSnafu.build())
     }
 
     fn auth_header(&self) -> String {
@@ -487,6 +487,7 @@ fn decode_nibble(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frankclaw_core::error::FrankClawError;
     use secrecy::SecretString;
 
     fn fixture(name: &str) -> serde_json::Value {
@@ -779,11 +780,11 @@ mod tests {
 
         assert!(matches!(
             channel.verify_signature(body, None),
-            Err(FrankClawError::AuthRequired)
+            Err(FrankClawError::AuthRequired { .. })
         ));
         assert!(matches!(
             channel.verify_signature(body, Some("sha256=deadbeef")),
-            Err(FrankClawError::AuthFailed)
+            Err(FrankClawError::AuthFailed { .. })
         ));
     }
 

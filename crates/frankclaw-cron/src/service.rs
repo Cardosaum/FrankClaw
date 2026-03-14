@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{Result, ConfigIoSnafu, ConfigValidationSnafu, AgentRuntimeSnafu};
 use frankclaw_core::types::{AgentId, SessionKey};
 
 use crate::{RunLog, RunStatus};
@@ -63,9 +63,9 @@ impl CronService {
 
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| FrankClawError::ConfigIo {
+            std::fs::create_dir_all(parent).map_err(|e| ConfigIoSnafu {
                 msg: format!("failed to create cron directory: {e}"),
-            })?;
+            }.build())?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -160,9 +160,9 @@ impl CronService {
                                 let started_at = Utc::now();
                                 let result = if let Ok(r) = tokio::time::timeout(JOB_TIMEOUT, runner(job.clone())).await { r } else {
                                     warn!(job_id = %job.id, timeout_secs = JOB_TIMEOUT.as_secs(), "cron job timed out");
-                                    Err(FrankClawError::AgentRuntime {
+                                    AgentRuntimeSnafu {
                                         msg: format!("cron job '{}' timed out after {}s", job.id, JOB_TIMEOUT.as_secs()),
-                                    })
+                                    }.fail()
                                 };
                                 let finished_at = Utc::now();
 
@@ -198,21 +198,21 @@ impl CronService {
     pub async fn add(&self, job: CronJob) -> Result<()> {
         // Validate cron expression.
         job.schedule.parse::<Schedule>().map_err(|e| {
-            FrankClawError::ConfigValidation {
+            ConfigValidationSnafu {
                 msg: format!("invalid cron schedule '{}': {e}", job.schedule),
-            }
+            }.build()
         })?;
         // Validate prompt is non-empty.
         if job.prompt.trim().is_empty() {
-            return Err(FrankClawError::ConfigValidation {
-                msg: "cron job prompt must not be empty".into(),
-            });
+            return ConfigValidationSnafu {
+                msg: "cron job prompt must not be empty",
+            }.fail();
         }
         // Validate job ID is non-empty.
         if job.id.trim().is_empty() {
-            return Err(FrankClawError::ConfigValidation {
-                msg: "cron job id must not be empty".into(),
-            });
+            return ConfigValidationSnafu {
+                msg: "cron job id must not be empty",
+            }.fail();
         }
 
         self.jobs.write().await.insert(job.id.clone(), job);
@@ -241,9 +241,9 @@ impl CronService {
                 if let Some(previous) = existing.get(&job.id).and_then(|stored| stored.last_run.clone()) {
                     job.last_run = Some(previous);
                 }
-                job.schedule.parse::<Schedule>().map_err(|e| FrankClawError::ConfigValidation {
+                job.schedule.parse::<Schedule>().map_err(|e| ConfigValidationSnafu {
                     msg: format!("invalid cron schedule '{}': {e}", job.schedule),
-                })?;
+                }.build())?;
                 next.insert(job.id.clone(), job);
             }
         }
@@ -263,12 +263,12 @@ fn load_jobs(path: &Path) -> Result<HashMap<String, CronJob>> {
         return Ok(HashMap::new());
     }
 
-    let content = std::fs::read_to_string(path).map_err(|e| FrankClawError::ConfigIo {
+    let content = std::fs::read_to_string(path).map_err(|e| ConfigIoSnafu {
         msg: format!("failed to read cron file: {e}"),
-    })?;
-    serde_json::from_str(&content).map_err(|e| FrankClawError::ConfigIo {
+    }.build())?;
+    serde_json::from_str(&content).map_err(|e| ConfigIoSnafu {
         msg: format!("failed to parse cron file: {e}"),
-    })
+    }.build())
 }
 
 async fn save_jobs(path: Option<&Path>, jobs: &Arc<RwLock<HashMap<String, CronJob>>>) {

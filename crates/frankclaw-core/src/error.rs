@@ -1,115 +1,270 @@
+use snafu::Snafu;
+
 use crate::types::{AgentId, ChannelId, SessionKey};
 
 /// Unified error hierarchy. Every variant is explicit — no catch-all.
 /// Error messages never contain secret material.
-#[derive(Debug, thiserror::Error)]
+///
+/// Each variant carries an implicit `snafu::Location` that records the
+/// file and line where the error was constructed, available via the
+/// [`FrankClawError::location`] method.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
 pub enum FrankClawError {
     // ── Auth ──────────────────────────────────────────────
-    #[error("authentication required")]
-    AuthRequired,
+    #[snafu(display("authentication required"))]
+    AuthRequired {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("authentication failed")]
-    AuthFailed,
+    #[snafu(display("authentication failed"))]
+    AuthFailed {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("rate limited (retry after {retry_after_secs}s)")]
-    RateLimited { retry_after_secs: u64 },
+    #[snafu(display("rate limited (retry after {retry_after_secs}s)"))]
+    RateLimited {
+        retry_after_secs: u64,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("insufficient permissions for method {method}")]
-    Forbidden { method: String },
+    #[snafu(display("insufficient permissions for method {method}"))]
+    Forbidden {
+        method: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     // ── Session ──────────────────────────────────────────
-    #[error("session not found: {key}")]
-    SessionNotFound { key: SessionKey },
+    #[snafu(display("session not found: {key}"))]
+    SessionNotFound {
+        key: SessionKey,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("session storage error: {msg}")]
-    SessionStorage { msg: String },
+    #[snafu(display("session storage error: {msg}"))]
+    SessionStorage {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     // ── Channel ──────────────────────────────────────────
-    #[error("channel {channel} error: {msg}")]
-    Channel { channel: ChannelId, msg: String },
+    #[snafu(display("channel {channel} error: {msg}"))]
+    Channel {
+        channel: ChannelId,
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("channel {channel} not configured")]
-    ChannelNotConfigured { channel: ChannelId },
+    #[snafu(display("channel {channel} not configured"))]
+    ChannelNotConfigured {
+        channel: ChannelId,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("channel {channel} is disabled")]
-    ChannelDisabled { channel: ChannelId },
+    #[snafu(display("channel {channel} is disabled"))]
+    ChannelDisabled {
+        channel: ChannelId,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("sender blocked by policy on channel {channel}")]
-    SenderBlocked { channel: ChannelId },
+    #[snafu(display("sender blocked by policy on channel {channel}"))]
+    SenderBlocked {
+        channel: ChannelId,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     // ── Agent ────────────────────────────────────────────
-    #[error("agent {agent_id} not found")]
-    AgentNotFound { agent_id: AgentId },
+    #[snafu(display("agent {agent_id} not found"))]
+    AgentNotFound {
+        agent_id: AgentId,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("agent runtime error: {msg}")]
-    AgentRuntime { msg: String },
+    #[snafu(display("agent runtime error: {msg}"))]
+    AgentRuntime {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("agent turn cancelled")]
-    TurnCancelled,
+    #[snafu(display("agent turn cancelled"))]
+    TurnCancelled {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("sandbox error: {msg}")]
-    Sandbox { msg: String },
+    #[snafu(display("sandbox error: {msg}"))]
+    Sandbox {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     // ── Model ────────────────────────────────────────────
-    #[error("model provider error: {msg}")]
-    ModelProvider { msg: String },
+    #[snafu(display("model provider error: {msg}"))]
+    ModelProvider {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("all model providers failed")]
-    AllProvidersFailed,
+    #[snafu(display("all model providers failed"))]
+    AllProvidersFailed {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("model not found: {model_id}")]
-    ModelNotFound { model_id: String },
+    #[snafu(display("model not found: {model_id}"))]
+    ModelNotFound {
+        model_id: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     // ── Config ───────────────────────────────────────────
-    #[error("config validation error: {msg}")]
-    ConfigValidation { msg: String },
+    #[snafu(display("config validation error: {msg}"))]
+    ConfigValidation {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("config I/O error: {msg}")]
-    ConfigIo { msg: String },
+    #[snafu(display("config I/O error: {msg}"))]
+    ConfigIo {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     // ── Protocol ─────────────────────────────────────────
-    #[error("invalid request: {msg}")]
-    InvalidRequest { msg: String },
+    #[snafu(display("invalid request: {msg}"))]
+    InvalidRequest {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("unknown method: {method}")]
-    UnknownMethod { method: String },
+    #[snafu(display("unknown method: {method}"))]
+    UnknownMethod {
+        method: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("request too large (max {max_bytes} bytes)")]
-    RequestTooLarge { max_bytes: usize },
+    #[snafu(display("request too large (max {max_bytes} bytes)"))]
+    RequestTooLarge {
+        max_bytes: usize,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     // ── Media ────────────────────────────────────────────
-    #[error("media file too large (max {max_bytes} bytes)")]
-    MediaTooLarge { max_bytes: u64 },
+    #[snafu(display("media file too large (max {max_bytes} bytes)"))]
+    MediaTooLarge {
+        max_bytes: u64,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("media fetch blocked: {reason}")]
-    MediaFetchBlocked { reason: String },
+    #[snafu(display("media fetch blocked: {reason}"))]
+    MediaFetchBlocked {
+        reason: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("unsupported media type: {mime}")]
-    UnsupportedMediaType { mime: String },
+    #[snafu(display("unsupported media type: {mime}"))]
+    UnsupportedMediaType {
+        mime: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("malware detected in file '{filename}': {detail}")]
-    MalwareDetected { filename: String, detail: String },
+    #[snafu(display("malware detected in file '{filename}': {detail}"))]
+    MalwareDetected {
+        filename: String,
+        detail: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     // ── Crypto ───────────────────────────────────────────
-    #[error("cryptographic operation failed: {0}")]
-    Crypto(#[from] frankclaw_crypto::CryptoError),
+    #[snafu(display("cryptographic operation failed"), context(false))]
+    Crypto {
+        source: frankclaw_crypto::CryptoError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     // ── Internal ─────────────────────────────────────────
-    #[error("internal error: {msg}")]
-    Internal { msg: String },
+    #[snafu(display("internal error: {msg}"))]
+    Internal {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
-    #[error("shutdown in progress")]
-    ShuttingDown,
+    #[snafu(display("shutdown in progress"))]
+    ShuttingDown {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 impl FrankClawError {
+    /// Where the error was created (file, line, column).
+    pub fn location(&self) -> &snafu::Location {
+        match self {
+            Self::AuthRequired { location, .. }
+            | Self::AuthFailed { location, .. }
+            | Self::RateLimited { location, .. }
+            | Self::Forbidden { location, .. }
+            | Self::SessionNotFound { location, .. }
+            | Self::SessionStorage { location, .. }
+            | Self::Channel { location, .. }
+            | Self::ChannelNotConfigured { location, .. }
+            | Self::ChannelDisabled { location, .. }
+            | Self::SenderBlocked { location, .. }
+            | Self::AgentNotFound { location, .. }
+            | Self::AgentRuntime { location, .. }
+            | Self::TurnCancelled { location, .. }
+            | Self::Sandbox { location, .. }
+            | Self::ModelProvider { location, .. }
+            | Self::AllProvidersFailed { location, .. }
+            | Self::ModelNotFound { location, .. }
+            | Self::ConfigValidation { location, .. }
+            | Self::ConfigIo { location, .. }
+            | Self::InvalidRequest { location, .. }
+            | Self::UnknownMethod { location, .. }
+            | Self::RequestTooLarge { location, .. }
+            | Self::MediaTooLarge { location, .. }
+            | Self::MediaFetchBlocked { location, .. }
+            | Self::UnsupportedMediaType { location, .. }
+            | Self::MalwareDetected { location, .. }
+            | Self::Crypto { location, .. }
+            | Self::Internal { location, .. }
+            | Self::ShuttingDown { location, .. } => location,
+        }
+    }
+
     /// Whether the client should retry this request.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
             Self::RateLimited { .. }
                 | Self::ModelProvider { .. }
-                | Self::AllProvidersFailed
+                | Self::AllProvidersFailed { .. }
                 | Self::Internal { .. }
         )
     }
@@ -117,35 +272,32 @@ impl FrankClawError {
     /// HTTP-like status code for protocol responses.
     pub fn status_code(&self) -> u16 {
         match self {
-            Self::AuthRequired => 401,
-            Self::AuthFailed => 401,
+            Self::AuthRequired { .. } | Self::AuthFailed { .. } => 401,
             Self::RateLimited { .. } => 429,
             Self::Forbidden { .. } => 403,
-            Self::SessionNotFound { .. } => 404,
-            Self::AgentNotFound { .. } => 404,
-            Self::ModelNotFound { .. } => 404,
-            Self::ChannelNotConfigured { .. } => 404,
-            Self::InvalidRequest { .. } => 400,
-            Self::UnknownMethod { .. } => 400,
-            Self::RequestTooLarge { .. } => 413,
-            Self::MediaTooLarge { .. } => 413,
-            Self::MediaFetchBlocked { .. } => 403,
-            Self::MalwareDetected { .. } => 403,
+            Self::SessionNotFound { .. }
+            | Self::AgentNotFound { .. }
+            | Self::ModelNotFound { .. }
+            | Self::ChannelNotConfigured { .. } => 404,
+            Self::InvalidRequest { .. } | Self::UnknownMethod { .. } => 400,
+            Self::RequestTooLarge { .. } | Self::MediaTooLarge { .. } => 413,
+            Self::MediaFetchBlocked { .. }
+            | Self::MalwareDetected { .. }
+            | Self::SenderBlocked { .. } => 403,
             Self::ConfigValidation { .. } => 422,
-            Self::SenderBlocked { .. } => 403,
             Self::SessionStorage { .. }
             | Self::Channel { .. }
             | Self::ChannelDisabled { .. }
             | Self::AgentRuntime { .. }
-            | Self::TurnCancelled
+            | Self::TurnCancelled { .. }
             | Self::Sandbox { .. }
             | Self::ModelProvider { .. }
-            | Self::AllProvidersFailed
+            | Self::AllProvidersFailed { .. }
             | Self::ConfigIo { .. }
             | Self::UnsupportedMediaType { .. }
-            | Self::Crypto(_)
+            | Self::Crypto { .. }
             | Self::Internal { .. }
-            | Self::ShuttingDown => 500,
+            | Self::ShuttingDown { .. } => 500,
         }
     }
 }

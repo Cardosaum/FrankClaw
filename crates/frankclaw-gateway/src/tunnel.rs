@@ -16,7 +16,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{ConfigValidationSnafu, InternalSnafu, Result};
 
 /// Tunnel provider configuration.
 #[derive(Debug, Clone)]
@@ -111,13 +111,13 @@ async fn start_cloudflare(token: &str, host: &str, port: u16) -> Result<Tunnel> 
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| FrankClawError::Internal {
+        .map_err(|e| InternalSnafu {
             msg: format!("failed to spawn cloudflared: {e}"),
-        })?;
+        }.build())?;
 
-    let stderr = child.stderr.take().ok_or_else(|| FrankClawError::Internal {
-        msg: "failed to capture cloudflared stderr".into(),
-    })?;
+    let stderr = child.stderr.take().ok_or_else(|| InternalSnafu {
+        msg: "failed to capture cloudflared stderr",
+    }.build())?;
 
     // Drain stdout in background.
     if let Some(stdout) = child.stdout.take() {
@@ -167,13 +167,13 @@ async fn start_ngrok(
         cmd.args(["--domain", domain]);
     }
 
-    let mut child = cmd.spawn().map_err(|e| FrankClawError::Internal {
+    let mut child = cmd.spawn().map_err(|e| InternalSnafu {
         msg: format!("failed to spawn ngrok: {e}"),
-    })?;
+    }.build())?;
 
-    let stdout = child.stdout.take().ok_or_else(|| FrankClawError::Internal {
-        msg: "failed to capture ngrok stdout".into(),
-    })?;
+    let stdout = child.stdout.take().ok_or_else(|| InternalSnafu {
+        msg: "failed to capture ngrok stdout",
+    }.build())?;
 
     // Drain stderr in background.
     if let Some(stderr) = child.stderr.take() {
@@ -187,9 +187,9 @@ async fn start_ngrok(
     }
 
     // Scan stdout for URL in logfmt output (url=https://...).
-    let url = extract_url_from_stream(stdout, "url=https://", Duration::from_secs(15)).await.map_err(|_| FrankClawError::Internal {
-                msg: "ngrok did not output a public URL within 15 seconds".into(),
-            })?;
+    let url = extract_url_from_stream(stdout, "url=https://", Duration::from_secs(15)).await.map_err(|_| InternalSnafu {
+                msg: "ngrok did not output a public URL within 15 seconds",
+            }.build())?;
 
     // Clean up "url=" prefix if present.
     let url = url
@@ -226,9 +226,9 @@ async fn start_custom(
 
     let parts: Vec<&str> = expanded.split_whitespace().collect();
     if parts.is_empty() {
-        return Err(FrankClawError::ConfigValidation {
-            msg: "tunnel command is empty".into(),
-        });
+        return ConfigValidationSnafu {
+            msg: "tunnel command is empty",
+        }.fail();
     }
 
     let mut child = Command::new(parts[0])
@@ -237,9 +237,9 @@ async fn start_custom(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| FrankClawError::Internal {
+        .map_err(|e| InternalSnafu {
             msg: format!("failed to spawn tunnel command '{}': {e}", parts[0]),
-        })?;
+        }.build())?;
 
     // Drain stderr in background.
     if let Some(stderr) = child.stderr.take() {
@@ -254,9 +254,9 @@ async fn start_custom(
 
     let url = if let Some(pattern) = url_pattern {
         // Scan stdout for a URL containing the pattern.
-        let stdout = child.stdout.take().ok_or_else(|| FrankClawError::Internal {
-            msg: "failed to capture tunnel stdout".into(),
-        })?;
+        let stdout = child.stdout.take().ok_or_else(|| InternalSnafu {
+            msg: "failed to capture tunnel stdout",
+        }.build())?;
         extract_url_from_stream(stdout, pattern, Duration::from_secs(15)).await?
     } else {
         // No pattern — drain stdout and use local URL.
@@ -310,12 +310,12 @@ async fn extract_url_from_stream<R: tokio::io::AsyncRead + Unpin>(
 
     match result {
         Ok(Some(url)) => Ok(url),
-        Ok(None) => Err(FrankClawError::Internal {
+        Ok(None) => InternalSnafu {
             msg: format!("tunnel output ended without a URL (looking for '{prefix}')"),
-        }),
-        Err(_) => Err(FrankClawError::Internal {
+        }.fail(),
+        Err(_) => InternalSnafu {
             msg: format!("tunnel did not output a URL within {}s", timeout.as_secs()),
-        }),
+        }.fail(),
     }
 }
 

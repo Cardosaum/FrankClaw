@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use frankclaw_core::channel::{ChannelPlugin, OutboundAttachment, OutboundMessage, SendResult};
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{InvalidRequestSnafu, Result};
 use frankclaw_media::MediaStore;
 use serde::{Deserialize, Serialize};
 
@@ -125,9 +125,9 @@ fn hydrate_outbound_attachments(
         }
         let stored = media
             .read(&attachment.media_id)?
-            .ok_or_else(|| FrankClawError::InvalidRequest {
+            .ok_or_else(|| InvalidRequestSnafu {
                 msg: format!("missing outbound media {}", attachment.media_id),
-            })?;
+            }.build())?;
         attachment.bytes = stored.bytes;
         if attachment.filename.is_none() {
             attachment.filename = Some(stored.filename);

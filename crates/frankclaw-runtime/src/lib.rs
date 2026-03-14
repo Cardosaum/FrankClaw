@@ -14,7 +14,10 @@ use chrono::Utc;
 use secrecy::SecretString;
 
 use frankclaw_core::config::{AgentDef, FrankClawConfig, ProviderConfig};
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{
+    AgentNotFoundSnafu, AgentRuntimeSnafu, ConfigValidationSnafu, InternalSnafu,
+    InvalidRequestSnafu, Result,
+};
 use frankclaw_core::channel::{ChannelCapabilities, InboundAttachment, InboundMessage};
 use frankclaw_core::model::{
     CompletionMessage, CompletionRequest, ImageContent, ModelCompat, ModelCost, ModelDef,
@@ -126,9 +129,9 @@ impl Runtime {
         let tools = ToolRegistry::with_builtins();
         for (agent_id, agent) in &config.agents.agents {
             tools.validate_names(&agent.tools).map_err(|err| {
-                FrankClawError::ConfigValidation {
+                ConfigValidationSnafu {
                     msg: format!("agent '{agent_id}' has invalid tool config: {err}"),
-                }
+                }.build()
             })?;
         }
         let skill_manifests = load_agent_skills(config)?;
@@ -205,9 +208,9 @@ impl Runtime {
     #[expect(clippy::too_many_lines, reason = "orchestration function; splitting would scatter the chat lifecycle")]
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         if request.message.trim().is_empty() {
-            return Err(FrankClawError::InvalidRequest {
-                msg: "message is required".into(),
-            });
+            return InvalidRequestSnafu {
+                msg: "message is required",
+            }.fail();
         }
 
         // Sanitize user message: strip Unicode control/format chars that could
@@ -317,12 +320,12 @@ impl Runtime {
 
         // Enforce hard prompt size limit to prevent token exhaustion / memory abuse.
         if !sanitize::check_prompt_size(&request_messages, system_prompt.as_deref()) {
-            return Err(FrankClawError::InvalidRequest {
+            return InvalidRequestSnafu {
                 msg: format!(
                     "total prompt size exceeds maximum ({} bytes)",
                     sanitize::MAX_PROMPT_BYTES
                 ),
-            });
+            }.fail();
         }
 
         let user_metadata = (!request.attachments.is_empty()).then(|| {
@@ -348,11 +351,11 @@ impl Runtime {
         for _round in 0..=MAX_TOOL_ROUNDS {
             // Safety timeout: abort if the entire turn is taking too long.
             if tokio::time::Instant::now() >= turn_deadline {
-                return Err(FrankClawError::AgentRuntime {
+                return AgentRuntimeSnafu {
                     msg: format!(
                         "turn safety timeout exceeded ({TURN_SAFETY_TIMEOUT_SECS}s)"
                     ),
-                });
+                }.fail();
             }
             let response = self
                 .models
@@ -399,11 +402,11 @@ impl Runtime {
                 }
 
             if response.tool_calls.len() > remaining_tool_calls {
-                return Err(FrankClawError::AgentRuntime {
+                return AgentRuntimeSnafu {
                     msg: format!(
                         "model requested too many tool calls in one turn (max {MAX_TOOL_CALLS_PER_TURN})"
                     ),
-                });
+                }.fail();
             }
 
             let tool_call_count = response.tool_calls.len();
@@ -555,9 +558,9 @@ impl Runtime {
                     "tool": tool_output.name,
                     "output": tool_output.output,
                 }))
-                .map_err(|err| FrankClawError::Internal {
+                .map_err(|err| InternalSnafu {
                     msg: format!("failed to serialize tool output: {err}"),
-                })?;
+                }.build())?;
                 // Scan tool output for credential leaks before it enters the context.
                 let leak_result = leak_detector::scan_for_leaks(&raw_content);
                 if leak_result.should_block {
@@ -572,12 +575,12 @@ impl Runtime {
                         patterns = %leaked,
                         "credential leak detected in tool output — blocking"
                     );
-                    return Err(FrankClawError::AgentRuntime {
+                    return AgentRuntimeSnafu {
                         msg: format!(
                             "tool '{}' output contained credential(s): {}. Output blocked.",
                             tool_call.name, leaked,
                         ),
-                    });
+                    }.fail();
                 }
                 let safe_content = leak_result
                     .redacted_content
@@ -641,18 +644,18 @@ impl Runtime {
                 // instead of letting the provider fail with a raw context overflow.
                 let post_tokens = context::estimate_messages_tokens(&request_messages);
                 if post_tokens > mid_budget {
-                    return Err(FrankClawError::AgentRuntime {
+                    return AgentRuntimeSnafu {
                         msg: format!(
                             "context too large after compaction ({post_tokens} tokens, budget {mid_budget})"
                         ),
-                    });
+                    }.fail();
                 }
             }
         }
 
-        Err(FrankClawError::AgentRuntime {
+        AgentRuntimeSnafu {
             msg: format!("tool round limit exceeded (max {MAX_TOOL_ROUNDS})"),
-        })
+        }.fail()
     }
 
     pub async fn invoke_tool(&self, request: ToolRequest) -> Result<ToolOutput> {
@@ -712,9 +715,9 @@ impl Runtime {
     ) -> Result<String> {
         let task = arguments["task"]
             .as_str()
-            .ok_or_else(|| FrankClawError::AgentRuntime {
-                msg: "spawn_subagent requires a 'task' string".into(),
-            })?;
+            .ok_or_else(|| AgentRuntimeSnafu {
+                msg: "spawn_subagent requires a 'task' string",
+            }.build())?;
         let label = arguments["label"].as_str().map(String::from);
 
         // Sanitize task/label per Rule 6.
@@ -738,9 +741,9 @@ impl Runtime {
                 child_session_key,
             } => (run_id, child_session_key),
             subagent::SpawnResult::Rejected { reason } => {
-                return Err(FrankClawError::AgentRuntime {
+                return AgentRuntimeSnafu {
                     msg: format!("subagent spawn rejected: {reason}"),
-                });
+                }.fail();
             }
         };
 
@@ -800,9 +803,9 @@ impl Runtime {
                         error: Some("subagent timed out".into()),
                     })
                     .await?;
-                Err(FrankClawError::AgentRuntime {
-                    msg: "subagent execution timed out".into(),
-                })
+                AgentRuntimeSnafu {
+                    msg: "subagent execution timed out",
+                }.fail()
             }
         }
     }
@@ -817,9 +820,9 @@ impl Runtime {
             .agents
             .get(&agent_id)
             .cloned()
-            .ok_or_else(|| FrankClawError::AgentNotFound {
+            .ok_or_else(|| AgentNotFoundSnafu {
                 agent_id: agent_id.clone(),
-            })?;
+            }.build())?;
         Ok((agent_id, agent))
     }
 
@@ -956,9 +959,9 @@ impl Runtime {
         self.model_defs
             .first()
             .map(|model| model.id.clone())
-            .ok_or_else(|| FrankClawError::ConfigValidation {
-                msg: "no model providers are configured".into(),
-            })
+            .ok_or_else(|| ConfigValidationSnafu {
+                msg: "no model providers are configured",
+            }.build())
     }
 
     #[expect(clippy::unused_self, reason = "method on Runtime for consistency; may use self fields in future")]
@@ -970,11 +973,11 @@ impl Runtime {
         if let Some(session_key) = explicit {
             if let Some((session_agent_id, _, _)) = session_key.parse()
                 && &session_agent_id != agent_id {
-                    return Err(FrankClawError::InvalidRequest {
+                    return InvalidRequestSnafu {
                         msg: format!(
                             "session '{session_key}' does not belong to agent '{agent_id}'"
                         ),
-                    });
+                    }.fail();
                 }
             return Ok(session_key);
         }
@@ -1061,11 +1064,11 @@ impl ToolCallTracker {
         *count += 1;
 
         if *count >= TOOL_REPEAT_BLOCK_THRESHOLD {
-            return Err(FrankClawError::AgentRuntime {
+            return AgentRuntimeSnafu {
                 msg: format!(
                     "tool '{name}' called {count} times with identical arguments — possible infinite loop"
                 ),
-            });
+            }.fail();
         }
         if *count >= TOOL_REPEAT_WARN_THRESHOLD {
             tracing::warn!(
@@ -1247,12 +1250,12 @@ async fn fetch_image_attachments(
 }
 
 fn parse_tool_arguments(tool_call: &ToolCallResponse) -> Result<serde_json::Value> {
-    serde_json::from_str(&tool_call.arguments).map_err(|err| FrankClawError::AgentRuntime {
+    serde_json::from_str(&tool_call.arguments).map_err(|err| AgentRuntimeSnafu {
         msg: format!(
             "model produced invalid arguments for tool '{}': {}",
             tool_call.name, err
         ),
-    })
+    }.build())
 }
 
 fn build_providers(
@@ -1263,9 +1266,9 @@ fn build_providers(
 
     for provider in &config.models.providers {
         if !seen_ids.insert(provider.id.clone()) {
-            return Err(FrankClawError::ConfigValidation {
+            return ConfigValidationSnafu {
                 msg: format!("duplicate model provider id '{}'", provider.id),
-            });
+            }.fail();
         }
 
         let provider_impl: Arc<dyn frankclaw_core::model::ModelProvider> =
@@ -1289,11 +1292,11 @@ fn build_providers(
                     provider.base_url.clone(),
                 )?),
                 other => {
-                    return Err(FrankClawError::ConfigValidation {
+                    return ConfigValidationSnafu {
                         msg: format!(
                             "unsupported model provider api '{other}'; expected openai, anthropic, or ollama"
                         ),
-                    });
+                    }.fail();
                 }
             };
         providers.push(provider_impl);
@@ -1311,19 +1314,19 @@ fn load_agent_skills(config: &FrankClawConfig) -> Result<HashMap<AgentId, Vec<Sk
             continue;
         }
 
-        let workspace = agent.workspace.as_ref().ok_or_else(|| FrankClawError::ConfigValidation {
+        let workspace = agent.workspace.as_ref().ok_or_else(|| ConfigValidationSnafu {
             msg: format!("agent '{agent_id}' declares skills but has no workspace"),
-        })?;
+        }.build())?;
         let skills = load_workspace_skills(workspace, &agent.skills)?;
         for skill in &skills {
             for tool in &skill.tools {
                 if !agent.tools.iter().any(|allowed| allowed == tool) {
-                    return Err(FrankClawError::ConfigValidation {
+                    return ConfigValidationSnafu {
                         msg: format!(
                             "agent '{}' skill '{}' requires tool '{}' but the agent does not allow it",
                             agent_id, skill.id, tool
                         ),
-                    });
+                    }.fail();
                 }
             }
         }
@@ -1340,25 +1343,25 @@ fn resolve_secret(provider: &ProviderConfig, default_env: &str) -> Result<Secret
         .unwrap_or(default_env)
         .trim();
     if env_key.is_empty() {
-        return Err(FrankClawError::ConfigValidation {
+        return ConfigValidationSnafu {
             msg: format!("provider '{}' requires an api_key_ref", provider.id),
-        });
+        }.fail();
     }
 
-    let value = std::env::var(env_key).map_err(|_| FrankClawError::ConfigValidation {
+    let value = std::env::var(env_key).map_err(|_| ConfigValidationSnafu {
         msg: format!(
             "provider '{}' references missing environment variable '{}'",
             provider.id, env_key
         ),
-    })?;
+    }.build())?;
 
     if value.trim().is_empty() {
-        return Err(FrankClawError::ConfigValidation {
+        return ConfigValidationSnafu {
             msg: format!(
                 "provider '{}' environment variable '{}' is empty",
                 provider.id, env_key
             ),
-        });
+        }.fail();
     }
 
     Ok(SecretString::from(value))
@@ -1368,6 +1371,7 @@ fn resolve_secret(provider: &ProviderConfig, default_env: &str) -> Result<Secret
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use frankclaw_core::error::{AllProvidersFailedSnafu, FrankClawError};
     use frankclaw_core::model::{
         CompletionResponse, FinishReason, InputModality, ModelApi, ModelCompat, ModelCost,
         ToolCallResponse, ToolDef,
@@ -1468,7 +1472,7 @@ mod tests {
                     },
                     finish_reason: response.finish_reason,
                 }),
-                None => Err(FrankClawError::AllProvidersFailed),
+                None => AllProvidersFailedSnafu.fail(),
             }
         }
 

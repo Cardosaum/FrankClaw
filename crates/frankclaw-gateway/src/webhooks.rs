@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use frankclaw_core::config::{FrankClawConfig, WebhookMapping};
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{
+    AuthFailedSnafu, AuthRequiredSnafu, ConfigValidationSnafu, ForbiddenSnafu, InternalSnafu,
+    InvalidRequestSnafu, Result,
+};
 
 use crate::state::GatewayState;
 
@@ -25,16 +28,16 @@ pub fn resolve_mapping(config: &FrankClawConfig, mapping_id: &str) -> Result<Web
         .parsed_mappings()?
         .into_iter()
         .find(|mapping| mapping.id == mapping_id)
-        .ok_or_else(|| FrankClawError::InvalidRequest {
+        .ok_or_else(|| InvalidRequestSnafu {
             msg: format!("unknown webhook mapping '{mapping_id}'"),
-        })
+        }.build())
 }
 
 pub fn verify_signature(config: &FrankClawConfig, body: &[u8], signature_header: Option<&str>) -> Result<()> {
     if !config.hooks.enabled {
-        return Err(FrankClawError::Forbidden {
-            method: "webhooks".into(),
-        });
+        return ForbiddenSnafu {
+            method: "webhooks",
+        }.fail();
     }
 
     let secret = config
@@ -42,18 +45,18 @@ pub fn verify_signature(config: &FrankClawConfig, body: &[u8], signature_header:
         .token
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| FrankClawError::ConfigValidation {
-            msg: "hooks.token is required when hooks are enabled".into(),
-        })?;
-    let signature = signature_header.ok_or(FrankClawError::AuthRequired)?;
+        .ok_or_else(|| ConfigValidationSnafu {
+            msg: "hooks.token is required when hooks are enabled",
+        }.build())?;
+    let signature = signature_header.ok_or_else(|| AuthRequiredSnafu.build())?;
     let signature = signature.strip_prefix("sha256=").unwrap_or(signature);
-    let provided = decode_hex(signature).ok_or(FrankClawError::AuthFailed)?;
+    let provided = decode_hex(signature).ok_or_else(|| AuthFailedSnafu.build())?;
 
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| FrankClawError::Internal {
-        msg: "failed to initialize webhook signature verifier".into(),
-    })?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| InternalSnafu {
+        msg: "failed to initialize webhook signature verifier",
+    }.build())?;
     mac.update(body);
-    mac.verify_slice(&provided).map_err(|_| FrankClawError::AuthFailed)
+    mac.verify_slice(&provided).map_err(|_| AuthFailedSnafu.build())
 }
 
 pub fn extract_message(mapping: &WebhookMapping, payload: &serde_json::Value) -> Result<String> {
@@ -63,12 +66,12 @@ pub fn extract_message(mapping: &WebhookMapping, payload: &serde_json::Value) ->
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| FrankClawError::InvalidRequest {
+        .ok_or_else(|| InvalidRequestSnafu {
             msg: format!(
                 "webhook payload must include a non-empty '{}' field",
                 mapping.text_field
             ),
-        })
+        }.build())
 }
 
 pub fn resolve_request(
@@ -110,17 +113,17 @@ pub fn verify_timestamp(timestamp_header: Option<&str>) -> Result<()> {
         // Timestamp header is optional for backward compatibility.
         return Ok(());
     };
-    let ts_secs: i64 = ts.parse().map_err(|_| FrankClawError::InvalidRequest {
+    let ts_secs: i64 = ts.parse().map_err(|_| InvalidRequestSnafu {
         msg: format!("invalid webhook timestamp: '{ts}'"),
-    })?;
+    }.build())?;
     let now = Utc::now().timestamp();
     let age = now - ts_secs;
     if age > MAX_WEBHOOK_AGE_SECS {
-        return Err(FrankClawError::AuthFailed);
+        return AuthFailedSnafu.fail();
     }
     if age < -MAX_WEBHOOK_AGE_SECS {
         // Timestamp is too far in the future — also suspicious.
-        return Err(FrankClawError::AuthFailed);
+        return AuthFailedSnafu.fail();
     }
     Ok(())
 }

@@ -4,7 +4,7 @@ use reqwest::Client;
 use tracing::warn;
 use url::Url;
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{InternalSnafu, MediaFetchBlockedSnafu, MediaTooLargeSnafu, Result};
 use frankclaw_core::media::is_safe_ip;
 
 /// Maximum number of redirects to follow before aborting.
@@ -28,9 +28,9 @@ impl SafeFetcher {
             .timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| FrankClawError::Internal {
+            .map_err(|e| InternalSnafu {
                 msg: format!("failed to build HTTP client: {e}"),
-            })?;
+            }.build())?;
 
         Ok(Self { client, max_bytes })
     }
@@ -52,45 +52,45 @@ impl SafeFetcher {
                 .get(current_url.as_str())
                 .send()
                 .await
-                .map_err(|e| FrankClawError::MediaFetchBlocked {
+                .map_err(|e| MediaFetchBlockedSnafu {
                     reason: format!("fetch failed: {e}"),
-                })?;
+                }.build())?;
 
             // Handle redirects: validate the target URL before following.
             if response.status().is_redirection() {
                 if redirect_count >= MAX_REDIRECTS {
-                    return Err(FrankClawError::MediaFetchBlocked {
+                    return MediaFetchBlockedSnafu {
                         reason: format!("too many redirects ({MAX_REDIRECTS})"),
-                    });
+                    }.fail();
                 }
                 let location = response
                     .headers()
                     .get("location")
                     .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| FrankClawError::MediaFetchBlocked {
-                        reason: "redirect without Location header".into(),
-                    })?;
+                    .ok_or_else(|| MediaFetchBlockedSnafu {
+                        reason: "redirect without Location header",
+                    }.build())?;
                 // Resolve relative URLs against the current URL.
                 current_url = current_url.join(location).map_err(|e| {
-                    FrankClawError::MediaFetchBlocked {
+                    MediaFetchBlockedSnafu {
                         reason: format!("invalid redirect URL: {e}"),
-                    }
+                    }.build()
                 })?;
                 continue;
             }
 
             if !response.status().is_success() {
-                return Err(FrankClawError::MediaFetchBlocked {
+                return MediaFetchBlockedSnafu {
                     reason: format!("HTTP {}", response.status()),
-                });
+                }.fail();
             }
 
             // Check Content-Length header before downloading body.
             if let Some(content_length) = response.content_length()
                 && content_length > self.max_bytes {
-                    return Err(FrankClawError::MediaTooLarge {
+                    return MediaTooLargeSnafu {
                         max_bytes: self.max_bytes,
-                    });
+                    }.fail();
                 }
 
             let content_type = response
@@ -101,16 +101,16 @@ impl SafeFetcher {
                 .to_string();
 
             let bytes = response.bytes().await.map_err(|e| {
-                FrankClawError::MediaFetchBlocked {
+                MediaFetchBlockedSnafu {
                     reason: format!("body read failed: {e}"),
-                }
+                }.build()
             })?;
 
             // Enforce actual size limit (Content-Length can lie).
             if bytes.len() as u64 > self.max_bytes {
-                return Err(FrankClawError::MediaTooLarge {
+                return MediaTooLargeSnafu {
                     max_bytes: self.max_bytes,
-                });
+                }.fail();
             }
 
             return Ok(FetchedContent {
@@ -119,9 +119,9 @@ impl SafeFetcher {
             });
         }
 
-        Err(FrankClawError::MediaFetchBlocked {
+        MediaFetchBlockedSnafu {
             reason: format!("too many redirects ({MAX_REDIRECTS})"),
-        })
+        }.fail()
     }
 }
 
@@ -131,31 +131,31 @@ async fn validate_url_ssrf(url: &Url) -> Result<()> {
     match url.scheme() {
         "http" | "https" => {}
         scheme => {
-            return Err(FrankClawError::MediaFetchBlocked {
+            return MediaFetchBlockedSnafu {
                 reason: format!("unsupported scheme: {scheme}"),
-            });
+            }.fail();
         }
     }
 
     let host = url
         .host_str()
-        .ok_or_else(|| FrankClawError::MediaFetchBlocked {
-            reason: "no host in URL".into(),
-        })?;
+        .ok_or_else(|| MediaFetchBlockedSnafu {
+            reason: "no host in URL",
+        }.build())?;
 
     let port = url.port_or_known_default().unwrap_or(443);
     let addrs: Vec<IpAddr> = tokio::net::lookup_host(format!("{host}:{port}"))
         .await
-        .map_err(|e| FrankClawError::MediaFetchBlocked {
+        .map_err(|e| MediaFetchBlockedSnafu {
             reason: format!("DNS resolution failed: {e}"),
-        })?
+        }.build())?
         .map(|addr| addr.ip())
         .collect();
 
     if addrs.is_empty() {
-        return Err(FrankClawError::MediaFetchBlocked {
-            reason: "DNS resolved to no addresses".into(),
-        });
+        return MediaFetchBlockedSnafu {
+            reason: "DNS resolved to no addresses",
+        }.fail();
     }
 
     // Check ALL resolved IPs, not just the first.
@@ -164,9 +164,9 @@ async fn validate_url_ssrf(url: &Url) -> Result<()> {
     for addr in &addrs {
         if !is_safe_ip(addr) {
             warn!(%url, %addr, "SSRF blocked: URL resolved to private IP");
-            return Err(FrankClawError::MediaFetchBlocked {
+            return MediaFetchBlockedSnafu {
                 reason: format!("URL resolves to blocked IP range: {addr}"),
-            });
+            }.fail();
         }
     }
 
