@@ -23,6 +23,7 @@ pub struct FrankClawConfig {
     pub media: MediaConfig,
     pub security: SecurityConfig,
     pub memory: MemoryConfig,
+    pub understanding: MediaUnderstandingConfig,
 }
 
 impl Default for FrankClawConfig {
@@ -39,6 +40,7 @@ impl Default for FrankClawConfig {
             media: MediaConfig::default(),
             security: SecurityConfig::default(),
             memory: MemoryConfig::default(),
+            understanding: MediaUnderstandingConfig::default(),
         }
     }
 }
@@ -787,6 +789,49 @@ impl Default for SecurityConfig {
             require_auth_for_network: true, // Cannot be disabled
             ssrf_protection: true,
             max_webhook_body_bytes: 1024 * 1024, // 1 MB
+        }
+    }
+}
+
+/// Media understanding configuration (vision + transcription).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaUnderstandingConfig {
+    /// Enable automatic media understanding for non-vision models.
+    pub enabled: bool,
+    /// Vision provider: "openai", "anthropic", "ollama", or "none".
+    pub vision_provider: String,
+    /// Model for vision analysis (e.g., "gpt-4o", "claude-sonnet-4-20250514", "llava").
+    pub vision_model: Option<String>,
+    /// Base URL for the vision provider API.
+    pub vision_base_url: Option<String>,
+    /// API key env var for vision provider.
+    pub vision_api_key_ref: Option<String>,
+    /// Transcription provider: "openai" or "none".
+    pub transcription_provider: String,
+    /// Model for audio transcription (e.g., "whisper-1").
+    pub transcription_model: Option<String>,
+    /// Base URL for the transcription provider API.
+    pub transcription_base_url: Option<String>,
+    /// API key env var for transcription provider.
+    pub transcription_api_key_ref: Option<String>,
+    /// Automatically transcribe voice messages from channels.
+    pub auto_transcribe_voice: bool,
+}
+
+impl Default for MediaUnderstandingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            vision_provider: "none".into(),
+            vision_model: None,
+            vision_base_url: None,
+            vision_api_key_ref: None,
+            transcription_provider: "none".into(),
+            transcription_model: None,
+            transcription_base_url: None,
+            transcription_api_key_ref: None,
+            auto_transcribe_voice: false,
         }
     }
 }

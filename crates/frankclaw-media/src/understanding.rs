@@ -386,6 +386,352 @@ impl UnderstandingProvider for WhisperProvider {
     }
 }
 
+// ── Anthropic vision provider ───────────────────────────────────────────
+
+/// Vision provider that describes images using the Anthropic Messages API.
+///
+/// Uses the `messages` endpoint with base64 image content blocks,
+/// which differs from the OpenAI-compatible vision format.
+pub struct AnthropicVisionProvider {
+    client: reqwest::Client,
+    api_base: String,
+    api_key: secrecy::SecretString,
+    model: String,
+}
+
+impl AnthropicVisionProvider {
+    /// Create a new Anthropic vision provider.
+    ///
+    /// - `api_base`: Base URL (e.g. "https://api.anthropic.com")
+    /// - `api_key`: API key for authentication
+    /// - `model`: Model ID with vision support (e.g. "claude-sonnet-4-20250514")
+    pub fn new(
+        api_base: impl Into<String>,
+        api_key: secrecy::SecretString,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("invariant: HTTP client build should not fail"),
+            api_base: api_base.into(),
+            api_key,
+            model: model.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl UnderstandingProvider for AnthropicVisionProvider {
+    fn id(&self) -> &str {
+        "anthropic-vision"
+    }
+
+    fn handles(&self) -> MediaKind {
+        MediaKind::Image
+    }
+
+    async fn process(&self, attachment: &MediaAttachment) -> Result<UnderstandingOutput> {
+        use base64::Engine;
+        use secrecy::ExposeSecret;
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&attachment.data);
+
+        // Anthropic Messages API format with image content blocks.
+        let body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": 512,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": attachment.mime,
+                            "data": b64
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": "Describe this image concisely. Focus on the key content, text visible, and any important details."
+                    }
+                ]
+            }]
+        });
+
+        let url = format!("{}/v1/messages", self.api_base);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("x-api-key", self.api_key.expose_secret())
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| FrankClawError::ModelProvider {
+                msg: format!("anthropic vision request failed: {e}"),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(FrankClawError::ModelProvider {
+                msg: format!("anthropic vision HTTP {status}: {body_text}"),
+            });
+        }
+
+        let json: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e| FrankClawError::ModelProvider {
+                    msg: format!("anthropic vision: invalid JSON response: {e}"),
+                })?;
+
+        // Anthropic response: content[0].text
+        let text = json["content"][0]["text"]
+            .as_str()
+            .unwrap_or("(no description)")
+            .to_string();
+
+        Ok(UnderstandingOutput {
+            kind: UnderstandingKind::ImageDescription,
+            attachment_index: attachment.index,
+            text,
+        })
+    }
+}
+
+// ── Ollama vision provider ──────────────────────────────────────────────
+
+/// Vision provider for local Ollama multimodal models (e.g., llava, bakllava).
+///
+/// Uses the Ollama `/api/generate` endpoint with inline base64 images.
+pub struct OllamaVisionProvider {
+    client: reqwest::Client,
+    api_base: String,
+    model: String,
+}
+
+impl OllamaVisionProvider {
+    /// Create a new Ollama vision provider.
+    ///
+    /// - `api_base`: Base URL (e.g. "http://localhost:11434")
+    /// - `model`: Model name (e.g. "llava")
+    pub fn new(api_base: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .expect("invariant: HTTP client build should not fail"),
+            api_base: api_base.into(),
+            model: model.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl UnderstandingProvider for OllamaVisionProvider {
+    fn id(&self) -> &str {
+        "ollama-vision"
+    }
+
+    fn handles(&self) -> MediaKind {
+        MediaKind::Image
+    }
+
+    async fn process(&self, attachment: &MediaAttachment) -> Result<UnderstandingOutput> {
+        use base64::Engine;
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&attachment.data);
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "prompt": "Describe this image concisely. Focus on the key content, text visible, and any important details.",
+            "images": [b64],
+            "stream": false
+        });
+
+        let url = format!("{}/api/generate", self.api_base);
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| FrankClawError::ModelProvider {
+                msg: format!("ollama vision request failed: {e}"),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(FrankClawError::ModelProvider {
+                msg: format!("ollama vision HTTP {status}: {body_text}"),
+            });
+        }
+
+        let json: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e| FrankClawError::ModelProvider {
+                    msg: format!("ollama vision: invalid JSON response: {e}"),
+                })?;
+
+        let text = json["response"]
+            .as_str()
+            .unwrap_or("(no description)")
+            .trim()
+            .to_string();
+
+        if text.is_empty() {
+            return Err(FrankClawError::ModelProvider {
+                msg: "ollama vision returned empty response".into(),
+            });
+        }
+
+        Ok(UnderstandingOutput {
+            kind: UnderstandingKind::ImageDescription,
+            attachment_index: attachment.index,
+            text,
+        })
+    }
+}
+
+// ── Understanding chain ─────────────────────────────────────────────────
+
+/// Ordered fallback chain of understanding providers.
+///
+/// Tries each provider for the matching media kind in order. If a provider
+/// fails, the next one is tried. Only returns an error if all providers fail.
+pub struct UnderstandingChain {
+    providers: Vec<Box<dyn UnderstandingProvider>>,
+}
+
+impl UnderstandingChain {
+    pub fn new(providers: Vec<Box<dyn UnderstandingProvider>>) -> Self {
+        Self { providers }
+    }
+
+    /// Process a single attachment through the chain.
+    /// Returns the first successful result, or the last error if all fail.
+    pub async fn process(&self, attachment: &MediaAttachment) -> Result<UnderstandingOutput> {
+        let kind = attachment.kind();
+        let matching: Vec<_> = self.providers.iter().filter(|p| p.handles() == kind).collect();
+
+        if matching.is_empty() {
+            return Err(FrankClawError::ModelProvider {
+                msg: format!("no understanding provider for {:?}", kind),
+            });
+        }
+
+        let mut last_error = None;
+        for provider in &matching {
+            match provider.process(attachment).await {
+                Ok(output) => return Ok(output),
+                Err(e) => {
+                    warn!(
+                        provider = provider.id(),
+                        error = %e,
+                        "understanding provider failed, trying next"
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| FrankClawError::ModelProvider {
+            msg: "all understanding providers failed".into(),
+        }))
+    }
+
+    /// Build providers from config, returning an empty vec if disabled.
+    pub fn from_config(config: &frankclaw_core::config::MediaUnderstandingConfig) -> Vec<Box<dyn UnderstandingProvider>> {
+        if !config.enabled {
+            return Vec::new();
+        }
+
+        let mut providers: Vec<Box<dyn UnderstandingProvider>> = Vec::new();
+
+        // Vision provider.
+        match config.vision_provider.as_str() {
+            "openai" => {
+                if let Some(api_key) = resolve_api_key(config.vision_api_key_ref.as_deref()) {
+                    let base_url = config
+                        .vision_base_url
+                        .as_deref()
+                        .unwrap_or("https://api.openai.com/v1");
+                    let model = config
+                        .vision_model
+                        .as_deref()
+                        .unwrap_or("gpt-4o");
+                    providers.push(Box::new(VisionProvider::new(base_url, api_key, model)));
+                }
+            }
+            "anthropic" => {
+                if let Some(api_key) = resolve_api_key(config.vision_api_key_ref.as_deref()) {
+                    let base_url = config
+                        .vision_base_url
+                        .as_deref()
+                        .unwrap_or("https://api.anthropic.com");
+                    let model = config
+                        .vision_model
+                        .as_deref()
+                        .unwrap_or("claude-sonnet-4-20250514");
+                    providers.push(Box::new(AnthropicVisionProvider::new(base_url, api_key, model)));
+                }
+            }
+            "ollama" => {
+                let base_url = config
+                    .vision_base_url
+                    .as_deref()
+                    .unwrap_or("http://localhost:11434");
+                let model = config
+                    .vision_model
+                    .as_deref()
+                    .unwrap_or("llava");
+                providers.push(Box::new(OllamaVisionProvider::new(base_url, model)));
+            }
+            _ => {}
+        }
+
+        // Transcription provider.
+        match config.transcription_provider.as_str() {
+            "openai" => {
+                if let Some(api_key) = resolve_api_key(config.transcription_api_key_ref.as_deref()) {
+                    let base_url = config
+                        .transcription_base_url
+                        .as_deref()
+                        .unwrap_or("https://api.openai.com/v1");
+                    let model = config
+                        .transcription_model
+                        .as_deref()
+                        .unwrap_or("whisper-1");
+                    providers.push(Box::new(WhisperProvider::new(base_url, api_key, model)));
+                }
+            }
+            _ => {}
+        }
+
+        providers
+    }
+}
+
+/// Resolve an API key from an environment variable reference.
+fn resolve_api_key(env_ref: Option<&str>) -> Option<secrecy::SecretString> {
+    let var_name = env_ref?;
+    std::env::var(var_name)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(secrecy::SecretString::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,5 +904,89 @@ mod tests {
         let providers: Vec<Box<dyn UnderstandingProvider>> = vec![Box::new(FailingProvider)];
         let results = process_attachments(&attachments, &providers).await;
         assert!(results.is_empty()); // Error logged, not propagated
+    }
+
+    #[tokio::test]
+    async fn chain_returns_first_success() {
+        struct FailingVision;
+        #[async_trait]
+        impl UnderstandingProvider for FailingVision {
+            fn id(&self) -> &str { "failing-vision" }
+            fn handles(&self) -> MediaKind { MediaKind::Image }
+            async fn process(&self, _att: &MediaAttachment) -> Result<UnderstandingOutput> {
+                Err(FrankClawError::ModelProvider {
+                    msg: "provider 1 failed".into(),
+                })
+            }
+        }
+
+        struct SucceedingVision;
+        #[async_trait]
+        impl UnderstandingProvider for SucceedingVision {
+            fn id(&self) -> &str { "succeeding-vision" }
+            fn handles(&self) -> MediaKind { MediaKind::Image }
+            async fn process(&self, att: &MediaAttachment) -> Result<UnderstandingOutput> {
+                Ok(UnderstandingOutput {
+                    kind: UnderstandingKind::ImageDescription,
+                    attachment_index: att.index,
+                    text: "fallback description".into(),
+                })
+            }
+        }
+
+        let chain = UnderstandingChain::new(vec![
+            Box::new(FailingVision),
+            Box::new(SucceedingVision),
+        ]);
+
+        let result = chain.process(&image_attachment(0)).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().text, "fallback description");
+    }
+
+    #[tokio::test]
+    async fn chain_errors_when_all_fail() {
+        struct FailingVision;
+        #[async_trait]
+        impl UnderstandingProvider for FailingVision {
+            fn id(&self) -> &str { "failing" }
+            fn handles(&self) -> MediaKind { MediaKind::Image }
+            async fn process(&self, _att: &MediaAttachment) -> Result<UnderstandingOutput> {
+                Err(FrankClawError::ModelProvider {
+                    msg: "all fail".into(),
+                })
+            }
+        }
+
+        let chain = UnderstandingChain::new(vec![Box::new(FailingVision)]);
+        let result = chain.process(&image_attachment(0)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn chain_errors_when_no_provider_for_kind() {
+        let chain = UnderstandingChain::new(vec![]);
+        let result = chain.process(&image_attachment(0)).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_config_disabled_returns_empty() {
+        let config = frankclaw_core::config::MediaUnderstandingConfig::default();
+        let providers = UnderstandingChain::from_config(&config);
+        assert!(providers.is_empty());
+    }
+
+    #[test]
+    fn from_config_ollama_needs_no_api_key() {
+        let config = frankclaw_core::config::MediaUnderstandingConfig {
+            enabled: true,
+            vision_provider: "ollama".into(),
+            vision_model: Some("llava".into()),
+            ..Default::default()
+        };
+        let providers = UnderstandingChain::from_config(&config);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id(), "ollama-vision");
     }
 }

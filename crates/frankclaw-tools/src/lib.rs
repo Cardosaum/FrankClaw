@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod audio;
 pub mod bash;
 pub mod config_tools;
 pub mod cron_tools;
@@ -167,6 +168,7 @@ impl ToolRegistry {
         registry.register(Arc::new(pdf::PdfReadTool));
         // Image tools
         registry.register(Arc::new(image::ImageDescribeTool));
+        registry.register(Arc::new(audio::AudioTranscribeTool));
         registry
     }
 
