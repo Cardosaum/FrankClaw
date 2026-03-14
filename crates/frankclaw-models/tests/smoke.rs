@@ -39,70 +39,8 @@ use frankclaw_models::{AnthropicProvider, FailoverChain, OllamaProvider, OpenAiP
 use secrecy::SecretString;
 use std::sync::Arc;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn openai_key() -> Option<SecretString> {
-    std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-        .map(SecretString::from)
-}
-
-/// Returns the OpenAI-compatible base URL. If OPENAI_API_KEY looks like an
-/// OpenRouter key (sk-or-*), use the OpenRouter endpoint automatically.
-fn openai_base_url() -> String {
-    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    if key.starts_with("sk-or-") {
-        "https://openrouter.ai/api/v1".into()
-    } else {
-        std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into())
-    }
-}
-
-/// Pick a model that works with the detected endpoint.
-fn openai_model() -> String {
-    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    if key.starts_with("sk-or-") {
-        // OpenRouter model IDs use provider prefix
-        "openai/gpt-4o-mini".into()
-    } else {
-        "gpt-4o-mini".into()
-    }
-}
-
-fn anthropic_key() -> Option<SecretString> {
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-        .map(SecretString::from)
-}
-
-fn ollama_available() -> bool {
-    std::net::TcpStream::connect_timeout(
-        &"127.0.0.1:11434".parse().expect("valid addr"),
-        std::time::Duration::from_secs(2),
-    )
-    .is_ok()
-}
-
-fn simple_request(model: &str, prompt: &str) -> CompletionRequest {
-    CompletionRequest {
-        model_id: model.into(),
-        messages: vec![CompletionMessage::text(Role::User, prompt)],
-        max_tokens: Some(50),
-        temperature: Some(0.0),
-        system: None,
-        tools: Vec::new(),
-        thinking_budget: None,
-        parallel_tool_calls: None,
-        seed: None,
-        response_format: None,
-        reasoning_effort: None,
-    }
-}
+mod common;
+use common::*;
 
 // ---------------------------------------------------------------------------
 // OpenAI smoke tests

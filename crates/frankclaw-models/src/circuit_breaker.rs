@@ -147,103 +147,98 @@ fn maybe_transition_to_half_open(s: &mut BreakerState, config: &CircuitBreakerCo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::{fixture, rstest};
 
-    fn test_config() -> CircuitBreakerConfig {
-        CircuitBreakerConfig {
+    #[fixture]
+    fn breaker() -> CircuitBreaker {
+        CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: 3,
             recovery_timeout: Duration::from_millis(50),
             half_open_successes_needed: 2,
-        }
+        })
     }
 
-    #[test]
-    fn closed_allows_calls_and_resets_on_success() {
-        let cb = CircuitBreaker::new(test_config());
-        assert!(cb.check_allowed());
-        assert_eq!(cb.circuit_state(), CircuitState::Closed);
+    #[rstest]
+    fn closed_allows_calls_and_resets_on_success(breaker: CircuitBreaker) {
+        assert!(breaker.check_allowed());
+        assert_eq!(breaker.circuit_state(), CircuitState::Closed);
 
-        cb.record_failure();
-        cb.record_failure();
-        assert_eq!(cb.consecutive_failures(), 2);
+        breaker.record_failure();
+        breaker.record_failure();
+        assert_eq!(breaker.consecutive_failures(), 2);
 
-        cb.record_success();
-        assert_eq!(cb.consecutive_failures(), 0);
-        assert_eq!(cb.circuit_state(), CircuitState::Closed);
+        breaker.record_success();
+        assert_eq!(breaker.consecutive_failures(), 0);
+        assert_eq!(breaker.circuit_state(), CircuitState::Closed);
     }
 
-    #[test]
-    fn failures_trip_circuit_to_open() {
-        let cb = CircuitBreaker::new(test_config());
+    #[rstest]
+    fn failures_trip_circuit_to_open(breaker: CircuitBreaker) {
         for _ in 0..3 {
-            cb.record_failure();
+            breaker.record_failure();
         }
-        assert_eq!(cb.circuit_state(), CircuitState::Open);
-        assert!(!cb.check_allowed());
+        assert_eq!(breaker.circuit_state(), CircuitState::Open);
+        assert!(!breaker.check_allowed());
     }
 
-    #[test]
-    fn open_rejects_immediately() {
-        let cb = CircuitBreaker::new(test_config());
+    #[rstest]
+    fn open_rejects_immediately(breaker: CircuitBreaker) {
         for _ in 0..3 {
-            cb.record_failure();
+            breaker.record_failure();
         }
-        assert!(!cb.check_allowed());
+        assert!(!breaker.check_allowed());
     }
 
-    #[test]
-    fn recovery_timeout_transitions_to_half_open() {
-        let cb = CircuitBreaker::new(test_config());
+    #[rstest]
+    fn recovery_timeout_transitions_to_half_open(breaker: CircuitBreaker) {
         for _ in 0..3 {
-            cb.record_failure();
+            breaker.record_failure();
         }
-        assert_eq!(cb.circuit_state(), CircuitState::Open);
+        assert_eq!(breaker.circuit_state(), CircuitState::Open);
 
         std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(cb.circuit_state(), CircuitState::HalfOpen);
-        assert!(cb.check_allowed());
+        assert_eq!(breaker.circuit_state(), CircuitState::HalfOpen);
+        assert!(breaker.check_allowed());
     }
 
-    #[test]
-    fn half_open_success_closes_circuit() {
-        let cb = CircuitBreaker::new(test_config());
+    #[rstest]
+    fn half_open_success_closes_circuit(breaker: CircuitBreaker) {
         for _ in 0..3 {
-            cb.record_failure();
+            breaker.record_failure();
         }
         std::thread::sleep(Duration::from_millis(60));
 
-        assert_eq!(cb.circuit_state(), CircuitState::HalfOpen);
-        cb.record_success();
-        assert_eq!(cb.circuit_state(), CircuitState::HalfOpen); // Needs 2
-        cb.record_success();
-        assert_eq!(cb.circuit_state(), CircuitState::Closed);
+        assert_eq!(breaker.circuit_state(), CircuitState::HalfOpen);
+        breaker.record_success();
+        assert_eq!(breaker.circuit_state(), CircuitState::HalfOpen); // Needs 2
+        breaker.record_success();
+        assert_eq!(breaker.circuit_state(), CircuitState::Closed);
     }
 
-    #[test]
-    fn half_open_failure_reopens_circuit() {
-        let cb = CircuitBreaker::new(test_config());
+    #[rstest]
+    fn half_open_failure_reopens_circuit(breaker: CircuitBreaker) {
         for _ in 0..3 {
-            cb.record_failure();
+            breaker.record_failure();
         }
         std::thread::sleep(Duration::from_millis(60));
 
-        assert_eq!(cb.circuit_state(), CircuitState::HalfOpen);
-        cb.record_failure();
-        assert_eq!(cb.circuit_state(), CircuitState::Open);
-        assert!(!cb.check_allowed());
+        assert_eq!(breaker.circuit_state(), CircuitState::HalfOpen);
+        breaker.record_failure();
+        assert_eq!(breaker.circuit_state(), CircuitState::Open);
+        assert!(!breaker.check_allowed());
     }
 
-    #[test]
-    fn success_in_closed_resets_failure_count() {
-        let cb = CircuitBreaker::new(test_config());
-        cb.record_failure();
-        cb.record_failure();
-        assert_eq!(cb.consecutive_failures(), 2);
-        cb.record_success();
-        assert_eq!(cb.consecutive_failures(), 0);
+    #[rstest]
+    fn success_in_closed_resets_failure_count(breaker: CircuitBreaker) {
+        breaker.record_failure();
+        breaker.record_failure();
+        assert_eq!(breaker.consecutive_failures(), 2);
+        breaker.record_success();
+        assert_eq!(breaker.consecutive_failures(), 0);
         // Two more failures should NOT trip (we're back at 0).
-        cb.record_failure();
-        cb.record_failure();
-        assert_eq!(cb.circuit_state(), CircuitState::Closed);
+        breaker.record_failure();
+        breaker.record_failure();
+        assert_eq!(breaker.circuit_state(), CircuitState::Closed);
     }
 
     #[test]

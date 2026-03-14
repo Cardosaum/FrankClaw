@@ -142,6 +142,9 @@ frankclaw-media = { path = "crates/frankclaw-media" }
 frankclaw-tools = { path = "crates/frankclaw-tools" }
 frankclaw-plugin-sdk = { path = "crates/frankclaw-plugin-sdk" }
 
+# Testing
+rstest = "0.25"
+
 [profile.release]
 lto = true
 codegen-units = 1
