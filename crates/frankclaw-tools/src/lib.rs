@@ -18,7 +18,7 @@ use url::Url;
 
 use tokio::net::lookup_host;
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{AgentRuntimeSnafu, ConfigValidationSnafu, InternalSnafu, InvalidRequestSnafu, Result};
 use frankclaw_core::media::is_safe_ip;
 use frankclaw_core::model::{ToolDef, ToolRiskLevel};
 use frankclaw_core::session::SessionStore;
@@ -128,9 +128,9 @@ impl ToolRegistry {
     pub fn validate_names(&self, names: &[String]) -> Result<()> {
         for name in names {
             if !self.tools.contains_key(name) {
-                return Err(FrankClawError::ConfigValidation {
+                return ConfigValidationSnafu {
                     msg: format!("unknown tool '{name}'"),
-                });
+                }.fail();
             }
         }
         Ok(())
@@ -153,25 +153,25 @@ impl ToolRegistry {
         ctx: ToolContext,
     ) -> Result<ToolOutput> {
         if !allowed_tools.iter().any(|allowed| allowed == name) {
-            return Err(FrankClawError::AgentRuntime {
+            return AgentRuntimeSnafu {
                 msg: format!("tool '{}' is not allowed for agent '{}'", name, ctx.agent_id),
-            });
+            }.fail();
         }
 
         let tool = self
             .tools
             .get(name)
-            .ok_or_else(|| FrankClawError::InvalidRequest {
+            .ok_or_else(|| InvalidRequestSnafu {
                 msg: format!("unknown tool '{name}'"),
-            })?;
+            }.build())?;
 
         let risk_level = tool.definition().risk_level;
         if !self.policy.is_approved(name, risk_level) {
-            return Err(FrankClawError::AgentRuntime {
+            return AgentRuntimeSnafu {
                 msg: format!(
                     "tool '{name}' requires {risk_level} approval. Set FRANKCLAW_TOOL_APPROVAL={risk_level} to enable.",
                 ),
-            });
+            }.fail();
         }
 
         let output = tool.invoke(args, ctx).await?;
@@ -281,9 +281,9 @@ impl BrowserClient {
     }
 
     fn new(raw_base_url: &str) -> Result<Self> {
-        let mut base_url = Url::parse(raw_base_url).map_err(|err| FrankClawError::ConfigValidation {
+        let mut base_url = Url::parse(raw_base_url).map_err(|err| ConfigValidationSnafu {
             msg: format!("invalid FRANKCLAW_BROWSER_DEVTOOLS_URL: {err}"),
-        })?;
+        }.build())?;
         if !base_url.path().ends_with('/') {
             let path = format!("{}/", base_url.path());
             base_url.set_path(&path);
@@ -294,9 +294,9 @@ impl BrowserClient {
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
-                .map_err(|err| FrankClawError::Internal {
+                .map_err(|err| InternalSnafu {
                     msg: format!("failed to build browser client: {err}"),
-                })?,
+                }.build())?,
             sessions: Mutex::new(HashMap::new()),
             next_command_id: AtomicU64::new(1),
         })
@@ -320,9 +320,9 @@ impl BrowserClient {
         if let Some(session_key) = &ctx.session_key {
             return Ok(format!("session:{}", session_key.as_str()));
         }
-        Err(FrankClawError::InvalidRequest {
-            msg: "browser tool requires session_id or session context".into(),
-        })
+        InvalidRequestSnafu {
+            msg: "browser tool requires session_id or session context",
+        }.fail()
     }
 
     async fn open(&self, session_id: String, url: &str) -> Result<BrowserSnapshot> {
@@ -362,11 +362,11 @@ impl BrowserClient {
             {
                 let sessions = self.sessions.lock().await;
                 if self.session_count(&sessions) >= MAX_BROWSER_SESSIONS {
-                    return Err(FrankClawError::AgentRuntime {
+                    return AgentRuntimeSnafu {
                         msg: format!(
                             "browser session limit reached ({MAX_BROWSER_SESSIONS}). Close existing sessions first."
                         ),
-                    });
+                    }.fail();
                 }
             }
             let target = self.create_target(url).await?;
@@ -403,9 +403,9 @@ impl BrowserClient {
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| FrankClawError::InvalidRequest {
+            .ok_or_else(|| InvalidRequestSnafu {
                 msg: format!("browser session '{session_id}' was not opened yet"),
-            })?;
+            }.build())?;
         self.snapshot_session(&session).await
     }
 
@@ -419,27 +419,27 @@ impl BrowserClient {
             .lock()
             .await
             .remove(session_id)
-            .ok_or_else(|| FrankClawError::InvalidRequest {
+            .ok_or_else(|| InvalidRequestSnafu {
                 msg: format!("browser session '{session_id}' was not opened yet"),
-            })?;
+            }.build())?;
         let endpoint = self
             .base_url
             .join(&format!("json/close/{}", session.target_id))
-            .map_err(|err| FrankClawError::Internal {
+            .map_err(|err| InternalSnafu {
                 msg: format!("invalid browser close endpoint: {err}"),
-            })?;
+            }.build())?;
         let response = self
             .http
             .get(endpoint)
             .send()
             .await
-            .map_err(|err| FrankClawError::AgentRuntime {
+            .map_err(|err| AgentRuntimeSnafu {
                 msg: format!("failed to close browser target: {err}"),
-            })?;
+            }.build())?;
         if !response.status().is_success() {
-            return Err(FrankClawError::AgentRuntime {
+            return AgentRuntimeSnafu {
                 msg: format!("browser close failed with HTTP {}", response.status()),
-            });
+            }.fail();
         }
         Ok(())
     }
@@ -451,18 +451,18 @@ impl BrowserClient {
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| FrankClawError::InvalidRequest {
+            .ok_or_else(|| InvalidRequestSnafu {
                 msg: format!("browser session '{session_id}' was not opened yet"),
-            })?;
+            }.build())?;
         let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
         self.wait_for_ready(&mut socket).await?;
         let clicked = self
             .evaluate_bool(&mut socket, &click_expression(selector))
             .await?;
         if !clicked {
-            return Err(FrankClawError::AgentRuntime {
+            return AgentRuntimeSnafu {
                 msg: format!("browser.click could not find selector '{selector}'"),
-            });
+            }.fail();
         }
         self.snapshot_session(&session).await
     }
@@ -474,18 +474,18 @@ impl BrowserClient {
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| FrankClawError::InvalidRequest {
+            .ok_or_else(|| InvalidRequestSnafu {
                 msg: format!("browser session '{session_id}' was not opened yet"),
-            })?;
+            }.build())?;
         let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
         self.wait_for_ready(&mut socket).await?;
         let typed = self
             .evaluate_bool(&mut socket, &type_expression(selector, text))
             .await?;
         if !typed {
-            return Err(FrankClawError::AgentRuntime {
+            return AgentRuntimeSnafu {
                 msg: format!("browser.type could not find selector '{selector}'"),
-            });
+            }.fail();
         }
         self.snapshot_session(&session).await
     }
@@ -498,9 +498,9 @@ impl BrowserClient {
         timeout_ms: u64,
     ) -> Result<BrowserSnapshot> {
         if selector.is_none() && text.is_none() {
-            return Err(FrankClawError::InvalidRequest {
-                msg: "browser.wait requires selector or text".into(),
-            });
+            return InvalidRequestSnafu {
+                msg: "browser.wait requires selector or text",
+            }.fail();
         }
 
         let session = self
@@ -509,9 +509,9 @@ impl BrowserClient {
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| FrankClawError::InvalidRequest {
+            .ok_or_else(|| InvalidRequestSnafu {
                 msg: format!("browser session '{session_id}' was not opened yet"),
-            })?;
+            }.build())?;
         let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
         self.wait_for_ready(&mut socket).await?;
 
@@ -527,9 +527,9 @@ impl BrowserClient {
                     .map(|value| format!("selector '{value}'"))
                     .or_else(|| text.map(|value| format!("text '{value}'")))
                     .unwrap_or_else(|| "condition".into());
-                return Err(FrankClawError::AgentRuntime {
+                return AgentRuntimeSnafu {
                     msg: format!("browser.wait timed out waiting for {target}"),
-                });
+                }.fail();
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -543,43 +543,43 @@ impl BrowserClient {
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| FrankClawError::InvalidRequest {
+            .ok_or_else(|| InvalidRequestSnafu {
                 msg: format!("browser session '{session_id}' was not opened yet"),
-            })?;
+            }.build())?;
         let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
         self.wait_for_ready(&mut socket).await?;
         let pressed = self
             .evaluate_bool(&mut socket, &press_expression(selector, key))
             .await?;
         if !pressed {
-            return Err(FrankClawError::AgentRuntime {
+            return AgentRuntimeSnafu {
                 msg: format!("browser.press could not find selector '{selector}'"),
-            });
+            }.fail();
         }
         self.snapshot_session(&session).await
     }
 
     async fn create_target(&self, url: &str) -> Result<DevtoolsTarget> {
-        let mut endpoint = self.base_url.join("json/new").map_err(|err| FrankClawError::Internal {
+        let mut endpoint = self.base_url.join("json/new").map_err(|err| InternalSnafu {
             msg: format!("invalid browser endpoint: {err}"),
-        })?;
+        }.build())?;
         endpoint.set_query(Some(url));
         let response = self
             .http
             .put(endpoint)
             .send()
             .await
-            .map_err(|err| FrankClawError::AgentRuntime {
+            .map_err(|err| AgentRuntimeSnafu {
                 msg: format!("failed to create browser target: {err}"),
-            })?;
+            }.build())?;
         if !response.status().is_success() {
-            return Err(FrankClawError::AgentRuntime {
+            return AgentRuntimeSnafu {
                 msg: format!("browser target creation failed with HTTP {}", response.status()),
-            });
+            }.fail();
         }
-        response.json::<DevtoolsTarget>().await.map_err(|err| FrankClawError::AgentRuntime {
+        response.json::<DevtoolsTarget>().await.map_err(|err| AgentRuntimeSnafu {
             msg: format!("invalid browser target response: {err}"),
-        })
+        }.build())
     }
 
     async fn navigate_target(&self, session: &BrowserSession, url: &str) -> Result<()> {
@@ -631,9 +631,9 @@ impl BrowserClient {
     ) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
         let (socket, _) = connect_async(ws_url)
             .await
-            .map_err(|err| FrankClawError::AgentRuntime {
+            .map_err(|err| AgentRuntimeSnafu {
                 msg: format!("failed to connect to browser page socket: {err}"),
-            })?;
+            }.build())?;
         Ok(socket)
     }
 
@@ -715,44 +715,44 @@ impl BrowserClient {
                 .into(),
             ))
             .await
-            .map_err(|err| FrankClawError::AgentRuntime {
+            .map_err(|err| AgentRuntimeSnafu {
                 msg: format!("failed to send browser command '{method}': {err}"),
-            })?;
+            }.build())?;
 
         let read_response = async {
             while let Some(message) = socket.next().await {
-                let message = message.map_err(|err| FrankClawError::AgentRuntime {
+                let message = message.map_err(|err| AgentRuntimeSnafu {
                     msg: format!("browser socket read failed: {err}"),
-                })?;
+                }.build())?;
                 let Message::Text(text) = message else {
                     continue;
                 };
                 let frame: serde_json::Value =
                     serde_json::from_str(text.as_ref()).map_err(|err| {
-                        FrankClawError::AgentRuntime {
+                        AgentRuntimeSnafu {
                             msg: format!("browser socket sent invalid JSON: {err}"),
-                        }
+                        }.build()
                     })?;
                 if frame["id"].as_u64() != Some(id) {
                     continue;
                 }
                 if let Some(message) = frame["error"]["message"].as_str() {
-                    return Err(FrankClawError::AgentRuntime {
+                    return AgentRuntimeSnafu {
                         msg: format!("browser command '{method}' failed: {message}"),
-                    });
+                    }.fail();
                 }
                 return Ok(frame);
             }
-            Err(FrankClawError::AgentRuntime {
+            AgentRuntimeSnafu {
                 msg: format!("browser socket closed while waiting for '{method}'"),
-            })
+            }.fail()
         };
 
         match tokio::time::timeout(CDP_COMMAND_TIMEOUT, read_response).await {
             Ok(result) => result,
-            Err(_) => Err(FrankClawError::AgentRuntime {
+            Err(_) => AgentRuntimeSnafu {
                 msg: format!("browser command '{method}' timed out after {}s", CDP_COMMAND_TIMEOUT.as_secs()),
-            }),
+            }.fail(),
         }
     }
 }
@@ -871,9 +871,9 @@ impl Tool for SessionInspectTool {
             .and_then(|value| value.as_str())
             .map(SessionKey::from_raw)
             .or(ctx.session_key)
-            .ok_or_else(|| FrankClawError::InvalidRequest {
-                msg: "session.inspect requires a session_key".into(),
-            })?;
+            .ok_or_else(|| InvalidRequestSnafu {
+                msg: "session.inspect requires a session_key",
+            }.build())?;
         let limit = args
             .get("limit")
             .and_then(serde_json::Value::as_u64)
@@ -914,9 +914,9 @@ impl Tool for BrowserOpenTool {
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| FrankClawError::InvalidRequest {
-                msg: "browser.open requires a non-empty url".into(),
-            })?;
+            .ok_or_else(|| InvalidRequestSnafu {
+                msg: "browser.open requires a non-empty url",
+            }.build())?;
         let session_id = self
             .client
             .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
@@ -1014,9 +1014,9 @@ impl Tool for BrowserClickTool {
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| FrankClawError::InvalidRequest {
-                msg: "browser.click requires a non-empty selector".into(),
-            })?;
+            .ok_or_else(|| InvalidRequestSnafu {
+                msg: "browser.click requires a non-empty selector",
+            }.build())?;
         let snapshot = self.client.click(&session_id, selector).await?;
         Ok(snapshot_result(snapshot, false, 1000))
     }
@@ -1050,15 +1050,15 @@ impl Tool for BrowserTypeTool {
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| FrankClawError::InvalidRequest {
-                msg: "browser.type requires a non-empty selector".into(),
-            })?;
+            .ok_or_else(|| InvalidRequestSnafu {
+                msg: "browser.type requires a non-empty selector",
+            }.build())?;
         let text = args
             .get("text")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| FrankClawError::InvalidRequest {
-                msg: "browser.type requires text".into(),
-            })?;
+            .ok_or_else(|| InvalidRequestSnafu {
+                msg: "browser.type requires text",
+            }.build())?;
         let snapshot = self.client.type_text(&session_id, selector, text).await?;
         Ok(snapshot_result(snapshot, false, 1000))
     }
@@ -1137,17 +1137,17 @@ impl Tool for BrowserPressTool {
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| FrankClawError::InvalidRequest {
-                msg: "browser.press requires a non-empty selector".into(),
-            })?;
+            .ok_or_else(|| InvalidRequestSnafu {
+                msg: "browser.press requires a non-empty selector",
+            }.build())?;
         let key = args
             .get("key")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| FrankClawError::InvalidRequest {
-                msg: "browser.press requires an allowed key".into(),
-            })?;
+            .ok_or_else(|| InvalidRequestSnafu {
+                msg: "browser.press requires an allowed key",
+            }.build())?;
         let snapshot = self.client.press_key(&session_id, selector, key).await?;
         Ok(snapshot_result(snapshot, false, 1000))
     }
@@ -1263,50 +1263,50 @@ fn press_expression(selector: &str, key: &str) -> String {
 fn validate_press_key(key: &str) -> Result<()> {
     match key {
         "Enter" | "Tab" | "Escape" | "ArrowDown" | "ArrowUp" => Ok(()),
-        _ => Err(FrankClawError::InvalidRequest {
+        _ => InvalidRequestSnafu {
             msg: format!(
                 "browser.press only allows Enter, Tab, Escape, ArrowDown, and ArrowUp; got '{key}'"
             ),
-        }),
+        }.fail(),
     }
 }
 
 /// Validate that a browser navigation URL is not targeting private/internal IPs.
 /// Uses the same SSRF blocklist as media fetches.
 async fn validate_navigation_url(raw_url: &str) -> Result<()> {
-    let parsed = Url::parse(raw_url).map_err(|err| FrankClawError::InvalidRequest {
+    let parsed = Url::parse(raw_url).map_err(|err| InvalidRequestSnafu {
         msg: format!("invalid browser navigation URL: {err}"),
-    })?;
+    }.build())?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
-        return Err(FrankClawError::InvalidRequest {
+        return InvalidRequestSnafu {
             msg: format!("browser navigation only allows http/https URLs, got '{scheme}'"),
-        });
+        }.fail();
     }
-    let host = parsed.host_str().ok_or_else(|| FrankClawError::InvalidRequest {
-        msg: "browser navigation URL has no host".into(),
-    })?;
+    let host = parsed.host_str().ok_or_else(|| InvalidRequestSnafu {
+        msg: "browser navigation URL has no host",
+    }.build())?;
     let port = parsed.port_or_known_default().unwrap_or(80);
     let lookup = format!("{host}:{port}");
     let addrs: Vec<_> = lookup_host(&lookup)
         .await
-        .map_err(|err| FrankClawError::AgentRuntime {
+        .map_err(|err| AgentRuntimeSnafu {
             msg: format!("DNS lookup failed for browser navigation URL '{host}': {err}"),
-        })?
+        }.build())?
         .collect();
     if addrs.is_empty() {
-        return Err(FrankClawError::AgentRuntime {
+        return AgentRuntimeSnafu {
             msg: format!("DNS lookup returned no addresses for '{host}'"),
-        });
+        }.fail();
     }
     for addr in &addrs {
         if !is_safe_ip(&addr.ip()) {
-            return Err(FrankClawError::InvalidRequest {
+            return InvalidRequestSnafu {
                 msg: format!(
                     "browser navigation blocked: '{host}' resolves to private/internal IP {}",
                     addr.ip()
                 ),
-            });
+            }.fail();
         }
     }
     Ok(())

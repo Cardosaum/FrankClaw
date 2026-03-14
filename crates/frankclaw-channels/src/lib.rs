@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use frankclaw_core::channel::ChannelPlugin;
 use frankclaw_core::config::{ChannelConfig, FrankClawConfig};
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{Result, InternalSnafu, ConfigValidationSnafu};
 use frankclaw_core::types::ChannelId;
 
 /// Default timeout for channel HTTP clients (seconds).
@@ -32,9 +32,9 @@ pub fn build_channel_http_client() -> Result<Client> {
     Client::builder()
         .timeout(std::time::Duration::from_secs(CHANNEL_HTTP_TIMEOUT_SECS))
         .build()
-        .map_err(|e| FrankClawError::Internal {
+        .map_err(|e| InternalSnafu {
             msg: format!("failed to build channel HTTP client: {e}"),
-        })
+        }.build())
 }
 
 pub struct ChannelSet {
@@ -310,19 +310,19 @@ fn build_channel(channel_id: &ChannelId, channel_config: &ChannelConfig) -> Resu
                 ),
             )))
         }
-        other => Err(FrankClawError::ConfigValidation {
+        other => ConfigValidationSnafu {
             msg: format!(
                 "unsupported enabled channel '{other}'; currently supported: web, telegram, discord, signal, slack, whatsapp, email"
             ),
-        }),
+        }.fail(),
     }
 }
 
 fn first_account<'cfg>(channel_id: &ChannelId, channel_config: &'cfg ChannelConfig) -> Result<&'cfg Value> {
     channel_config.accounts.first().ok_or_else(|| {
-        FrankClawError::ConfigValidation {
+        ConfigValidationSnafu {
             msg: format!("{channel_id} channel requires at least one account"),
-        }
+        }.build()
     })
 }
 
@@ -365,9 +365,9 @@ fn resolve_channel_value(
         return resolve_env_value(default_env, channel, label);
     }
 
-    Err(FrankClawError::ConfigValidation {
+    ConfigValidationSnafu {
         msg: format!("channel '{channel}' requires a non-empty {label}"),
-    })
+    }.fail()
 }
 
 fn resolve_optional_channel_value(
@@ -411,19 +411,19 @@ fn resolve_inline_value(account: &Value, keys: &[&str]) -> Option<String> {
 fn resolve_env_value(env_name: &str, channel: &str, label: &str) -> Result<String> {
     let env_name = env_name.trim();
     if env_name.is_empty() {
-        return Err(FrankClawError::ConfigValidation {
+        return ConfigValidationSnafu {
             msg: format!("channel '{channel}' references an empty environment variable for {label}"),
-        });
+        }.fail();
     }
 
-    let value = std::env::var(env_name).map_err(|_| FrankClawError::ConfigValidation {
+    let value = std::env::var(env_name).map_err(|_| ConfigValidationSnafu {
         msg: format!("channel '{channel}' references missing environment variable '{env_name}'"),
-    })?;
+    }.build())?;
 
     if value.trim().is_empty() {
-        return Err(FrankClawError::ConfigValidation {
+        return ConfigValidationSnafu {
             msg: format!("channel '{channel}' environment variable '{env_name}' is empty"),
-        });
+        }.fail();
     }
 
     Ok(value)

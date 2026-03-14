@@ -5,7 +5,7 @@ use secrecy::{ExposeSecret, SecretString};
 use std::collections::BTreeMap;
 use tracing::debug;
 
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{FrankClawError, InternalSnafu, ModelProviderSnafu, Result};
 use frankclaw_core::model::{ModelProvider, CompletionRequest, StreamDelta, CompletionResponse, ModelDef, ModelApi, InputModality, ModelCost, ModelCompat, ToolCallResponse, Usage, FinishReason};
 use frankclaw_core::types::Role;
 
@@ -31,9 +31,9 @@ impl AnthropicProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .map_err(|e| FrankClawError::Internal {
+            .map_err(|e| InternalSnafu {
                 msg: format!("failed to build HTTP client: {e}"),
-            })?;
+            }.build())?;
 
         Ok(Self {
             id: id.into(),
@@ -73,9 +73,9 @@ impl ModelProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| FrankClawError::ModelProvider {
+            .map_err(|e| ModelProviderSnafu {
                 msg: format!("request failed: {e}"),
-            })?;
+            }.build())?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -88,9 +88,9 @@ impl ModelProvider for AnthropicProvider {
             let mut state = AnthropicStreamState::default();
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| FrankClawError::ModelProvider {
+                let chunk = chunk.map_err(|e| ModelProviderSnafu {
                     msg: format!("failed to read streaming response: {e}"),
-                })?;
+                }.build())?;
                 for event in decoder.push(chunk.as_ref()) {
                     for delta in apply_stream_event(&mut state, event.event.as_deref(), &event.data)? {
                         let _ = stream_tx.send(delta).await;
@@ -116,9 +116,9 @@ impl ModelProvider for AnthropicProvider {
             return Ok(response);
         }
 
-        let data: serde_json::Value = response.json().await.map_err(|e| FrankClawError::ModelProvider {
+        let data: serde_json::Value = response.json().await.map_err(|e| ModelProviderSnafu {
             msg: format!("invalid response: {e}"),
-        })?;
+        }.build())?;
         parse_completion_response(&data)
     }
 
@@ -360,9 +360,9 @@ impl AnthropicStreamState {
         let mut tool_calls = Vec::with_capacity(self.tool_calls.len());
         for (_, tool_call) in self.tool_calls {
             if tool_call.id.trim().is_empty() || tool_call.name.trim().is_empty() {
-                return Err(FrankClawError::ModelProvider {
-                    msg: "streamed anthropic tool call missing id or name".into(),
-                });
+                return ModelProviderSnafu {
+                    msg: "streamed anthropic tool call missing id or name",
+                }.fail();
             }
             tool_calls.push(ToolCallResponse {
                 id: tool_call.id,
@@ -384,9 +384,9 @@ fn apply_stream_event(
     event_type: Option<&str>,
     data: &str,
 ) -> Result<Vec<StreamDelta>> {
-    let payload: serde_json::Value = serde_json::from_str(data).map_err(|err| FrankClawError::ModelProvider {
+    let payload: serde_json::Value = serde_json::from_str(data).map_err(|err| ModelProviderSnafu {
         msg: format!("invalid streaming response chunk: {err}"),
-    })?;
+    }.build())?;
     let mut deltas = Vec::new();
 
     match event_type.unwrap_or_default() {
@@ -470,9 +470,9 @@ fn apply_stream_event(
         "error" => {
             let message = payload["error"]["message"].as_str().unwrap_or("anthropic stream error");
             deltas.push(StreamDelta::Error(message.to_string()));
-            return Err(FrankClawError::ModelProvider {
+            return ModelProviderSnafu {
                 msg: message.to_string(),
-            });
+            }.fail();
         }
         _ => {}
     }
@@ -512,33 +512,33 @@ pub fn classify_provider_error(
 
     // Context overflow detection — varies across providers
     if is_context_overflow(&body_lower) {
-        return FrankClawError::ModelProvider {
+        return ModelProviderSnafu {
             msg: format!("context length exceeded (HTTP {status}): {body}"),
-        };
+        }.build();
     }
 
     match status.as_u16() {
-        401 => FrankClawError::ModelProvider {
+        401 => ModelProviderSnafu {
             msg: format!("authentication failed (invalid API key): {body}"),
-        },
+        }.build(),
         402 => {
             // 402 can mean billing issue OR rate limit spend cap
             if body_lower.contains("rate_limit") || body_lower.contains("spend") {
-                FrankClawError::ModelProvider {
+                ModelProviderSnafu {
                     msg: format!("rate limit spend cap reached (retryable): {body}"),
-                }
+                }.build()
             } else {
-                FrankClawError::ModelProvider {
+                ModelProviderSnafu {
                     msg: format!("billing error (out of credits, non-retryable): {body}"),
-                }
+                }.build()
             }
         }
-        429 => FrankClawError::ModelProvider {
+        429 => ModelProviderSnafu {
             msg: format!("rate limited (HTTP 429): {body}"),
-        },
-        _ => FrankClawError::ModelProvider {
+        }.build(),
+        _ => ModelProviderSnafu {
             msg: format!("HTTP {status}: {body}"),
-        },
+        }.build(),
     }
 }
 

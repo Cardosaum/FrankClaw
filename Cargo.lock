@@ -1009,6 +1009,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "snafu",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -1033,6 +1034,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "snafu",
  "strum",
  "thiserror 2.0.18",
  "tokio",
@@ -1053,6 +1055,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "snafu",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -1125,6 +1128,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "snafu",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1163,6 +1167,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "snafu",
  "strum",
  "thiserror 2.0.18",
  "tokio",
@@ -1216,6 +1221,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "snafu",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1234,6 +1240,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "snafu",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tracing",
@@ -3012,6 +3019,27 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "snafu"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e84b3f4eacbf3a1ce05eac6763b4d629d60cbc94d632e4092c54ade71f1e1a2"
+dependencies = [
+ "snafu-derive",
+]
+
+[[package]]
+name = "snafu-derive"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "socket2"

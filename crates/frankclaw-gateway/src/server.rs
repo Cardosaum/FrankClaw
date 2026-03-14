@@ -22,6 +22,9 @@ use tracing::info;
 
 use frankclaw_core::channel::{InboundMessage, OutboundMessage};
 use frankclaw_core::config::{BindMode, ChannelDmPolicy, FrankClawConfig};
+use frankclaw_core::error::{
+    ConfigValidationSnafu, InvalidRequestSnafu, RequestTooLargeSnafu, SessionStorageSnafu,
+};
 use frankclaw_core::session::SessionStore;
 use frankclaw_core::types::MediaId;
 use frankclaw_cron::{CronJob, CronService};
@@ -1033,7 +1036,7 @@ async fn send_error_reply(
         frankclaw_core::error::FrankClawError::RequestTooLarge { .. } => {
             "Your message is too long. Please shorten it and try again.".to_string()
         }
-        frankclaw_core::error::FrankClawError::RateLimited { retry_after_secs } => {
+        frankclaw_core::error::FrankClawError::RateLimited { retry_after_secs, .. } => {
             format!("Too many requests. Please wait {retry_after_secs} seconds and try again.")
         }
         _ => "Sorry, I encountered an error processing your message. Please try again later."
@@ -1087,18 +1090,18 @@ async fn process_inbound_message_with_target(
         .as_deref()
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .ok_or_else(|| frankclaw_core::error::FrankClawError::InvalidRequest {
-            msg: "inbound message text is required".into(),
-        })?;
+        .ok_or_else(|| InvalidRequestSnafu {
+            msg: "inbound message text is required",
+        }.build())?;
 
     let max_message_bytes = policy
         .max_message_bytes
         .unwrap_or(config.security.max_webhook_body_bytes)
         .min(config.security.max_webhook_body_bytes);
     if text.len() > max_message_bytes {
-        return Err(frankclaw_core::error::FrankClawError::RequestTooLarge {
+        return RequestTooLargeSnafu {
             max_bytes: max_message_bytes,
-        });
+        }.fail();
     }
 
     if inbound.is_group && policy.require_mention_for_groups && !inbound.is_mention {
@@ -1476,9 +1479,9 @@ async fn persist_delivery_metadata(
         recorded_at: chrono::Utc::now(),
     };
     set_last_reply_in_metadata(&mut entry.metadata, &delivery_metadata)
-        .map_err(|e| frankclaw_core::error::FrankClawError::SessionStorage {
+        .map_err(|e| SessionStorageSnafu {
             msg: format!("failed to serialize delivery metadata: {e}"),
-        })?;
+        }.build())?;
 
     entry.thread_id = inbound.thread_id.clone();
     entry.last_message_at = Some(chrono::Utc::now());
@@ -1590,9 +1593,9 @@ fn parse_cron_jobs(config: &FrankClawConfig) -> frankclaw_core::error::Result<Ve
         .cloned()
         .map(|value| {
             let parsed = serde_json::from_value::<CronJob>(value).map_err(|err| {
-                frankclaw_core::error::FrankClawError::ConfigValidation {
+                ConfigValidationSnafu {
                     msg: format!("invalid cron job configuration: {err}"),
-                }
+                }.build()
             })?;
             validate_cron_job(&parsed)?;
             Ok(parsed)
@@ -1602,29 +1605,29 @@ fn parse_cron_jobs(config: &FrankClawConfig) -> frankclaw_core::error::Result<Ve
 
 fn validate_cron_job(job: &CronJob) -> frankclaw_core::error::Result<()> {
     if job.id.trim().is_empty() {
-        return Err(frankclaw_core::error::FrankClawError::ConfigValidation {
-            msg: "cron job id cannot be empty".into(),
-        });
+        return ConfigValidationSnafu {
+            msg: "cron job id cannot be empty",
+        }.fail();
     }
     if job.prompt.trim().is_empty() {
-        return Err(frankclaw_core::error::FrankClawError::ConfigValidation {
+        return ConfigValidationSnafu {
             msg: format!("cron job '{}' prompt cannot be empty", job.id),
-        });
+        }.fail();
     }
     let Some((session_agent_id, _, _)) = job.session_key.parse() else {
-        return Err(frankclaw_core::error::FrankClawError::ConfigValidation {
+        return ConfigValidationSnafu {
             msg: format!("cron job '{}' has an invalid session key", job.id),
-        });
+        }.fail();
     };
     if session_agent_id.as_str() != job.agent_id.as_str() {
-        return Err(frankclaw_core::error::FrankClawError::ConfigValidation {
+        return ConfigValidationSnafu {
             msg: format!(
                 "cron job '{}' session key agent '{}' does not match '{}'",
                 job.id,
                 session_agent_id,
                 job.agent_id
             ),
-        });
+        }.fail();
     }
     Ok(())
 }
@@ -1677,7 +1680,7 @@ mod tests {
     use frankclaw_channels::{ChannelSet, whatsapp::WhatsAppChannel};
     use frankclaw_core::channel::{ChannelPlugin, SendResult};
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
-    use frankclaw_core::error::FrankClawError;
+    use frankclaw_core::error::{FrankClawError, ModelProviderSnafu};
     use frankclaw_core::model::{
         CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi,
         ModelCompat, ModelCost, ModelDef, ModelProvider,
@@ -3120,9 +3123,9 @@ mod tests {
             _request: CompletionRequest,
             _stream_tx: Option<tokio::sync::mpsc::Sender<frankclaw_core::model::StreamDelta>>,
         ) -> frankclaw_core::error::Result<CompletionResponse> {
-            Err(FrankClawError::ModelProvider {
-                msg: "simulated provider failure".into(),
-            })
+            ModelProviderSnafu {
+                msg: "simulated provider failure",
+            }.fail()
         }
 
         async fn list_models(&self) -> frankclaw_core::error::Result<Vec<ModelDef>> {

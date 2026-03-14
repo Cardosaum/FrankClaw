@@ -21,6 +21,7 @@ bytesize = { workspace = true }
 tracing = { workspace = true }
 strum = { workspace = true }
 derive_more = { workspace = true }
+snafu = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

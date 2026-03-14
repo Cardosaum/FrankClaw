@@ -1,5 +1,5 @@
 use frankclaw_core::channel::OutboundAttachment;
-use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::error::{Result, ChannelSnafu};
 use frankclaw_core::media::safe_extension_for_mime;
 use frankclaw_core::types::ChannelId;
 
@@ -30,14 +30,14 @@ pub fn require_single_attachment<'att>(
 ) -> Result<&'att OutboundAttachment> {
     match attachments {
         [attachment] => Ok(attachment),
-        [] => Err(FrankClawError::Channel {
+        [] => ChannelSnafu {
             channel: channel.clone(),
-            msg: "attachment send requested without any attachments".into(),
-        }),
-        _ => Err(FrankClawError::Channel {
+            msg: "attachment send requested without any attachments",
+        }.fail(),
+        _ => ChannelSnafu {
             channel: channel.clone(),
-            msg: "multiple attachments are not supported yet on this channel".into(),
-        }),
+            msg: "multiple attachments are not supported yet on this channel",
+        }.fail(),
     }
 }
 
@@ -54,13 +54,13 @@ pub fn attachment_bytes(
     attachment: &OutboundAttachment,
 ) -> Result<Vec<u8>> {
     if attachment.bytes.is_empty() {
-        return Err(FrankClawError::Channel {
+        return ChannelSnafu {
             channel: channel.clone(),
             msg: format!(
                 "attachment {} is missing inline bytes",
                 attachment.media_id
             ),
-        });
+        }.fail();
     }
 
     Ok(attachment.bytes.clone())

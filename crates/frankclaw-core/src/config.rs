@@ -4,7 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::auth::{AuthMode, RateLimitConfig};
-use crate::error::{FrankClawError, Result};
+use crate::error::{ConfigIoSnafu, ConfigValidationSnafu, Result};
 use crate::session::{PruningConfig, SessionResetPolicy, SessionScoping};
 use crate::types::{AgentId, ChannelId, SessionKey};
 
@@ -28,11 +28,17 @@ pub struct FrankClawConfig {
 
 impl FrankClawConfig {
     pub fn load_from_path(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|err| FrankClawError::ConfigIo {
-            msg: format!("failed to read config '{}': {err}", path.display()),
+        let content = std::fs::read_to_string(path).map_err(|err| {
+            ConfigIoSnafu {
+                msg: format!("failed to read config '{}': {err}", path.display()),
+            }
+            .build()
         })?;
-        serde_json::from_str(&content).map_err(|err| FrankClawError::ConfigIo {
-            msg: format!("failed to parse config '{}': {err}", path.display()),
+        serde_json::from_str(&content).map_err(|err| {
+            ConfigIoSnafu {
+                msg: format!("failed to parse config '{}': {err}", path.display()),
+            }
+            .build()
         })
     }
 
@@ -47,34 +53,38 @@ impl FrankClawConfig {
         self.gateway.auth.validate()?;
 
         if !self.agents.agents.contains_key(&self.agents.default_agent) {
-            return Err(FrankClawError::ConfigValidation {
+            return ConfigValidationSnafu {
                 msg: format!(
                     "default agent '{}' is not present in agents map",
                     self.agents.default_agent
                 ),
-            });
+            }
+            .fail();
         }
 
         let mut provider_ids = std::collections::HashSet::new();
         for provider in &self.models.providers {
             if provider.id.trim().is_empty() {
-                return Err(FrankClawError::ConfigValidation {
-                    msg: "model provider id cannot be empty".into(),
-                });
+                return ConfigValidationSnafu {
+                    msg: "model provider id cannot be empty",
+                }
+                .fail();
             }
             if !provider_ids.insert(provider.id.clone()) {
-                return Err(FrankClawError::ConfigValidation {
+                return ConfigValidationSnafu {
                     msg: format!("duplicate model provider id '{}'", provider.id),
-                });
+                }
+                .fail();
             }
             match provider.api.as_str() {
                 "openai" | "anthropic" | "ollama" => {}
                 other => {
-                    return Err(FrankClawError::ConfigValidation {
+                    return ConfigValidationSnafu {
                         msg: format!(
                             "unsupported model provider api '{other}'; expected openai, anthropic, or ollama"
                         ),
-                    });
+                    }
+                    .fail();
                 }
             }
             if matches!(provider.api.as_str(), "openai" | "anthropic")
@@ -83,41 +93,46 @@ impl FrankClawConfig {
                     .as_deref()
                     .is_none_or(|value| value.trim().is_empty())
             {
-                return Err(FrankClawError::ConfigValidation {
+                return ConfigValidationSnafu {
                     msg: format!(
                         "provider '{}' requires a non-empty api_key_ref",
                         provider.id
                     ),
-                });
+                }
+                .fail();
             }
         }
 
         if let Some(default_model) = &self.models.default_model
             && default_model.trim().is_empty() {
-                return Err(FrankClawError::ConfigValidation {
-                    msg: "models.default_model cannot be empty".into(),
-                });
+                return ConfigValidationSnafu {
+                    msg: "models.default_model cannot be empty",
+                }
+                .fail();
             }
 
         if self.gateway.max_connections == 0 {
-            return Err(FrankClawError::ConfigValidation {
-                msg: "gateway.max_connections must be greater than 0".into(),
-            });
+            return ConfigValidationSnafu {
+                msg: "gateway.max_connections must be greater than 0",
+            }
+            .fail();
         }
 
         if self.gateway.max_ws_message_bytes == 0 {
-            return Err(FrankClawError::ConfigValidation {
-                msg: "gateway.max_ws_message_bytes must be greater than 0".into(),
-            });
+            return ConfigValidationSnafu {
+                msg: "gateway.max_ws_message_bytes must be greater than 0",
+            }
+            .fail();
         }
 
         if let BindMode::Address(address) = &self.gateway.bind
             && address.parse::<std::net::IpAddr>().is_err() {
-                return Err(FrankClawError::ConfigValidation {
+                return ConfigValidationSnafu {
                     msg: format!(
                         "gateway.bind address '{address}' is not a valid IP address"
                     ),
-                });
+                }
+                .fail();
             }
 
         for (channel_id, channel) in &self.channels {
@@ -315,43 +330,52 @@ impl ChannelConfig {
 
         if let Some(raw) = self.extra.get("dm_policy").and_then(|value| value.as_str()) {
             policy.dm_policy = raw.parse::<ChannelDmPolicy>().map_err(|_| {
-                FrankClawError::ConfigValidation {
+                ConfigValidationSnafu {
                     msg: format!(
                         "invalid dm_policy '{raw}'; expected {}",
                         <ChannelDmPolicy as strum::VariantNames>::VARIANTS.join(", ")
                     ),
                 }
+                .build()
             })?;
         }
 
         if let Some(raw) = self.extra.get("allow_from") {
-            let entries = raw.as_array().ok_or_else(|| FrankClawError::ConfigValidation {
-                msg: "allow_from must be an array of sender ids".into(),
+            let entries = raw.as_array().ok_or_else(|| {
+                ConfigValidationSnafu {
+                    msg: "allow_from must be an array of sender ids",
+                }
+                .build()
             })?;
             policy.allow_from = entries
                 .iter()
                 .map(|entry| {
                     entry.as_str().map(str::to_string).ok_or_else(|| {
-                        FrankClawError::ConfigValidation {
-                            msg: "allow_from entries must be strings".into(),
+                        ConfigValidationSnafu {
+                            msg: "allow_from entries must be strings",
                         }
+                        .build()
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
         }
 
         if let Some(raw) = self.extra.get("groups") {
-            let entries = raw.as_array().ok_or_else(|| FrankClawError::ConfigValidation {
-                msg: "groups must be an array of group or thread ids".into(),
+            let entries = raw.as_array().ok_or_else(|| {
+                ConfigValidationSnafu {
+                    msg: "groups must be an array of group or thread ids",
+                }
+                .build()
             })?;
             policy.allowed_groups = Some(
                 entries
                     .iter()
                     .map(|entry| {
                         entry.as_str().map(str::to_string).ok_or_else(|| {
-                            FrankClawError::ConfigValidation {
-                                msg: "groups entries must be strings".into(),
+                            ConfigValidationSnafu {
+                                msg: "groups entries must be strings",
                             }
+                            .build()
                         })
                     })
                     .collect::<Result<Vec<_>>>()?,
@@ -368,13 +392,17 @@ impl ChannelConfig {
 
         if let Some(raw) = self.extra.get("max_message_bytes") {
             #[expect(clippy::cast_possible_truncation, reason = "config values are small positive integers; truncation is not a concern")]
-            let value = raw.as_u64().ok_or_else(|| FrankClawError::ConfigValidation {
-                msg: "max_message_bytes must be a positive integer".into(),
+            let value = raw.as_u64().ok_or_else(|| {
+                ConfigValidationSnafu {
+                    msg: "max_message_bytes must be a positive integer",
+                }
+                .build()
             })? as usize;
             if value == 0 {
-                return Err(FrankClawError::ConfigValidation {
-                    msg: "max_message_bytes must be greater than 0".into(),
-                });
+                return ConfigValidationSnafu {
+                    msg: "max_message_bytes must be greater than 0",
+                }
+                .fail();
             }
             policy.max_message_bytes = Some(value);
         }
@@ -450,11 +478,12 @@ fn validate_channel_config(channel_id: &ChannelId, channel: &ChannelConfig) -> R
                 "bot token",
             )
         }
-        other => Err(FrankClawError::ConfigValidation {
+        other => ConfigValidationSnafu {
             msg: format!(
                 "unsupported enabled channel '{other}'; currently supported: web, telegram, discord, signal, slack, whatsapp"
             ),
-        }),
+        }
+        .fail(),
     }
 }
 
@@ -465,8 +494,11 @@ fn validate_channel_account_value_source(
     env_keys: &[&str],
     label: &str,
 ) -> Result<()> {
-    let account = channel.accounts.first().ok_or_else(|| FrankClawError::ConfigValidation {
-        msg: format!("{channel_name} channel requires at least one account"),
+    let account = channel.accounts.first().ok_or_else(|| {
+        ConfigValidationSnafu {
+            msg: format!("{channel_name} channel requires at least one account"),
+        }
+        .build()
     })?;
 
     let has_inline_secret = inline_keys.iter().any(|key| {
@@ -489,11 +521,12 @@ fn validate_channel_account_value_source(
         return Ok(());
     }
 
-    Err(FrankClawError::ConfigValidation {
+    ConfigValidationSnafu {
         msg: format!(
             "{channel_name} channel requires a non-empty {label} or {label} env reference"
         ),
-    })
+    }
+    .fail()
 }
 
 /// Model provider configuration.
@@ -559,48 +592,55 @@ impl HooksConfig {
             .as_deref()
             .is_none_or(|value| value.trim().is_empty())
         {
-            return Err(FrankClawError::ConfigValidation {
-                msg: "hooks.enabled requires a non-empty hooks.token".into(),
-            });
+            return ConfigValidationSnafu {
+                msg: "hooks.enabled requires a non-empty hooks.token",
+            }
+            .fail();
         }
         if self.mappings.is_empty() {
-            return Err(FrankClawError::ConfigValidation {
-                msg: "hooks.enabled requires at least one mapping".into(),
-            });
+            return ConfigValidationSnafu {
+                msg: "hooks.enabled requires at least one mapping",
+            }
+            .fail();
         }
 
         let mut seen = std::collections::HashSet::new();
         let mut mappings = Vec::with_capacity(self.mappings.len());
         for raw in &self.mappings {
             let mapping: WebhookMapping = serde_json::from_value(raw.clone()).map_err(|err| {
-                FrankClawError::ConfigValidation {
+                ConfigValidationSnafu {
                     msg: format!("invalid webhook mapping: {err}"),
                 }
+                .build()
             })?;
             if mapping.id.trim().is_empty() {
-                return Err(FrankClawError::ConfigValidation {
-                    msg: "webhook mapping id cannot be empty".into(),
-                });
+                return ConfigValidationSnafu {
+                    msg: "webhook mapping id cannot be empty",
+                }
+                .fail();
             }
             if !seen.insert(mapping.id.clone()) {
-                return Err(FrankClawError::ConfigValidation {
+                return ConfigValidationSnafu {
                     msg: format!("duplicate webhook mapping '{}'", mapping.id),
-                });
+                }
+                .fail();
             }
             if mapping.text_field.trim().is_empty() {
-                return Err(FrankClawError::ConfigValidation {
+                return ConfigValidationSnafu {
                     msg: format!("webhook mapping '{}' text_field cannot be empty", mapping.id),
-                });
+                }
+                .fail();
             }
             if let (Some(agent_id), Some(session_key)) = (&mapping.agent_id, &mapping.session_key)
                 && let Some((session_agent, _, _)) = session_key.parse()
                     && &session_agent != agent_id {
-                        return Err(FrankClawError::ConfigValidation {
+                        return ConfigValidationSnafu {
                             msg: format!(
                                 "webhook mapping '{}' session '{}' does not belong to agent '{}'",
                                 mapping.id, session_key, agent_id
                             ),
-                        });
+                        }
+                        .fail();
                     }
             mappings.push(mapping);
         }
