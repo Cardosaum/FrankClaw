@@ -148,7 +148,7 @@ rstest = "0.25"
 # =============================================================================
 # WORKSPACE LINTS
 # =============================================================================
-# Ported from Cardosaum/fala. All commented out for now — enable incrementally.
+# All commented out for now — enable incrementally.
 
 [workspace.lints]
 
