@@ -239,30 +239,52 @@ fn to_cents(usd: f64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::{fixture, rstest};
 
-    #[tokio::test]
-    async fn unlimited_allows_everything() {
-        let guard = CostGuard::new(CostGuardConfig::default());
-        assert!(guard.check_allowed().await.is_ok());
-
-        guard.record_llm_call("gpt-4o", 100_000, 100_000).await;
-        assert!(guard.check_allowed().await.is_ok());
+    #[fixture]
+    fn unlimited_guard() -> CostGuard {
+        CostGuard::new(CostGuardConfig::default())
     }
 
-    #[tokio::test]
-    async fn daily_budget_enforcement() {
-        let guard = CostGuard::new(CostGuardConfig {
-            max_cost_per_day_cents: Some(1), // $0.01 limit
+    #[fixture]
+    fn daily_budget_guard() -> CostGuard {
+        CostGuard::new(CostGuardConfig {
+            max_cost_per_day_cents: Some(1),
             max_actions_per_hour: None,
-        });
+        })
+    }
 
-        assert!(guard.check_allowed().await.is_ok());
+    #[fixture]
+    fn hourly_rate_guard() -> CostGuard {
+        CostGuard::new(CostGuardConfig {
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: Some(3),
+        })
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn unlimited_allows_everything(unlimited_guard: CostGuard) {
+        assert!(unlimited_guard.check_allowed().await.is_ok());
+
+        unlimited_guard
+            .record_llm_call("gpt-4o", 100_000, 100_000)
+            .await;
+        assert!(unlimited_guard.check_allowed().await.is_ok());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn daily_budget_enforcement(daily_budget_guard: CostGuard) {
+        assert!(daily_budget_guard.check_allowed().await.is_ok());
 
         // gpt-4o: input=$0.0000025/tok, output=$0.00001/tok
         // 10000 input + 10000 output ≈ $0.125 >> $0.01
-        guard.record_llm_call("gpt-4o", 10_000, 10_000).await;
+        daily_budget_guard
+            .record_llm_call("gpt-4o", 10_000, 10_000)
+            .await;
 
-        let result = guard.check_allowed().await;
+        let result = daily_budget_guard.check_allowed().await;
         assert!(result.is_err());
         match result.unwrap_err() {
             CostLimitExceeded::DailyBudget { limit_cents, .. } => {
@@ -272,19 +294,15 @@ mod tests {
         }
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn hourly_rate_enforcement() {
-        let guard = CostGuard::new(CostGuardConfig {
-            max_cost_per_day_cents: None,
-            max_actions_per_hour: Some(3),
-        });
-
+    async fn hourly_rate_enforcement(hourly_rate_guard: CostGuard) {
         for _ in 0..3 {
-            assert!(guard.check_allowed().await.is_ok());
-            guard.record_llm_call("gpt-4o", 10, 10).await;
+            assert!(hourly_rate_guard.check_allowed().await.is_ok());
+            hourly_rate_guard.record_llm_call("gpt-4o", 10, 10).await;
         }
 
-        let result = guard.check_allowed().await;
+        let result = hourly_rate_guard.check_allowed().await;
         assert!(result.is_err());
         match result.unwrap_err() {
             CostLimitExceeded::HourlyRate { actions, limit } => {
@@ -295,38 +313,42 @@ mod tests {
         }
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn daily_spend_tracking() {
-        let guard = CostGuard::new(CostGuardConfig::default());
-        assert_eq!(guard.daily_spend().await, 0.0);
+    async fn daily_spend_tracking(unlimited_guard: CostGuard) {
+        assert_eq!(unlimited_guard.daily_spend().await, 0.0);
 
-        let cost = guard.record_llm_call("gpt-4o", 1000, 500).await;
+        let cost = unlimited_guard
+            .record_llm_call("gpt-4o", 1000, 500)
+            .await;
         assert!(cost > 0.0);
-        assert_eq!(guard.daily_spend().await, cost);
+        assert_eq!(unlimited_guard.daily_spend().await, cost);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn actions_this_hour_tracking() {
-        let guard = CostGuard::new(CostGuardConfig::default());
-        assert_eq!(guard.actions_this_hour().await, 0);
+    async fn actions_this_hour_tracking(unlimited_guard: CostGuard) {
+        assert_eq!(unlimited_guard.actions_this_hour().await, 0);
 
-        guard.record_llm_call("gpt-4o", 10, 10).await;
-        guard.record_llm_call("gpt-4o", 10, 10).await;
-        assert_eq!(guard.actions_this_hour().await, 2);
+        unlimited_guard.record_llm_call("gpt-4o", 10, 10).await;
+        unlimited_guard.record_llm_call("gpt-4o", 10, 10).await;
+        assert_eq!(unlimited_guard.actions_this_hour().await, 2);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn per_model_usage_tracking() {
-        let guard = CostGuard::new(CostGuardConfig::default());
-        assert!(guard.model_usage().await.is_empty());
+    async fn per_model_usage_tracking(unlimited_guard: CostGuard) {
+        assert!(unlimited_guard.model_usage().await.is_empty());
 
-        guard.record_llm_call("gpt-4o", 1000, 500).await;
-        guard.record_llm_call("gpt-4o", 2000, 1000).await;
-        guard
+        unlimited_guard.record_llm_call("gpt-4o", 1000, 500).await;
+        unlimited_guard
+            .record_llm_call("gpt-4o", 2000, 1000)
+            .await;
+        unlimited_guard
             .record_llm_call("claude-3-5-sonnet-20241022", 500, 200)
             .await;
 
-        let usage = guard.model_usage().await;
+        let usage = unlimited_guard.model_usage().await;
         assert_eq!(usage.len(), 2);
 
         let gpt = usage.get("gpt-4o").expect("gpt-4o should be tracked");
@@ -366,6 +388,7 @@ mod tests {
         assert!(rate.to_string().contains("100 allowed"));
     }
 
+    #[rstest]
     #[tokio::test]
     async fn checked_sub_no_panic_on_fresh_guard() {
         let guard = CostGuard::new(CostGuardConfig {

@@ -553,21 +553,23 @@ pub fn response_is_uncertain(content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     // -----------------------------------------------------------------------
     // Tier boundaries
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn tier_from_score_boundaries() {
-        assert_eq!(Tier::from_score(0), Tier::Flash);
-        assert_eq!(Tier::from_score(15), Tier::Flash);
-        assert_eq!(Tier::from_score(16), Tier::Standard);
-        assert_eq!(Tier::from_score(40), Tier::Standard);
-        assert_eq!(Tier::from_score(41), Tier::Pro);
-        assert_eq!(Tier::from_score(65), Tier::Pro);
-        assert_eq!(Tier::from_score(66), Tier::Frontier);
-        assert_eq!(Tier::from_score(100), Tier::Frontier);
+    #[rstest]
+    #[case(0, Tier::Flash)]
+    #[case(15, Tier::Flash)]
+    #[case(16, Tier::Standard)]
+    #[case(40, Tier::Standard)]
+    #[case(41, Tier::Pro)]
+    #[case(65, Tier::Pro)]
+    #[case(66, Tier::Frontier)]
+    #[case(100, Tier::Frontier)]
+    fn tier_from_score_boundaries(#[case] score: u32, #[case] expected: Tier) {
+        assert_eq!(Tier::from_score(score), expected);
     }
 
     #[test]
@@ -578,12 +580,13 @@ mod tests {
         assert_eq!(s, "standard");
     }
 
-    #[test]
-    fn tier_to_task_complexity_mapping() {
-        assert_eq!(TaskComplexity::from(Tier::Flash), TaskComplexity::Simple);
-        assert_eq!(TaskComplexity::from(Tier::Standard), TaskComplexity::Simple);
-        assert_eq!(TaskComplexity::from(Tier::Pro), TaskComplexity::Moderate);
-        assert_eq!(TaskComplexity::from(Tier::Frontier), TaskComplexity::Complex);
+    #[rstest]
+    #[case(Tier::Flash, TaskComplexity::Simple)]
+    #[case(Tier::Standard, TaskComplexity::Simple)]
+    #[case(Tier::Pro, TaskComplexity::Moderate)]
+    #[case(Tier::Frontier, TaskComplexity::Complex)]
+    fn tier_to_task_complexity(#[case] tier: Tier, #[case] expected: TaskComplexity) {
+        assert_eq!(TaskComplexity::from(tier), expected);
     }
 
     // -----------------------------------------------------------------------
@@ -645,18 +648,24 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Individual dimensions
+    // Individual dimensions (parameterized)
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn score_reasoning_dimension() {
-        let result = score_complexity("Why is this better? Explain the trade-offs and compare");
-        let reasoning = result.components.get("reasoning_words").copied().unwrap_or(0);
-        assert!(reasoning >= 100, "Expected reasoning >= 100, got {reasoning}");
+    #[rstest]
+    #[case("Why is this better? Explain the trade-offs and compare", "reasoning_words", 100)]
+    #[case("First, read the file. Then analyze. After that, write a report.", "multi_step", 100)]
+    #[case("Fix the bug in the async function, refactor the module", "code_indicators", 50)]
+    #[case("Store the password and encrypt the auth token", "safety_sensitivity", 100)]
+    #[case("Deploy the kubernetes cluster on aws with terraform", "domain_specific", 100)]
+    #[case("Write a blog post about design patterns, then summarize", "creativity", 100)]
+    fn score_dimension(#[case] prompt: &str, #[case] dimension: &str, #[case] min_score: u32) {
+        let result = score_complexity(prompt);
+        let score = result.components.get(dimension).copied().unwrap_or(0);
+        assert!(score >= min_score, "Expected {dimension} >= {min_score}, got {score}");
     }
 
     #[test]
-    fn score_multi_step_dimension() {
+    fn score_multi_step_dimension_hint() {
         let result = score_complexity(
             "First, read the file at src/auth.ts. Then analyze it for security issues. \
              After that, write a detailed report.",
@@ -664,34 +673,6 @@ mod tests {
         let multi_step = result.components.get("multi_step").copied().unwrap_or(0);
         assert!(multi_step >= 100, "Expected multi_step >= 100, got {multi_step}");
         assert!(result.hints.iter().any(|h| h.contains("multi_step")));
-    }
-
-    #[test]
-    fn score_code_dimension() {
-        let result = score_complexity("Fix the bug in the async function, refactor the module");
-        let code = result.components.get("code_indicators").copied().unwrap_or(0);
-        assert!(code >= 50, "Expected code_indicators >= 50, got {code}");
-    }
-
-    #[test]
-    fn score_safety_dimension() {
-        let result = score_complexity("Store the password and encrypt the auth token");
-        let safety = result.components.get("safety_sensitivity").copied().unwrap_or(0);
-        assert!(safety >= 100, "Expected safety >= 100, got {safety}");
-    }
-
-    #[test]
-    fn score_domain_dimension() {
-        let result = score_complexity("Deploy the kubernetes cluster on aws with terraform");
-        let domain = result.components.get("domain_specific").copied().unwrap_or(0);
-        assert!(domain >= 100, "Expected domain_specific >= 100, got {domain}");
-    }
-
-    #[test]
-    fn score_creativity_dimension() {
-        let result = score_complexity("Write a blog post about design patterns, then summarize");
-        let creativity = result.components.get("creativity").copied().unwrap_or(0);
-        assert!(creativity >= 100, "Expected creativity >= 100, got {creativity}");
     }
 
     #[test]
@@ -746,26 +727,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Explicit tier hints
+    // Explicit tier hints (parameterized)
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn score_explicit_tier_hint_flash() {
-        let result = score_complexity("[tier:flash] This looks complex but override to flash");
-        assert_eq!(result.tier, Tier::Flash);
+    #[rstest]
+    #[case("[tier:flash] This looks complex but override to flash", Tier::Flash)]
+    #[case("[tier:frontier] Simple question but I want the best", Tier::Frontier)]
+    #[case("[tier:PRO] some message", Tier::Pro)]
+    fn score_explicit_tier_hint(#[case] prompt: &str, #[case] expected: Tier) {
+        let result = score_complexity(prompt);
+        assert_eq!(result.tier, expected);
         assert!(result.hints.iter().any(|h| h.contains("Explicit tier hint")));
-    }
-
-    #[test]
-    fn score_explicit_tier_hint_frontier() {
-        let result = score_complexity("[tier:frontier] Simple question but I want the best");
-        assert_eq!(result.tier, Tier::Frontier);
-    }
-
-    #[test]
-    fn score_explicit_tier_hint_case_insensitive() {
-        let result = score_complexity("[tier:PRO] some message");
-        assert_eq!(result.tier, Tier::Pro);
     }
 
     // -----------------------------------------------------------------------
@@ -847,35 +819,18 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Pattern overrides via classify_message
+    // Pattern overrides via classify_message (parameterized)
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn pattern_override_greeting_is_simple() {
-        assert_eq!(classify_message("Hi"), TaskComplexity::Simple);
-        assert_eq!(classify_message("hello"), TaskComplexity::Simple);
-        assert_eq!(classify_message("thanks"), TaskComplexity::Simple);
-    }
-
-    #[test]
-    fn pattern_override_security_audit_is_complex() {
-        assert_eq!(
-            classify_message("Please do a security audit of this contract"),
-            TaskComplexity::Complex
-        );
-    }
-
-    #[test]
-    fn pattern_override_production_deploy_is_moderate() {
-        assert_eq!(
-            classify_message("Deploy this to production"),
-            TaskComplexity::Moderate
-        );
-    }
-
-    #[test]
-    fn pattern_override_time_question_is_simple() {
-        assert_eq!(classify_message("What time is it?"), TaskComplexity::Simple);
+    #[rstest]
+    #[case("Hi", TaskComplexity::Simple)]
+    #[case("hello", TaskComplexity::Simple)]
+    #[case("thanks", TaskComplexity::Simple)]
+    #[case("Please do a security audit of this contract", TaskComplexity::Complex)]
+    #[case("Deploy this to production", TaskComplexity::Moderate)]
+    #[case("What time is it?", TaskComplexity::Simple)]
+    fn pattern_override_classification(#[case] msg: &str, #[case] expected: TaskComplexity) {
+        assert_eq!(classify_message(msg), expected);
     }
 
     #[test]
@@ -923,27 +878,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Uncertainty detection
+    // Uncertainty detection (parameterized)
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn detects_uncertain_response() {
-        assert!(response_is_uncertain("I'm not sure."));
-        assert!(response_is_uncertain("I don't know how to do that."));
-        assert!(response_is_uncertain("I cannot help with that."));
-        assert!(response_is_uncertain("Could you clarify what you mean?"));
-    }
-
-    #[test]
-    fn detects_empty_response_as_uncertain() {
-        assert!(response_is_uncertain(""));
-        assert!(response_is_uncertain("   "));
-    }
-
-    #[test]
-    fn confident_response_is_not_uncertain() {
-        assert!(!response_is_uncertain("Yes."));
-        assert!(!response_is_uncertain("The answer is 42. This is a well-known constant."));
-        assert!(!response_is_uncertain("Deployed successfully to production mainnet."));
+    #[rstest]
+    #[case("I'm not sure.", true)]
+    #[case("I don't know how to do that.", true)]
+    #[case("I cannot help with that.", true)]
+    #[case("Could you clarify what you mean?", true)]
+    #[case("", true)]
+    #[case("   ", true)]
+    #[case("Yes.", false)]
+    #[case("The answer is 42.", false)]
+    #[case("Deployed successfully.", false)]
+    fn uncertainty_detection(#[case] response: &str, #[case] expected: bool) {
+        assert_eq!(response_is_uncertain(response), expected);
     }
 }

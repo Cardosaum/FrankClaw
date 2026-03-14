@@ -28,58 +28,8 @@ use frankclaw_models::{
 };
 use secrecy::SecretString;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn openai_key() -> Option<SecretString> {
-    std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-        .map(SecretString::from)
-}
-
-fn openai_base_url() -> String {
-    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    if key.starts_with("sk-or-") {
-        "https://openrouter.ai/api/v1".into()
-    } else {
-        std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into())
-    }
-}
-
-fn openai_model() -> String {
-    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    if key.starts_with("sk-or-") {
-        "openai/gpt-4o-mini".into()
-    } else {
-        "gpt-4o-mini".into()
-    }
-}
-
-fn anthropic_key() -> Option<SecretString> {
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-        .map(SecretString::from)
-}
-
-fn simple_request(model: &str, prompt: &str) -> CompletionRequest {
-    CompletionRequest {
-        model_id: model.into(),
-        messages: vec![CompletionMessage::text(Role::User, prompt)],
-        max_tokens: Some(50),
-        temperature: Some(0.0),
-        system: None,
-        tools: Vec::new(),
-        thinking_budget: None,
-        parallel_tool_calls: None,
-        seed: None,
-        response_format: None,
-        reasoning_effort: None,
-    }
-}
+mod common;
+use common::*;
 
 // ---------------------------------------------------------------------------
 // Circuit Breaker Integration

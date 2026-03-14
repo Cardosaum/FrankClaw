@@ -131,6 +131,17 @@ impl Default for MediaId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::{rstest, fixture};
+
+    #[fixture]
+    fn default_agent() -> AgentId {
+        AgentId::new("default")
+    }
+
+    #[fixture]
+    fn web_channel() -> ChannelId {
+        ChannelId::new("web")
+    }
 
     #[test]
     fn agent_id_clamps_long_input() {
@@ -139,10 +150,9 @@ mod tests {
         assert_eq!(id.as_str().len(), MAX_ID_LEN);
     }
 
-    #[test]
-    fn agent_id_preserves_normal_input() {
-        let id = AgentId::new("default");
-        assert_eq!(id.as_str(), "default");
+    #[rstest]
+    fn agent_id_preserves_normal_input(default_agent: AgentId) {
+        assert_eq!(default_agent.as_str(), "default");
     }
 
     #[test]
@@ -159,17 +169,18 @@ mod tests {
         assert_eq!(key.as_str().len(), 800);
     }
 
-    #[test]
-    fn session_key_from_raw_preserves_normal_input() {
+    #[rstest]
+    fn session_key_from_raw_preserves_normal_input(web_channel: ChannelId) {
         let key = SessionKey::from_raw("agent:web:user123");
         assert_eq!(key.as_str(), "agent:web:user123");
+        // Verify the web_channel fixture matches what we expect in session keys.
+        assert_eq!(web_channel.as_str(), "web");
     }
 
-    #[test]
-    fn session_key_parse_round_trips() {
+    #[rstest]
+    fn session_key_parse_round_trips(web_channel: ChannelId) {
         let agent = AgentId::new("a1");
-        let channel = ChannelId::new("web");
-        let key = SessionKey::new(&agent, &channel, "user42");
+        let key = SessionKey::new(&agent, &web_channel, "user42");
         let (a, c, acct) = key.parse().unwrap();
         assert_eq!(a.as_str(), "a1");
         assert_eq!(c.as_str(), "web");

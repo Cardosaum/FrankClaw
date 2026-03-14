@@ -748,6 +748,7 @@ impl Default for SecurityConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn duplicate_provider_ids_fail_validation() {
@@ -860,50 +861,23 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
-    #[test]
-    fn telegram_channel_requires_secret_source() {
+    #[rstest]
+    #[case("telegram", serde_json::json!({}))]
+    #[case("discord", serde_json::json!({}))]
+    #[case("signal", serde_json::json!({"account": "+15551234567"}))]
+    fn enabled_channel_without_credentials_fails_validation(
+        #[case] channel_name: &str,
+        #[case] account: serde_json::Value,
+    ) {
         let mut config = FrankClawConfig::default();
         config.channels.insert(
-            ChannelId::new("telegram"),
+            ChannelId::new(channel_name),
             ChannelConfig {
                 enabled: true,
-                accounts: vec![serde_json::json!({})],
+                accounts: vec![account],
                 extra: serde_json::json!({}),
             },
         );
-
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn discord_channel_requires_secret_source() {
-        let mut config = FrankClawConfig::default();
-        config.channels.insert(
-            ChannelId::new("discord"),
-            ChannelConfig {
-                enabled: true,
-                accounts: vec![serde_json::json!({})],
-                extra: serde_json::json!({}),
-            },
-        );
-
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn signal_channel_requires_base_url_source() {
-        let mut config = FrankClawConfig::default();
-        config.channels.insert(
-            ChannelId::new("signal"),
-            ChannelConfig {
-                enabled: true,
-                accounts: vec![serde_json::json!({
-                    "account": "+15551234567"
-                })],
-                extra: serde_json::json!({}),
-            },
-        );
-
         assert!(config.validate().is_err());
     }
 

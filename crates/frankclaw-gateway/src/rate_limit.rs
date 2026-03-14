@@ -89,18 +89,19 @@ impl AuthRateLimiter {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+    use rstest::{rstest, fixture};
 
-    fn test_config() -> RateLimitConfig {
-        RateLimitConfig {
+    #[fixture]
+    fn limiter() -> AuthRateLimiter {
+        AuthRateLimiter::new(RateLimitConfig {
             max_attempts: 3,
             window_secs: 60,
             lockout_secs: 300,
-        }
+        })
     }
 
-    #[test]
-    fn allows_under_limit() {
-        let limiter = AuthRateLimiter::new(test_config());
+    #[rstest]
+    fn allows_under_limit(limiter: AuthRateLimiter) {
         let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
 
         limiter.record_failure(&ip);
@@ -108,9 +109,8 @@ mod tests {
         assert!(limiter.is_locked(&ip).is_none());
     }
 
-    #[test]
-    fn locks_at_limit() {
-        let limiter = AuthRateLimiter::new(test_config());
+    #[rstest]
+    fn locks_at_limit(limiter: AuthRateLimiter) {
         let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
 
         for _ in 0..3 {
@@ -119,9 +119,8 @@ mod tests {
         assert!(limiter.is_locked(&ip).is_some());
     }
 
-    #[test]
-    fn success_clears() {
-        let limiter = AuthRateLimiter::new(test_config());
+    #[rstest]
+    fn success_clears(limiter: AuthRateLimiter) {
         let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
 
         for _ in 0..3 {

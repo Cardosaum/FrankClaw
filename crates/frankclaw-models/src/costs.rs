@@ -95,19 +95,15 @@ fn is_local_model(model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn known_model_has_nonzero_cost() {
-        let (input, output) = model_cost("gpt-4o").unwrap();
-        assert!(input > 0.0);
-        assert!(output > input);
-    }
-
-    #[test]
-    fn claude_costs_are_known() {
-        let (input, output) = model_cost("claude-3-5-sonnet-20241022").unwrap();
-        assert!(input > 0.0);
-        assert!(output > input);
+    #[rstest]
+    #[case("gpt-4o")]
+    #[case("claude-3-5-sonnet-20241022")]
+    fn known_model_has_cost(#[case] model: &str) {
+        let (input, output) = model_cost(model).expect("expected cost for known model");
+        assert!(input > 0.0, "expected positive input cost for {model}");
+        assert!(output > input, "expected output cost > input cost for {model}");
     }
 
     #[test]
