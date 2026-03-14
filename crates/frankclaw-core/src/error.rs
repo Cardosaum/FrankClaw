@@ -303,3 +303,214 @@ impl FrankClawError {
 }
 
 pub type Result<T> = std::result::Result<T, FrankClawError>;
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+    use crate::types::{AgentId, ChannelId, SessionKey};
+
+    /// Build every error variant. Returns (error, expected_display, expected_status, expected_retryable).
+    fn error_cases() -> Vec<(FrankClawError, &'static str, u16, bool)> {
+        vec![
+            (AuthRequiredSnafu.build(), "authentication required", 401, false),
+            (AuthFailedSnafu.build(), "authentication failed", 401, false),
+            (RateLimitedSnafu { retry_after_secs: 30_u64 }.build(), "rate limited (retry after 30s)", 429, true),
+            (ForbiddenSnafu { method: "chat_send" }.build(), "insufficient permissions for method chat_send", 403, false),
+            (SessionNotFoundSnafu { key: SessionKey::from_raw("a:b:c") }.build(), "session not found: a:b:c", 404, false),
+            (SessionStorageSnafu { msg: "disk full" }.build(), "session storage error: disk full", 500, false),
+            (ChannelSnafu { channel: ChannelId::new("discord"), msg: "timeout" }.build(), "channel discord error: timeout", 500, false),
+            (ChannelNotConfiguredSnafu { channel: ChannelId::new("slack") }.build(), "channel slack not configured", 404, false),
+            (ChannelDisabledSnafu { channel: ChannelId::new("telegram") }.build(), "channel telegram is disabled", 500, false),
+            (SenderBlockedSnafu { channel: ChannelId::new("signal") }.build(), "sender blocked by policy on channel signal", 403, false),
+            (AgentNotFoundSnafu { agent_id: AgentId::new("missing") }.build(), "agent missing not found", 404, false),
+            (AgentRuntimeSnafu { msg: "oom" }.build(), "agent runtime error: oom", 500, false),
+            (TurnCancelledSnafu.build(), "agent turn cancelled", 500, false),
+            (SandboxSnafu { msg: "denied" }.build(), "sandbox error: denied", 500, false),
+            (ModelProviderSnafu { msg: "rate limit" }.build(), "model provider error: rate limit", 500, true),
+            (AllProvidersFailedSnafu.build(), "all model providers failed", 500, true),
+            (ModelNotFoundSnafu { model_id: "gpt-5" }.build(), "model not found: gpt-5", 404, false),
+            (ConfigValidationSnafu { msg: "bad port" }.build(), "config validation error: bad port", 422, false),
+            (ConfigIoSnafu { msg: "not found" }.build(), "config I/O error: not found", 500, false),
+            (InvalidRequestSnafu { msg: "missing field" }.build(), "invalid request: missing field", 400, false),
+            (UnknownMethodSnafu { method: "foo" }.build(), "unknown method: foo", 400, false),
+            (RequestTooLargeSnafu { max_bytes: 4096_usize }.build(), "request too large (max 4096 bytes)", 413, false),
+            (MediaTooLargeSnafu { max_bytes: 1024_u64 }.build(), "media file too large (max 1024 bytes)", 413, false),
+            (MediaFetchBlockedSnafu { reason: "private ip" }.build(), "media fetch blocked: private ip", 403, false),
+            (UnsupportedMediaTypeSnafu { mime: "video/avi" }.build(), "unsupported media type: video/avi", 500, false),
+            (MalwareDetectedSnafu { filename: "bad.exe", detail: "trojan" }.build(), "malware detected in file 'bad.exe': trojan", 403, false),
+            (InternalSnafu { msg: "unexpected" }.build(), "internal error: unexpected", 500, true),
+            (ShuttingDownSnafu.build(), "shutdown in progress", 500, false),
+        ]
+    }
+
+    #[test]
+    fn every_variant_has_a_test_case() {
+        // If a new variant is added but not covered here, this count will drift
+        // and the display/status/retryable tests below will miss it.
+        assert_eq!(
+            error_cases().len(),
+            28,
+            "error_cases() should cover all 28 FrankClawError variants"
+        );
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(2)]
+    #[case(3)]
+    #[case(4)]
+    #[case(5)]
+    #[case(6)]
+    #[case(7)]
+    #[case(8)]
+    #[case(9)]
+    #[case(10)]
+    #[case(11)]
+    #[case(12)]
+    #[case(13)]
+    #[case(14)]
+    #[case(15)]
+    #[case(16)]
+    #[case(17)]
+    #[case(18)]
+    #[case(19)]
+    #[case(20)]
+    #[case(21)]
+    #[case(22)]
+    #[case(23)]
+    #[case(24)]
+    #[case(25)]
+    #[case(26)]
+    #[case(27)]
+    fn display_message(#[case] idx: usize) {
+        let cases = error_cases();
+        let (error, expected, _, _) = &cases[idx];
+        assert_eq!(error.to_string(), *expected, "variant index {idx}");
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(2)]
+    #[case(3)]
+    #[case(4)]
+    #[case(5)]
+    #[case(6)]
+    #[case(7)]
+    #[case(8)]
+    #[case(9)]
+    #[case(10)]
+    #[case(11)]
+    #[case(12)]
+    #[case(13)]
+    #[case(14)]
+    #[case(15)]
+    #[case(16)]
+    #[case(17)]
+    #[case(18)]
+    #[case(19)]
+    #[case(20)]
+    #[case(21)]
+    #[case(22)]
+    #[case(23)]
+    #[case(24)]
+    #[case(25)]
+    #[case(26)]
+    #[case(27)]
+    fn status_code(#[case] idx: usize) {
+        let cases = error_cases();
+        let (error, _, expected_status, _) = &cases[idx];
+        assert_eq!(
+            error.status_code(),
+            *expected_status,
+            "status_code for '{}' (index {idx})",
+            error
+        );
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(2)]
+    #[case(3)]
+    #[case(4)]
+    #[case(5)]
+    #[case(6)]
+    #[case(7)]
+    #[case(8)]
+    #[case(9)]
+    #[case(10)]
+    #[case(11)]
+    #[case(12)]
+    #[case(13)]
+    #[case(14)]
+    #[case(15)]
+    #[case(16)]
+    #[case(17)]
+    #[case(18)]
+    #[case(19)]
+    #[case(20)]
+    #[case(21)]
+    #[case(22)]
+    #[case(23)]
+    #[case(24)]
+    #[case(25)]
+    #[case(26)]
+    #[case(27)]
+    fn retryable(#[case] idx: usize) {
+        let cases = error_cases();
+        let (error, _, _, expected_retry) = &cases[idx];
+        assert_eq!(
+            error.is_retryable(),
+            *expected_retry,
+            "is_retryable for '{}' (index {idx})",
+            error
+        );
+    }
+
+    #[test]
+    fn location_is_captured() {
+        let error = AuthRequiredSnafu.build();
+        let loc = error.location();
+        assert!(
+            loc.file.contains("error.rs"),
+            "location should point to this file, got: {}",
+            loc.file
+        );
+        assert!(loc.line > 0, "line should be non-zero");
+    }
+
+    #[test]
+    fn location_reflects_call_site() {
+        let line_before = line!();
+        let error = InternalSnafu { msg: "test" }.build();
+        let line_after = line!();
+
+        let loc = error.location();
+        assert!(
+            loc.line >= line_before && loc.line <= line_after,
+            "expected location line between {line_before} and {line_after}, got {}",
+            loc.line
+        );
+    }
+
+    #[test]
+    fn crypto_error_converts_via_question_mark() {
+        fn inner() -> Result<()> {
+            let crypto_result: std::result::Result<(), frankclaw_crypto::CryptoError> =
+                Err(frankclaw_crypto::CryptoError::DecryptionFailed);
+            crypto_result?;
+            Ok(())
+        }
+        let err = inner().unwrap_err();
+        assert_eq!(err.status_code(), 500);
+        assert!(
+            err.to_string().contains("cryptographic operation failed"),
+            "got: {}",
+            err
+        );
+    }
+}
