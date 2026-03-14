@@ -676,6 +676,26 @@ pub struct WebhookMapping {
     pub agent_id: Option<AgentId>,
     pub session_key: Option<SessionKey>,
     pub text_field: String,
+    /// Dot-notation JSON path for text extraction (e.g., "data.message.text").
+    /// When set, used instead of `text_field` for extraction.
+    #[serde(default)]
+    pub json_path: Option<String>,
+    /// Prefix template for extracted text. `{text}` is replaced with the extracted value.
+    #[serde(default)]
+    pub template: Option<String>,
+    /// Route replies to a specific channel.
+    #[serde(default)]
+    pub channel_id: Option<ChannelId>,
+    /// Max concurrent webhook executions for this mapping.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Fixed-window rate limit (requests per minute).
+    #[serde(default)]
+    pub rate_limit_per_minute: Option<u32>,
+}
+
+fn default_max_concurrent() -> usize {
+    8
 }
 
 impl Default for WebhookMapping {
@@ -685,6 +705,11 @@ impl Default for WebhookMapping {
             agent_id: None,
             session_key: None,
             text_field: "message".into(),
+            json_path: None,
+            template: None,
+            channel_id: None,
+            max_concurrent: 8,
+            rate_limit_per_minute: None,
         }
     }
 }

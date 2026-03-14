@@ -14,5 +14,6 @@ pub mod server;
 pub mod state;
 pub mod ui;
 pub mod tunnel;
+pub mod webhook_limiter;
 pub mod webhooks;
 pub mod ws;

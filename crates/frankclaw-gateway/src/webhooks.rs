@@ -57,18 +57,51 @@ pub fn verify_signature(config: &FrankClawConfig, body: &[u8], signature_header:
 }
 
 pub fn extract_message(mapping: &WebhookMapping, payload: &serde_json::Value) -> Result<String> {
-    payload
-        .get(&mapping.text_field)
-        .and_then(|value| value.as_str())
-        .map(str::trim)
+    let raw_text = if let Some(ref path) = mapping.json_path {
+        extract_by_path(payload, path)
+    } else {
+        payload
+            .get(&mapping.text_field)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+
+    let text = raw_text
+        .map(|s| s.trim().to_string())
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
         .ok_or_else(|| FrankClawError::InvalidRequest {
             msg: format!(
                 "webhook payload must include a non-empty '{}' field",
-                mapping.text_field
+                mapping.json_path.as_deref().unwrap_or(&mapping.text_field)
             ),
-        })
+        })?;
+
+    // Apply template if configured.
+    if let Some(ref template) = mapping.template {
+        Ok(template.replace("{text}", &text))
+    } else {
+        Ok(text)
+    }
+}
+
+/// Traverse nested JSON using dot-notation path (e.g., "data.message.text").
+fn extract_by_path(value: &serde_json::Value, path: &str) -> Option<String> {
+    let mut current = value;
+    for key in path.split('.') {
+        let key = key.trim();
+        if key.is_empty() {
+            return None;
+        }
+        current = current.get(key)?;
+    }
+    // Try string first, fall back to stringifying other types.
+    if let Some(s) = current.as_str() {
+        Some(s.to_string())
+    } else if current.is_null() {
+        None
+    } else {
+        Some(current.to_string())
+    }
 }
 
 pub fn resolve_request(
@@ -186,9 +219,8 @@ mod tests {
     fn extract_message_reads_mapping_text_field() {
         let mapping = WebhookMapping {
             id: "incoming".into(),
-            agent_id: None,
-            session_key: None,
             text_field: "prompt".into(),
+            ..Default::default()
         };
 
         let message =
@@ -218,6 +250,57 @@ mod tests {
     fn verify_timestamp_allows_missing() {
         // Missing timestamp is allowed for backward compatibility.
         verify_timestamp(None).expect("missing timestamp should be allowed");
+    }
+
+    #[test]
+    fn extract_message_uses_json_path() {
+        let mapping = WebhookMapping {
+            id: "nested".into(),
+            json_path: Some("data.message.text".into()),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "data": { "message": { "text": "nested value" } }
+        });
+        let msg = extract_message(&mapping, &payload).unwrap();
+        assert_eq!(msg, "nested value");
+    }
+
+    #[test]
+    fn extract_message_json_path_missing() {
+        let mapping = WebhookMapping {
+            id: "bad".into(),
+            json_path: Some("data.missing.field".into()),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({ "data": {} });
+        assert!(extract_message(&mapping, &payload).is_err());
+    }
+
+    #[test]
+    fn extract_message_applies_template() {
+        let mapping = WebhookMapping {
+            id: "tmpl".into(),
+            text_field: "message".into(),
+            template: Some("Webhook received: {text}".into()),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({ "message": "hello" });
+        let msg = extract_message(&mapping, &payload).unwrap();
+        assert_eq!(msg, "Webhook received: hello");
+    }
+
+    #[test]
+    fn extract_by_path_handles_non_string() {
+        let payload = serde_json::json!({ "data": { "count": 42 } });
+        let result = extract_by_path(&payload, "data.count");
+        assert_eq!(result, Some("42".into()));
+    }
+
+    #[test]
+    fn extract_by_path_returns_none_for_null() {
+        let payload = serde_json::json!({ "data": null });
+        assert!(extract_by_path(&payload, "data").is_none());
     }
 
     #[test]
