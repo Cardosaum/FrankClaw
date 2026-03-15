@@ -14,6 +14,32 @@ use crate::sse::SseDecoder;
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Anthropic tool names must match `^[a-zA-Z0-9_-]{1,128}` — dots are forbidden.
+/// We replace dots with underscores when sending, and restore them when receiving.
+/// This relies on FrankClaw tool names never using underscores where a dot is meant,
+/// which holds because our naming convention is `namespace.action` (e.g. `browser.open`).
+fn sanitize_tool_name(name: &str) -> String {
+    name.replace('.', "_")
+}
+
+fn restore_tool_name(name: &str) -> String {
+    // Known two-segment prefixes that use dots in FrankClaw tool names.
+    const PREFIXES: &[&str] = &[
+        "session_", "sessions_", "canvas_", "browser_", "web_", "file_",
+        "memory_", "message_", "config_", "agents_", "cron_", "image_",
+        "audio_", "pdf_",
+    ];
+    let mut result = name.to_string();
+    for prefix in PREFIXES {
+        if result.starts_with(prefix) {
+            // Replace only the first underscore (the namespace separator).
+            result = format!("{}.{}", &prefix[..prefix.len() - 1], &result[prefix.len()..]);
+            break;
+        }
+    }
+    result
+}
+
 /// Anthropic Messages API provider.
 pub struct AnthropicProvider {
     id: String,
@@ -180,7 +206,7 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
                     content_blocks.push(serde_json::json!({
                         "type": "tool_use",
                         "id": tc.id,
-                        "name": tc.name,
+                        "name": sanitize_tool_name(&tc.name),
                         "input": input,
                     }));
                 }
@@ -246,12 +272,14 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
         body["temperature"] = serde_json::json!(temp);
     }
     if !request.tools.is_empty() {
+        // Anthropic tool names must match ^[a-zA-Z0-9_-]{1,128} — dots are not allowed.
+        // Map dots to underscores on the way out; reverse on the way back in parse_tool_calls.
         let tools: Vec<serde_json::Value> = request
             .tools
             .iter()
             .map(|t| {
                 serde_json::json!({
-                    "name": t.name,
+                    "name": sanitize_tool_name(&t.name),
                     "description": t.description,
                     "input_schema": t.parameters,
                 })
@@ -305,9 +333,11 @@ fn parse_completion_response(data: &serde_json::Value) -> Result<CompletionRespo
                     if let (Some(id), Some(name)) =
                         (block["id"].as_str(), block["name"].as_str())
                     {
+                        // Reverse the dot→underscore mapping applied when sending tools.
+                        let restored_name = restore_tool_name(name);
                         tool_calls.push(ToolCallResponse {
                             id: id.to_string(),
-                            name: name.to_string(),
+                            name: restored_name,
                             arguments: block["input"].to_string(),
                         });
                     }
@@ -407,17 +437,18 @@ fn apply_stream_event(
                     payload["content_block"]["id"].as_str(),
                     payload["content_block"]["name"].as_str(),
                 ) {
+                    let restored = restore_tool_name(name);
                     state
                         .tool_calls
                         .entry(index as usize)
                         .or_insert_with(|| StreamingToolCall {
                         id: id.to_string(),
-                        name: name.to_string(),
+                        name: restored.clone(),
                         ..Default::default()
                     });
                     deltas.push(StreamDelta::ToolCallStart {
                         id: id.to_string(),
-                        name: name.to_string(),
+                        name: restored,
                     });
                 }
             }
@@ -890,5 +921,42 @@ mod tests {
         };
         let body = build_request_body(&request);
         assert!(body.get("system").is_none());
+    }
+
+    #[test]
+    fn sanitize_tool_name_replaces_dots() {
+        assert_eq!(sanitize_tool_name("browser.open"), "browser_open");
+        assert_eq!(sanitize_tool_name("session.inspect"), "session_inspect");
+        assert_eq!(sanitize_tool_name("bash"), "bash");
+        assert_eq!(sanitize_tool_name("pdf.read"), "pdf_read");
+    }
+
+    #[test]
+    fn restore_tool_name_restores_dots() {
+        assert_eq!(restore_tool_name("browser_open"), "browser.open");
+        assert_eq!(restore_tool_name("session_inspect"), "session.inspect");
+        assert_eq!(restore_tool_name("bash"), "bash");
+        assert_eq!(restore_tool_name("pdf_read"), "pdf.read");
+        assert_eq!(restore_tool_name("canvas_set"), "canvas.set");
+        assert_eq!(restore_tool_name("web_fetch"), "web.fetch");
+    }
+
+    #[test]
+    fn sanitize_restore_roundtrip() {
+        let names = [
+            "bash", "session.inspect", "sessions.list", "sessions.history",
+            "browser.open", "browser.extract", "browser.snapshot",
+            "canvas.get", "canvas.set", "file.read", "file.write",
+            "web.fetch", "web.search", "memory.get", "memory.search",
+            "message.send", "message.react", "config.get", "agents.list",
+            "cron.list", "cron.add", "cron.remove", "image.describe",
+            "audio.transcribe", "pdf.read",
+        ];
+        for name in &names {
+            let sanitized = sanitize_tool_name(name);
+            assert!(!sanitized.contains('.'), "sanitized name should not contain dots: {sanitized}");
+            let restored = restore_tool_name(&sanitized);
+            assert_eq!(&restored, name, "roundtrip failed for {name}");
+        }
     }
 }

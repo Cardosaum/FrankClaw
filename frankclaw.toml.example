@@ -10,7 +10,45 @@ token = "CHANGE_ME_generate_with_openssl_rand_hex_32"
 name = "Assistant"
 model = "openai/gpt-4o-mini"
 system_prompt = "You are a helpful assistant."
-tools = []
+# All available tools listed below. Remove any you don't need.
+tools = [
+    "bash",
+    "session.inspect",
+    "sessions.list",
+    "sessions.history",
+    "browser.open",
+    "browser.extract",
+    "browser.snapshot",
+    "browser.screenshot",
+    "browser.aria_snapshot",
+    "browser.click",
+    "browser.type",
+    "browser.wait",
+    "browser.press",
+    "browser.sessions",
+    "browser.close",
+    "canvas.get",
+    "canvas.set",
+    "canvas.append",
+    "canvas.clear",
+    "file.read",
+    "file.write",
+    "file.edit",
+    "web.fetch",
+    "web.search",
+    "memory.get",
+    "memory.search",
+    "message.send",
+    "message.react",
+    "config.get",
+    "agents.list",
+    "cron.list",
+    "cron.add",
+    "cron.remove",
+    "image.describe",
+    "audio.transcribe",
+    "pdf.read",
+]
 
 [channels.telegram]
 enabled = false
