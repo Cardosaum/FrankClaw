@@ -2,6 +2,7 @@
 
 mod repl;
 mod terminal;
+mod tui;
 
 use std::path::PathBuf;
 
@@ -67,6 +68,10 @@ enum Command {
         /// Extended thinking budget in tokens.
         #[arg(long)]
         think: Option<u32>,
+
+        /// Use the full-screen TUI instead of the line-based REPL.
+        #[arg(long)]
+        tui: bool,
     },
 
     /// Generate a secure auth token.
@@ -288,11 +293,41 @@ enum Command {
         public: bool,
     },
 
+    /// Start ACP server (JSON-RPC 2.0 over stdin/stdout).
+    Acp,
+
+    /// Manage plugins (list, enable, disable, info).
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
     /// Initialize a new config file with secure defaults.
     Init {
         /// Force overwrite existing config.
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// List discovered plugins.
+    List,
+    /// Enable a plugin by id.
+    Enable {
+        /// Plugin id.
+        id: String,
+    },
+    /// Disable a plugin by id.
+    Disable {
+        /// Plugin id.
+        id: String,
+    },
+    /// Show detailed info for a plugin.
+    Info {
+        /// Plugin id.
+        id: String,
     },
 }
 
@@ -331,22 +366,36 @@ async fn main() -> anyhow::Result<()> {
             session,
             model,
             think,
+            tui: use_tui,
         } => {
             let config = load_config(cli.config.as_deref(), &state_dir)?;
             config.validate()?;
             let sessions = open_sessions(&state_dir)?;
             let runtime = build_runtime(&config, sessions.clone()).await?;
 
-            repl::run_repl(
-                runtime,
-                repl::ReplConfig {
-                    agent_id: agent.map(frankclaw_core::types::AgentId::new),
-                    session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
-                    model_id: model,
-                    thinking_budget: think,
-                },
-            )
-            .await?;
+            if use_tui {
+                tui::run_tui(
+                    runtime,
+                    tui::TuiConfig {
+                        agent_id: agent.map(frankclaw_core::types::AgentId::new),
+                        session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
+                        model_id: model,
+                        thinking_budget: think,
+                    },
+                )
+                .await?;
+            } else {
+                repl::run_repl(
+                    runtime,
+                    repl::ReplConfig {
+                        agent_id: agent.map(frankclaw_core::types::AgentId::new),
+                        session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
+                        model_id: model,
+                        thinking_budget: think,
+                    },
+                )
+                .await?;
+            }
         }
 
         Command::Gateway { port } => {
@@ -969,6 +1018,134 @@ async fn main() -> anyhow::Result<()> {
                 }
             } else if !report.remote_ready {
                 anyhow::bail!("{}", t!("cmd.remote.not_remote"));
+            }
+        }
+
+        Command::Acp => {
+            let config = load_config(cli.config.as_deref(), &state_dir)?;
+            config.validate()?;
+            let sessions = open_sessions(&state_dir)?;
+            let runtime = build_runtime(&config, sessions.clone()).await?;
+
+            eprintln!("{}", t!("acp.starting"));
+            eprintln!("{}", t!("acp.ready"));
+
+            let server = frankclaw_gateway::acp::AcpServer::new(
+                runtime,
+                frankclaw_gateway::acp::AcpServerOptions::default(),
+            );
+
+            let stdin = std::io::BufReader::new(std::io::stdin());
+            for line_result in frankclaw_gateway::acp_transport::read_lines(stdin) {
+                let line = match line_result {
+                    Ok(line) => line,
+                    Err(e) => {
+                        let resp = frankclaw_gateway::acp_transport::JsonRpcResponse::error(
+                            None,
+                            frankclaw_gateway::acp_transport::PARSE_ERROR,
+                            e.to_string(),
+                        );
+                        let _ = frankclaw_gateway::acp_transport::write_response(&resp);
+                        continue;
+                    }
+                };
+
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                let req = match frankclaw_gateway::acp_transport::parse_request(&line) {
+                    Ok(req) => req,
+                    Err(resp) => {
+                        let _ = frankclaw_gateway::acp_transport::write_response(&resp);
+                        continue;
+                    }
+                };
+
+                let resp = server.handle_request(req).await;
+                let _ = frankclaw_gateway::acp_transport::write_response(&resp);
+            }
+        }
+
+        Command::Plugin { action } => {
+            let workspace = std::env::current_dir().ok();
+            let dirs = frankclaw_plugin_sdk::discovery::default_plugin_dirs(
+                workspace.as_deref(),
+            );
+            let discovered = frankclaw_plugin_sdk::discovery::discover_plugins(&dirs);
+            // Load persisted state (empty for now — could be stored in config).
+            let persisted: std::collections::HashMap<String, frankclaw_plugin_sdk::lifecycle::PluginState> = std::collections::HashMap::new();
+            let mut manager = frankclaw_plugin_sdk::lifecycle::PluginManager::new(discovered, &persisted);
+
+            match action {
+                PluginAction::List => {
+                    let plugins = manager.list();
+                    if plugins.is_empty() {
+                        println!("{}", t!("plugin.none_found"));
+                    } else {
+                        println!("{}", t!("plugin.list_title"));
+                        println!();
+                        for record in plugins {
+                            let status = if record.enabled {
+                                t!("plugin.enabled").to_string()
+                            } else {
+                                t!("plugin.disabled").to_string()
+                            };
+                            println!(
+                                "  {} v{} [{}] ({})",
+                                record.manifest.id,
+                                record.manifest.version,
+                                status,
+                                match record.origin {
+                                    frankclaw_plugin_sdk::discovery::PluginOrigin::Workspace => "workspace",
+                                    frankclaw_plugin_sdk::discovery::PluginOrigin::User => "user",
+                                },
+                            );
+                            if let Some(desc) = &record.manifest.description {
+                                println!("    {desc}");
+                            }
+                        }
+                    }
+                }
+                PluginAction::Enable { id } => {
+                    if manager.enable(&id) {
+                        println!("{}", t!("plugin.enabled_msg", id = &id));
+                    } else {
+                        println!("{}", t!("plugin.not_found", id = &id));
+                    }
+                }
+                PluginAction::Disable { id } => {
+                    if manager.disable(&id) {
+                        println!("{}", t!("plugin.disabled_msg", id = &id));
+                    } else {
+                        println!("{}", t!("plugin.not_found", id = &id));
+                    }
+                }
+                PluginAction::Info { id } => {
+                    if let Some(record) = manager.get(&id) {
+                        println!("{}: {}", t!("plugin.info_id"), record.manifest.id);
+                        println!("{}: {}", t!("plugin.info_name"), record.manifest.name);
+                        println!("{}: {}", t!("plugin.info_version"), record.manifest.version);
+                        if let Some(desc) = &record.manifest.description {
+                            println!("{}: {desc}", t!("plugin.info_description"));
+                        }
+                        println!("{}: {}", t!("plugin.info_path"), record.path.display());
+                        let status = if record.enabled {
+                            t!("plugin.enabled").to_string()
+                        } else {
+                            t!("plugin.disabled").to_string()
+                        };
+                        println!("{}: {status}", t!("plugin.info_status"));
+                        if !record.manifest.channels.is_empty() {
+                            println!("{}: {}", t!("plugin.info_channels"), record.manifest.channels.join(", "));
+                        }
+                        if !record.manifest.tools.is_empty() {
+                            println!("{}: {}", t!("plugin.info_tools"), record.manifest.tools.join(", "));
+                        }
+                    } else {
+                        println!("{}", t!("plugin.not_found", id = &id));
+                    }
+                }
             }
         }
 

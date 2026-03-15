@@ -294,3 +294,25 @@ login.copilot.waiting: 認可を待機中...
 login.copilot.success: "GitHub Copilotトークンを保存しました: %{path}"
 login.copilot.next_steps: "設定に追加してください: { \"id\": \"copilot\", \"api\": \"github-copilot\", \"models\": [\"gpt-4o\"] }"
 login.unsupported: "サポートされていないログインプロバイダ '%{provider}'。対応プロバイダ: github-copilot"
+plugin.list_title: 検出されたプラグイン
+plugin.none_found: プラグインが見つかりません。
+plugin.enabled: 有効
+plugin.disabled: 無効
+plugin.enabled_msg: "プラグイン '%{id}' を有効にしました。"
+plugin.disabled_msg: "プラグイン '%{id}' を無効にしました。"
+plugin.not_found: "プラグイン '%{id}' が見つかりません。"
+plugin.info_id: ID
+plugin.info_name: 名前
+plugin.info_version: バージョン
+plugin.info_description: 説明
+plugin.info_path: パス
+plugin.info_status: ステータス
+plugin.info_channels: チャンネル
+plugin.info_tools: ツール
+tui.status_idle: 待機中
+tui.status_streaming: ストリーミング中
+tui.status_error: エラー
+tui.input_placeholder: メッセージを入力...
+acp.starting: ACPサーバーを起動しています（JSON-RPC 2.0 over NDJSON）...
+acp.ready: ACPサーバー準備完了。標準入力から読み取り中。
+acp.error: "ACPエラー: %{error}"

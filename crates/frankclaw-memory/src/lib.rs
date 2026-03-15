@@ -6,7 +6,9 @@ pub mod store;
 pub mod sync;
 
 pub use chunking::chunk_text;
-pub use embedding::{EmbeddingProvider, CachedEmbeddingProvider};
+pub use embedding::{
+    CachedEmbeddingProvider, EmbeddingProvider, GeminiEmbeddingProvider, VoyageEmbeddingProvider,
+};
 pub use store::SqliteMemoryStore;
 pub use sync::MemorySyncer;
 

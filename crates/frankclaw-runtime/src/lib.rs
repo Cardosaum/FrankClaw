@@ -3,6 +3,7 @@
 pub mod commands;
 pub mod context;
 pub mod leak_detector;
+pub mod markdown;
 pub mod prompts;
 pub mod sanitize;
 pub mod subagent;

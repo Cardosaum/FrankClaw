@@ -314,6 +314,219 @@ impl<P: EmbeddingProvider> EmbeddingProvider for CachedEmbeddingProvider<P> {
     }
 }
 
+/// Gemini embedding provider using the batchEmbedContents API.
+pub struct GeminiEmbeddingProvider {
+    client: reqwest::Client,
+    api_key: SecretString,
+    model: String,
+    dim: usize,
+}
+
+impl GeminiEmbeddingProvider {
+    pub fn new(api_key: SecretString, model: impl Into<String>) -> Self {
+        let model = model.into();
+        let dim = match model.as_str() {
+            "text-embedding-004" => 768,
+            "text-embedding-005" => 768,
+            "embedding-001" => 768,
+            _ => 768,
+        };
+        Self {
+            client: reqwest::Client::new(),
+            api_key,
+            model,
+            dim,
+        }
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for GeminiEmbeddingProvider {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let results = self.embed_batch(&[text]).await?;
+        results.into_iter().next().ok_or(FrankClawError::EmbeddingProvider {
+            msg: "empty Gemini embedding response".into(),
+        })
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut all_results = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(100) {
+            let requests: Vec<serde_json::Value> = batch
+                .iter()
+                .map(|text| {
+                    serde_json::json!({
+                        "model": format!("models/{}", self.model),
+                        "content": { "parts": [{ "text": text }] }
+                    })
+                })
+                .collect();
+
+            let body = serde_json::json!({ "requests": requests });
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents?key={}",
+                self.model,
+                self.api_key.expose_secret()
+            );
+
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| FrankClawError::EmbeddingProvider {
+                    msg: format!("Gemini request failed: {e}"),
+                })?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(FrankClawError::EmbeddingProvider {
+                    msg: format!("Gemini API error {status}: {text}"),
+                });
+            }
+
+            let json: serde_json::Value =
+                resp.json().await.map_err(|e| FrankClawError::EmbeddingProvider {
+                    msg: format!("failed to parse Gemini response: {e}"),
+                })?;
+
+            let embeddings = json["embeddings"]
+                .as_array()
+                .ok_or_else(|| FrankClawError::EmbeddingProvider {
+                    msg: "missing 'embeddings' array in Gemini response".into(),
+                })?;
+
+            for emb in embeddings {
+                let values: Vec<f32> = emb["values"]
+                    .as_array()
+                    .ok_or_else(|| FrankClawError::EmbeddingProvider {
+                        msg: "missing 'values' in Gemini embedding".into(),
+                    })?
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+                all_results.push(values);
+            }
+        }
+        Ok(all_results)
+    }
+
+    fn dimension(&self) -> usize {
+        self.dim
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+}
+
+/// Voyage AI embedding provider (OpenAI-compatible API).
+pub struct VoyageEmbeddingProvider {
+    client: reqwest::Client,
+    api_key: SecretString,
+    model: String,
+    dim: usize,
+}
+
+impl VoyageEmbeddingProvider {
+    pub fn new(api_key: SecretString, model: impl Into<String>) -> Self {
+        let model = model.into();
+        let dim = match model.as_str() {
+            "voyage-3" => 1024,
+            "voyage-3-lite" => 512,
+            "voyage-large-2" => 1536,
+            "voyage-2" => 1024,
+            "voyage-code-2" => 1536,
+            _ => 1024,
+        };
+        Self {
+            client: reqwest::Client::new(),
+            api_key,
+            model,
+            dim,
+        }
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for VoyageEmbeddingProvider {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let results = self.embed_batch(&[text]).await?;
+        results.into_iter().next().ok_or(FrankClawError::EmbeddingProvider {
+            msg: "empty Voyage embedding response".into(),
+        })
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut all_results = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(100) {
+            let body = serde_json::json!({
+                "model": self.model,
+                "input": batch,
+            });
+
+            let resp = self
+                .client
+                .post("https://api.voyageai.com/v1/embeddings")
+                .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| FrankClawError::EmbeddingProvider {
+                    msg: format!("Voyage request failed: {e}"),
+                })?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(FrankClawError::EmbeddingProvider {
+                    msg: format!("Voyage API error {status}: {text}"),
+                });
+            }
+
+            let json: serde_json::Value =
+                resp.json().await.map_err(|e| FrankClawError::EmbeddingProvider {
+                    msg: format!("failed to parse Voyage response: {e}"),
+                })?;
+
+            let data = json["data"]
+                .as_array()
+                .ok_or_else(|| FrankClawError::EmbeddingProvider {
+                    msg: "missing 'data' array in Voyage response".into(),
+                })?;
+
+            for item in data {
+                let embedding: Vec<f32> = item["embedding"]
+                    .as_array()
+                    .ok_or_else(|| FrankClawError::EmbeddingProvider {
+                        msg: "missing embedding array in Voyage response".into(),
+                    })?
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+                all_results.push(embedding);
+            }
+        }
+        Ok(all_results)
+    }
+
+    fn dimension(&self) -> usize {
+        self.dim
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+}
+
 fn f32_to_bytes(data: &[f32]) -> Vec<u8> {
     data.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
@@ -334,6 +547,48 @@ mod tests {
         let bytes = f32_to_bytes(&data);
         let restored = bytes_to_f32(&bytes);
         assert_eq!(data, restored);
+    }
+
+    #[test]
+    fn gemini_dimension_mapping() {
+        let key = SecretString::from("test-key");
+        let p = GeminiEmbeddingProvider::new(key.clone(), "text-embedding-004");
+        assert_eq!(p.dimension(), 768);
+        assert_eq!(p.model_name(), "text-embedding-004");
+
+        let p2 = GeminiEmbeddingProvider::new(key, "text-embedding-005");
+        assert_eq!(p2.dimension(), 768);
+    }
+
+    #[test]
+    fn voyage_dimension_mapping() {
+        let key = SecretString::from("test-key");
+        let p = VoyageEmbeddingProvider::new(key.clone(), "voyage-3");
+        assert_eq!(p.dimension(), 1024);
+        assert_eq!(p.model_name(), "voyage-3");
+
+        let p2 = VoyageEmbeddingProvider::new(key.clone(), "voyage-3-lite");
+        assert_eq!(p2.dimension(), 512);
+
+        let p3 = VoyageEmbeddingProvider::new(key.clone(), "voyage-large-2");
+        assert_eq!(p3.dimension(), 1536);
+
+        let p4 = VoyageEmbeddingProvider::new(key, "voyage-code-2");
+        assert_eq!(p4.dimension(), 1536);
+    }
+
+    #[test]
+    fn gemini_unknown_model_defaults_768() {
+        let key = SecretString::from("test-key");
+        let p = GeminiEmbeddingProvider::new(key, "unknown-model");
+        assert_eq!(p.dimension(), 768);
+    }
+
+    #[test]
+    fn voyage_unknown_model_defaults_1024() {
+        let key = SecretString::from("test-key");
+        let p = VoyageEmbeddingProvider::new(key, "unknown-model");
+        assert_eq!(p.dimension(), 1024);
     }
 
     #[test]

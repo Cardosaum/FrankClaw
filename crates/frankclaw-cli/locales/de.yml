@@ -294,3 +294,25 @@ login.copilot.waiting: Warte auf Autorisierung...
 login.copilot.success: "GitHub Copilot-Token gespeichert unter: %{path}"
 login.copilot.next_steps: "Fügen Sie dies zu Ihrer Konfiguration hinzu: { \"id\": \"copilot\", \"api\": \"github-copilot\", \"models\": [\"gpt-4o\"] }"
 login.unsupported: "Nicht unterstützter Login-Anbieter '%{provider}'. Unterstützt: github-copilot"
+plugin.list_title: Entdeckte Plugins
+plugin.none_found: Keine Plugins gefunden.
+plugin.enabled: aktiviert
+plugin.disabled: deaktiviert
+plugin.enabled_msg: "Plugin '%{id}' aktiviert."
+plugin.disabled_msg: "Plugin '%{id}' deaktiviert."
+plugin.not_found: "Plugin '%{id}' nicht gefunden."
+plugin.info_id: ID
+plugin.info_name: Name
+plugin.info_version: Version
+plugin.info_description: Beschreibung
+plugin.info_path: Pfad
+plugin.info_status: Status
+plugin.info_channels: Kanäle
+plugin.info_tools: Werkzeuge
+tui.status_idle: BEREIT
+tui.status_streaming: STREAMT
+tui.status_error: FEHLER
+tui.input_placeholder: Nachricht eingeben...
+acp.starting: ACP-Server wird gestartet (JSON-RPC 2.0 über NDJSON)...
+acp.ready: ACP-Server bereit. Lese von der Standardeingabe.
+acp.error: "ACP-Fehler: %{error}"

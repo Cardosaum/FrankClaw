@@ -24,36 +24,32 @@ Last updated: 2026-03-14
 
 ## Tier 2: Features Worth Implementing
 
-### ACP — Agent Client Protocol (`openclaw/src/acp/`)
-- Bi-directional agent-gateway protocol
-- ACP client/server with persistent bindings
-- Session-scoped route resolution
-- Tool permission resolution and safety validation
-- Event translation between internal and ACP wire formats
-- **Decision:** Important for multi-agent orchestration. FrankClaw has subagent support but not the ACP wire protocol.
+### ~~ACP — Agent Client Protocol~~ (`openclaw/src/acp/`) — **Done**
+- JSON-RPC 2.0 over NDJSON (stdin/stdout)
+- Methods: initialize, newSession, loadSession, prompt, listTools, callTool
+- Session store with 24h TTL, LRU eviction, rate limiting
+- Streaming: prompt responses streamed as NDJSON events
+- **Implemented in:** `frankclaw-gateway/src/acp.rs`, `acp_transport.rs`; CLI `frankclaw acp`
 
-### TUI — Terminal User Interface (`openclaw/src/tui/`)
-- Interactive chat REPL with slash commands
-- Gateway message sending/receiving
-- Session management and navigation
-- Terminal formatting (messages, status, overlays)
-- Progress line handling, OSC8 hyperlinks
-- **Decision:** FrankClaw has a basic REPL (`frankclaw-cli/src/repl.rs`). A richer TUI with `ratatui` would be valuable.
+### ~~TUI — Terminal User Interface~~ (`openclaw/src/tui/`) — **Done**
+- Full-screen ratatui TUI with chat log, input area, status bar
+- Slash commands: /quit /clear /help /session /model /think
+- Streaming token display, model/session status indicators
+- **Implemented in:** `frankclaw-cli/src/tui.rs`; launched via `frankclaw chat --tui`
 
 ### Daemon — Cross-Platform Service Management (`openclaw/src/daemon/`)
 - LaunchAgent/LaunchDaemon plist generation (macOS)
 - Systemd unit file generation (Linux)
 - Windows Task Scheduler integration
 - Service start/stop/restart/inspect
-- **Decision:** FrankClaw has `start`/`stop` with PID files. Missing: native service installer generation (systemd units, launchd plists).
+- **Decision:** FrankClaw has `start`/`stop` with PID files and `install-systemd`. Missing: macOS launchd plist, Windows Task Scheduler.
 
-### Plugin Management (`openclaw/src/plugins/`)
-- Plugin discovery from disk and bundled sources
-- Plugin CLI command registration
-- Hook runner for plugin events
-- Plugin enable/disable state management
-- Config schema merging from plugins
-- **Decision:** FrankClaw has `frankclaw-plugin-sdk` (trait definitions) but NOT full plugin lifecycle management (discovery, loading, enable/disable). Implement a plugin loader.
+### ~~Plugin Management~~ (`openclaw/src/plugins/`) — **Done**
+- Plugin manifest (`plugin.json`) parsing and validation
+- Plugin discovery from workspace and user directories
+- Plugin lifecycle: enable/disable with state persistence
+- CLI: `frankclaw plugin list|enable|disable|info`
+- **Implemented in:** `frankclaw-plugin-sdk/src/manifest.rs`, `discovery.rs`, `lifecycle.rs`
 
 ### TTS — Text-to-Speech (`openclaw/src/tts/`)
 - OpenAI TTS (voice synthesis)
@@ -76,10 +72,11 @@ Last updated: 2026-03-14
 - Config finalization and saving
 - **FrankClaw status:** Has `setup` command with provider selection and key input. Missing: guided gateway config prompts, risk acknowledgment flow.
 
-### Browser Extensions (`openclaw/src/browser/`)
-- `extension-relay.ts` — browser extension relay for out-of-band auth
-- `profiles.ts` — browser user data directory management
-- **FrankClaw status:** Has CDP browser tools (navigate, screenshot, click, type, evaluate, scroll, aria_snapshot). Missing: extension relay, profile management.
+### ~~Browser Profiles~~ (`openclaw/src/browser/profiles.ts`) — **Done**
+- Named browser profiles with CDP port allocation
+- Port range 18800-18899 (100 profiles)
+- Profile name validation, color cycling, port extraction from URLs
+- **Implemented in:** `frankclaw-tools/src/browser_profiles.rs`; config via `browser_profiles` in `FrankClawConfig`
 
 ### Provider Auth — OAuth Flows (`openclaw/src/providers/`)
 - Alibaba Qwen portal OAuth
@@ -91,18 +88,18 @@ Last updated: 2026-03-14
 - Auth profiles scanning and credential matrix
 - **FrankClaw status:** Has `audit` command with 19 AuditCode categories, plaintext .env detection, ref shadowing detection, legacy credential scanning, JSON output. Missing: auth profile credential matrix.
 
-### Memory — Batch Embedding Providers (`openclaw/src/memory/`)
-- Batch embedding via Gemini, Voyage AI
-- Batch HTTP with retry and status polling
-- Embedding model normalization per provider
-- **FrankClaw status:** Has SQLite FTS5 + cosine vector search, OpenAI/Ollama embeddings. Missing: Gemini and Voyage batch embedding providers.
+### ~~Memory — Batch Embedding Providers~~ (`openclaw/src/memory/`) — **Done**
+- Gemini embedding provider (batchEmbedContents API, text-embedding-004, 768D)
+- Voyage AI embedding provider (OpenAI-compatible API, voyage-3, 1024D)
+- Batch limit: 100 texts per request for both
+- **Implemented in:** `frankclaw-memory/src/embedding.rs` (GeminiEmbeddingProvider, VoyageEmbeddingProvider)
 
-### Markdown Rendering (`openclaw/src/markdown/`)
-- IR (Intermediate Representation) with style/link metadata
-- Multi-format output (ANSI, plain text, WhatsApp, LINE-specific)
-- Table, code fence, and code span extraction
-- Frontmatter parsing
-- **FrankClaw status:** Uses markdown in prompts and basic rendering. Missing: rich ANSI terminal rendering, channel-specific markdown conversion.
+### ~~Markdown Rendering~~ (`openclaw/src/markdown/`) — **Done**
+- MarkdownIR with StyleSpan and LinkSpan annotations
+- pulldown-cmark parser with bold, italic, strikethrough, code, code block, blockquote, heading, list support
+- ANSI SGR rendering (bold=1, italic=3, strikethrough=9, code=36/cyan, blockquote=2/dim)
+- Plain text accessor
+- **Implemented in:** `frankclaw-runtime/src/markdown.rs`
 
 ---
 
@@ -166,16 +163,17 @@ Last updated: 2026-03-14
 
 | # | Component | Effort | Value | Status |
 |---|-----------|--------|-------|--------|
-| 1 | Plugin management (loader/lifecycle) | Medium | High | Open |
-| 2 | Daemon service installers (systemd/launchd) | Low | Medium | Open |
-| 3 | TUI with ratatui | Medium | Medium | Open |
+| 1 | ~~Plugin management (loader/lifecycle)~~ | ~~Medium~~ | ~~High~~ | **Done** |
+| 2 | Daemon service installers (launchd/Windows) | Low | Medium | Open |
+| 3 | ~~TUI with ratatui~~ | ~~Medium~~ | ~~Medium~~ | **Done** |
 | 4 | LINE channel | High | Medium (Asia) | Open |
-| 5 | ACP protocol | High | Medium | Open |
+| 5 | ~~ACP protocol~~ | ~~High~~ | ~~Medium~~ | **Done** |
 | 6 | ~~Browser AI snapshots~~ | ~~Low~~ | ~~Low~~ | **Done** |
 | 7 | ~~Provider OAuth flows (Copilot)~~ | ~~Medium~~ | ~~Low~~ | **Done** |
 | 8 | TTS providers | Medium | Low | Open |
 | 9 | iMessage channel | Medium | Low | Open |
-| 10 | Batch embedding (Gemini/Voyage) | Low | Low | Open |
-| 11 | Rich markdown rendering | Medium | Low | Open |
+| 10 | ~~Batch embedding (Gemini/Voyage)~~ | ~~Low~~ | ~~Low~~ | **Done** |
+| 11 | ~~Rich markdown rendering~~ | ~~Medium~~ | ~~Low~~ | **Done** |
 | 12 | ~~Secrets audit matrix~~ | ~~Low~~ | ~~Low~~ | **Done** |
 | 13 | Wizard improvements | Low | Low | Open |
+| 14 | ~~Browser profiles~~ | ~~Low~~ | ~~Low~~ | **Done** |

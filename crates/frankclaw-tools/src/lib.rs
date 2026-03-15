@@ -3,6 +3,7 @@
 pub mod aria;
 pub mod audio;
 pub mod bash;
+pub mod browser_profiles;
 pub mod config_tools;
 pub mod cron_tools;
 pub mod file;

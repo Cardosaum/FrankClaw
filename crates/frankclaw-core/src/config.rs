@@ -24,6 +24,9 @@ pub struct FrankClawConfig {
     pub security: SecurityConfig,
     pub memory: MemoryConfig,
     pub understanding: MediaUnderstandingConfig,
+    /// Named browser profiles for CDP connections.
+    #[serde(default)]
+    pub browser_profiles: Vec<BrowserProfileConfig>,
 }
 
 impl Default for FrankClawConfig {
@@ -41,6 +44,7 @@ impl Default for FrankClawConfig {
             security: SecurityConfig::default(),
             memory: MemoryConfig::default(),
             understanding: MediaUnderstandingConfig::default(),
+            browser_profiles: Vec::new(),
         }
     }
 }
@@ -870,6 +874,16 @@ impl Default for MemoryConfig {
             cache_embeddings: true,
         }
     }
+}
+
+/// Named browser profile for CDP connections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserProfileConfig {
+    pub name: String,
+    pub cdp_port: Option<u16>,
+    pub cdp_url: Option<String>,
+    #[serde(default)]
+    pub color: String,
 }
 
 #[cfg(test)]

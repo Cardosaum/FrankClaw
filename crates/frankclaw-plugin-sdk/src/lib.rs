@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![doc = "Plugin SDK for extending FrankClaw with custom channels, tools, and memory backends."]
 
+pub mod discovery;
+pub mod lifecycle;
+pub mod manifest;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;

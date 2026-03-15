@@ -37,3 +37,5 @@ reqwest = { workspace = true }
 rusqlite = { workspace = true }
 rust-i18n = { workspace = true }
 rustyline = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
