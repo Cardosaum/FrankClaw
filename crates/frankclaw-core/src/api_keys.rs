@@ -261,9 +261,21 @@ mod tests {
     fn select_round_robins() {
         let mut rotator = KeyRotator::new(make_keys(3));
 
-        let k1 = rotator.select().unwrap().expose_secret().to_string();
-        let k2 = rotator.select().unwrap().expose_secret().to_string();
-        let k3 = rotator.select().unwrap().expose_secret().to_string();
+        let k1 = rotator
+            .select()
+            .expect("first key should be available")
+            .expose_secret()
+            .to_string();
+        let k2 = rotator
+            .select()
+            .expect("second key should be available")
+            .expose_secret()
+            .to_string();
+        let k3 = rotator
+            .select()
+            .expect("third key should be available")
+            .expose_secret()
+            .to_string();
 
         // All three keys should be different (round-robin).
         assert_ne!(k1, k2);
@@ -271,7 +283,11 @@ mod tests {
         assert_ne!(k1, k3);
 
         // Fourth selection wraps around.
-        let k4 = rotator.select().unwrap().expose_secret().to_string();
+        let k4 = rotator
+            .select()
+            .expect("fourth key should wrap around")
+            .expose_secret()
+            .to_string();
         assert_eq!(k1, k4);
     }
 
@@ -280,15 +296,27 @@ mod tests {
         let mut rotator = KeyRotator::new(make_keys(2));
 
         // Use first key and mark it failed.
-        let k1 = rotator.select().unwrap().expose_secret().to_string();
+        let k1 = rotator
+            .select()
+            .expect("first key should be available")
+            .expose_secret()
+            .to_string();
         rotator.mark_failure(FailureReason::RateLimit);
 
         // Next selection should skip the failed key.
-        let k2 = rotator.select().unwrap().expose_secret().to_string();
+        let k2 = rotator
+            .select()
+            .expect("second key should be available")
+            .expose_secret()
+            .to_string();
         assert_ne!(k1, k2);
 
         // With only one key available, it returns the same key.
-        let k3 = rotator.select().unwrap().expose_secret().to_string();
+        let k3 = rotator
+            .select()
+            .expect("remaining key should be available")
+            .expose_secret()
+            .to_string();
         assert_eq!(k2, k3);
     }
 
@@ -296,7 +324,7 @@ mod tests {
     fn all_keys_in_cooldown_returns_none() {
         let mut rotator = KeyRotator::new(make_keys(1));
 
-        rotator.select().unwrap();
+        let _ = rotator.select().expect("key should be available");
         rotator.mark_failure(FailureReason::RateLimit);
 
         assert!(rotator.select().is_none());
@@ -307,7 +335,7 @@ mod tests {
     fn success_resets_failure_counters() {
         let mut rotator = KeyRotator::new(make_keys(1));
 
-        rotator.select().unwrap();
+        let _ = rotator.select().expect("key should be available");
         rotator.mark_failure(FailureReason::Timeout);
         assert_eq!(rotator.available_count(), 0);
 
@@ -315,7 +343,7 @@ mod tests {
         rotator.stats[0].cooldown_until = None;
         rotator.stats[0].consecutive_failures = 3;
 
-        rotator.select().unwrap();
+        let _ = rotator.select().expect("key should be available");
         rotator.mark_success();
 
         assert_eq!(rotator.stats[0].consecutive_failures, 0);
@@ -351,7 +379,7 @@ mod tests {
         let mut rotator = KeyRotator::new(make_keys(3));
         assert_eq!(rotator.available_count(), 3);
 
-        rotator.select().unwrap();
+        let _ = rotator.select().expect("key should be available");
         rotator.mark_failure(FailureReason::Timeout);
         assert_eq!(rotator.available_count(), 2);
     }
@@ -366,12 +394,13 @@ mod tests {
     fn next_available_in_returns_soonest() {
         let mut rotator = KeyRotator::new(make_keys(2));
 
-        rotator.select().unwrap();
+        let _ = rotator.select().expect("key should be available");
         rotator.mark_failure(FailureReason::RateLimit);
 
-        let remaining = rotator.next_available_in();
-        assert!(remaining.is_some());
-        assert!(remaining.unwrap() <= MAX_COOLDOWN);
+        let remaining = rotator
+            .next_available_in()
+            .expect("cooldown should be present");
+        assert!(remaining <= MAX_COOLDOWN);
     }
 
     #[test]
@@ -390,7 +419,9 @@ mod tests {
         let mut mgr = ProviderKeyManager::new();
         mgr.register("openai", make_keys(1));
 
-        mgr.select("openai").unwrap();
+        let _ = mgr
+            .select("openai")
+            .expect("provider key should be available");
         mgr.mark_failure("openai", FailureReason::RateLimit);
 
         // Key should be in cooldown.

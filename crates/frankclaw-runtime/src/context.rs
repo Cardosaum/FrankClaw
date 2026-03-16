@@ -204,7 +204,7 @@ mod tests {
             api: frankclaw_core::model::ModelApi::OpenaiCompletions,
             reasoning: false,
             input: vec![frankclaw_core::model::InputModality::Text],
-            cost: Default::default(),
+            cost: frankclaw_core::model::ModelCost::default(),
             context_window,
             max_output_tokens: 4096,
             compat: frankclaw_core::model::ModelCompat {
@@ -260,7 +260,7 @@ mod tests {
             msg(Role::User, "how are you"),
         ];
 
-        let result = optimize_context(messages.clone(), &model, None);
+        let result = optimize_context(messages, &model, None);
         assert_eq!(result.pruned_count, 0);
         assert!(!result.compacted);
         assert_eq!(result.messages.len(), 3);
@@ -278,7 +278,7 @@ mod tests {
                     } else {
                         Role::Assistant
                     },
-                    &format!("message number {} with some padding text to use tokens", i),
+                    &format!("message number {i} with some padding text to use tokens"),
                 )
             })
             .collect();
@@ -326,8 +326,7 @@ mod tests {
                 // Tool messages should follow an Assistant message
                 assert!(
                     i > 0 && result.messages[i - 1].role == Role::Assistant,
-                    "orphaned tool result at index {}",
-                    i
+                    "orphaned tool result at index {i}"
                 );
             }
         }
@@ -510,7 +509,7 @@ mod tests {
 
         let result = optimize_context(messages, &model, None);
         // +1 for the summary marker
-        assert!(result.messages.len() >= MIN_KEEP_MESSAGES + 1);
+        assert!(result.messages.len() > MIN_KEEP_MESSAGES);
     }
 
     #[test]

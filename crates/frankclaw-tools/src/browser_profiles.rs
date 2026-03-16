@@ -1,6 +1,7 @@
 //! Browser profile management: named CDP configurations with port allocation.
 
 use std::collections::HashSet;
+use std::hash::BuildHasher;
 
 use serde::{Deserialize, Serialize};
 
@@ -74,10 +75,10 @@ pub fn get_used_ports(profiles: &[BrowserProfile]) -> HashSet<u16> {
         if let Some(port) = profile.cdp_port {
             ports.insert(port);
         }
-        if let Some(url) = &profile.cdp_url {
-            if let Some(port) = extract_port_from_url(url) {
-                ports.insert(port);
-            }
+        if let Some(url) = &profile.cdp_url
+            && let Some(port) = extract_port_from_url(url)
+        {
+            ports.insert(port);
         }
     }
     ports
@@ -89,7 +90,7 @@ fn extract_port_from_url(url: &str) -> Option<u16> {
 }
 
 /// Allocate the first free port in the CDP port range.
-pub fn allocate_cdp_port(used_ports: &HashSet<u16>) -> Option<u16> {
+pub fn allocate_cdp_port<S: BuildHasher>(used_ports: &HashSet<u16, S>) -> Option<u16> {
     (CDP_PORT_RANGE_START..=CDP_PORT_RANGE_END).find(|port| !used_ports.contains(port))
 }
 
@@ -100,7 +101,7 @@ const PROFILE_COLORS: &[&str] = &[
 ];
 
 /// Allocate a color for a new profile, cycling through the palette.
-pub fn allocate_color(used_colors: &HashSet<String>) -> String {
+pub fn allocate_color<S: BuildHasher>(used_colors: &HashSet<String, S>) -> String {
     for color in PROFILE_COLORS {
         if !used_colors.contains(*color) {
             return (*color).to_string();
@@ -117,28 +118,28 @@ mod tests {
 
     #[test]
     fn valid_profile_names() {
-        assert!(validate_profile_name("default").is_ok());
-        assert!(validate_profile_name("my-browser").is_ok());
-        assert!(validate_profile_name("test123").is_ok());
-        assert!(validate_profile_name("a").is_ok());
+        validate_profile_name("default").expect("default should be valid");
+        validate_profile_name("my-browser").expect("hyphenated profile should be valid");
+        validate_profile_name("test123").expect("alphanumeric profile should be valid");
+        validate_profile_name("a").expect("single-char profile should be valid");
     }
 
     #[test]
     fn invalid_profile_names() {
-        assert!(validate_profile_name("").is_err());
-        assert!(validate_profile_name("-start").is_err());
-        assert!(validate_profile_name("end-").is_err());
-        assert!(validate_profile_name("UpperCase").is_err());
-        assert!(validate_profile_name("has space").is_err());
-        assert!(validate_profile_name("has.dot").is_err());
+        validate_profile_name("").expect_err("empty names should be rejected");
+        validate_profile_name("-start").expect_err("leading hyphen should be rejected");
+        validate_profile_name("end-").expect_err("trailing hyphen should be rejected");
+        validate_profile_name("UpperCase").expect_err("uppercase names should be rejected");
+        validate_profile_name("has space").expect_err("spaces should be rejected");
+        validate_profile_name("has.dot").expect_err("dots should be rejected");
         let long_name = "a".repeat(MAX_PROFILE_NAME_LEN + 1);
-        assert!(validate_profile_name(&long_name).is_err());
+        validate_profile_name(&long_name).expect_err("overlong names should be rejected");
     }
 
     #[test]
     fn max_length_name_is_ok() {
         let name = "a".repeat(MAX_PROFILE_NAME_LEN);
-        assert!(validate_profile_name(&name).is_ok());
+        validate_profile_name(&name).expect("max-length profile name should be valid");
     }
 
     #[test]

@@ -40,8 +40,7 @@ pub fn validate_plugin_id(id: &str) -> Result<()> {
     {
         return Err(ConfigValidation {
             msg: format!(
-                "plugin id '{}' must contain only lowercase alphanumeric, hyphens, and underscores",
-                id
+                "plugin id '{id}' must contain only lowercase alphanumeric, hyphens, and underscores"
             ),
         }
         .build());
@@ -90,9 +89,9 @@ mod tests {
 
     #[test]
     fn valid_plugin_ids() {
-        assert!(validate_plugin_id("my-plugin").is_ok());
-        assert!(validate_plugin_id("plugin_v2").is_ok());
-        assert!(validate_plugin_id("a").is_ok());
+        validate_plugin_id("my-plugin").expect("expected 'my-plugin' to be valid");
+        validate_plugin_id("plugin_v2").expect("expected 'plugin_v2' to be valid");
+        validate_plugin_id("a").expect("expected 'a' to be valid");
     }
 
     #[test]
@@ -149,7 +148,7 @@ mod tests {
         )
         .expect("write");
 
-        assert!(load_plugin_manifest(&path).is_err());
+        let _ = load_plugin_manifest(&path).expect_err("expected missing name to fail");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -169,7 +168,7 @@ mod tests {
         )
         .expect("write");
 
-        assert!(load_plugin_manifest(&path).is_err());
+        let _ = load_plugin_manifest(&path).expect_err("expected missing version to fail");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

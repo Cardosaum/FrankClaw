@@ -325,12 +325,10 @@ async fn send_streamed_chunk(
                 error: None,
             });
         }
-        if PSEUDO_STREAM_STEP_DELAY_MS > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(
-                PSEUDO_STREAM_STEP_DELAY_MS,
-            ))
-            .await;
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(
+            PSEUDO_STREAM_STEP_DELAY_MS,
+        ))
+        .await;
     }
 
     channel.stream_end(&handle, &outbound.text).await?;
@@ -752,7 +750,7 @@ mod tests {
             frankclaw_core::channel::ChannelCapabilities::default()
         }
 
-        fn label(&self) -> &str {
+        fn label(&self) -> &'static str {
             "Capture"
         }
 
@@ -812,7 +810,7 @@ mod tests {
             ChannelCapabilities::default()
         }
 
-        fn label(&self) -> &str {
+        fn label(&self) -> &'static str {
             "Sequence"
         }
 
@@ -872,7 +870,7 @@ mod tests {
             }
         }
 
-        fn label(&self) -> &str {
+        fn label(&self) -> &'static str {
             "Streaming Capture"
         }
 

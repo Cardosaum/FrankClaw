@@ -83,15 +83,18 @@ impl Tool for MemoryGetTool {
         validate_memory_path(&memory_dir, path_str)?;
 
         let resolved = memory_dir.join(path_str);
-        let from = args.get("from").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let from = args
+            .get("from")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
         let max_lines = args
             .get("lines")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(500)
             .clamp(1, 5000) as usize;
 
         let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
-            agent_runtime_err(format!("failed to read memory file '{}': {e}", path_str))
+            agent_runtime_err(format!("failed to read memory file '{path_str}': {e}"))
         })?;
 
         let lines: Vec<&str> = content.lines().collect();
@@ -130,7 +133,7 @@ fn validate_memory_path(memory_dir: &Path, requested: &str) -> Result<()> {
     }
 
     for component in Path::new(requested).components() {
-        if let std::path::Component::ParentDir = component {
+        if component == std::path::Component::ParentDir {
             return Err(invalid_request_err(
                 "memory path must not contain '..' components",
             ));
@@ -206,7 +209,7 @@ impl Tool for MemorySearchTool {
 
         let limit = args
             .get("limit")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(5)
             .clamp(1, 20) as usize;
 
@@ -228,19 +231,22 @@ mod tests {
     #[test]
     fn validates_memory_paths() {
         let memory_dir = PathBuf::from("/tmp/frankclaw-memory-test");
-        std::fs::create_dir_all(&memory_dir).ok();
+        let _ = std::fs::create_dir_all(&memory_dir);
 
         // Absolute path rejected.
-        assert!(validate_memory_path(&memory_dir, "/etc/passwd").is_err());
+        validate_memory_path(&memory_dir, "/etc/passwd")
+            .expect_err("absolute memory paths should be rejected");
 
         // Parent traversal rejected.
-        assert!(validate_memory_path(&memory_dir, "../secrets.txt").is_err());
+        validate_memory_path(&memory_dir, "../secrets.txt")
+            .expect_err("parent traversal should be rejected");
 
         // Empty path rejected.
-        assert!(validate_memory_path(&memory_dir, "").is_err());
+        validate_memory_path(&memory_dir, "").expect_err("empty path should be rejected");
 
         // Normal relative path accepted.
-        assert!(validate_memory_path(&memory_dir, "notes.md").is_ok());
+        validate_memory_path(&memory_dir, "notes.md")
+            .expect("normal relative memory paths should be accepted");
     }
 
     #[test]

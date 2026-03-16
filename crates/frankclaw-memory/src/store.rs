@@ -99,6 +99,140 @@ impl SqliteMemoryStore {
 
         Ok(())
     }
+
+    fn bm25_scores(
+        db: &rusqlite::Connection,
+        query: &str,
+        limit: usize,
+    ) -> Result<std::collections::HashMap<String, f32>> {
+        let mut scores = std::collections::HashMap::new();
+        let safe_query = query
+            .replace('"', "\"\"")
+            .split_whitespace()
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if safe_query.is_empty() {
+            return Ok(scores);
+        }
+
+        let fts_query = format!("\"{safe_query}\"");
+        let mut stmt = db
+            .prepare(
+                "SELECT mc.id, bm25(memory_fts) as score
+                 FROM memory_fts
+                 JOIN memory_chunks mc ON mc.rowid = memory_fts.rowid
+                 WHERE memory_fts MATCH ?1
+                 ORDER BY score
+                 LIMIT ?2",
+            )
+            .map_err(|e| memory_store_err(format!("FTS query failed: {e}")))?;
+
+        let rows = stmt
+            .query_map(params![fts_query, limit as i64 * 3], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })
+            .map_err(|e| memory_store_err(format!("FTS query failed: {e}")))?;
+
+        for (id, score) in rows.flatten() {
+            // bm25() returns negative scores (lower = better). Normalize.
+            scores.insert(id, (-score as f32).max(0.0));
+        }
+
+        let max_score = scores.values().copied().fold(0.0f32, f32::max);
+        if max_score > 0.0 {
+            for score in scores.values_mut() {
+                *score /= max_score;
+            }
+        }
+
+        Ok(scores)
+    }
+
+    fn vector_scores(
+        db: &rusqlite::Connection,
+        query_embedding: &[f32],
+    ) -> Result<std::collections::HashMap<String, f32>> {
+        let mut scores = std::collections::HashMap::new();
+        if query_embedding.is_empty() {
+            return Ok(scores);
+        }
+
+        let mut stmt = db
+            .prepare(
+                "SELECT e.chunk_id, e.embedding
+                 FROM memory_embeddings e",
+            )
+            .map_err(|e| memory_store_err(format!("embedding query failed: {e}")))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| memory_store_err(format!("embedding query failed: {e}")))?;
+
+        for (id, blob) in rows.flatten() {
+            let embedding = bytes_to_f32(&blob);
+            let similarity = cosine_similarity(query_embedding, &embedding);
+            if similarity > 0.0 {
+                scores.insert(id, similarity);
+            }
+        }
+
+        Ok(scores)
+    }
+
+    fn ranked_ids(
+        bm25_scores: &std::collections::HashMap<String, f32>,
+        vector_scores: &std::collections::HashMap<String, f32>,
+        options: &SearchOptions,
+    ) -> Vec<(String, f32)> {
+        let mut all_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        all_ids.extend(bm25_scores.keys().cloned());
+        all_ids.extend(vector_scores.keys().cloned());
+
+        let vector_weight = options.vector_weight;
+        let bm25_weight = 1.0 - vector_weight;
+
+        let mut scored: Vec<(String, f32)> = all_ids
+            .into_iter()
+            .map(|id| {
+                let vector_score = vector_scores.get(&id).copied().unwrap_or(0.0);
+                let bm25_score = bm25_scores.get(&id).copied().unwrap_or(0.0);
+                let combined = vector_score * vector_weight + bm25_score * bm25_weight;
+                (id, combined)
+            })
+            .filter(|(_, score)| *score >= options.min_score)
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(options.limit);
+        scored
+    }
+
+    fn load_chunk(db: &rusqlite::Connection, id: &str) -> Result<ChunkEntry> {
+        db.query_row(
+            "SELECT id, source, text, line_start, line_end, chunk_index, created_at
+             FROM memory_chunks WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(ChunkEntry {
+                    id: row.get(0)?,
+                    source: row.get(1)?,
+                    text: row.get(2)?,
+                    line_start: row.get::<_, i64>(3)? as usize,
+                    line_end: row.get::<_, i64>(4)? as usize,
+                    chunk_index: row.get::<_, i64>(5)? as usize,
+                    created_at: row
+                        .get::<_, String>(6)?
+                        .parse()
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            },
+        )
+        .map_err(|e| memory_store_err(format!("failed to load chunk {id}: {e}")))
+    }
 }
 
 #[async_trait::async_trait]
@@ -145,128 +279,14 @@ impl MemoryStore for SqliteMemoryStore {
             .lock()
             .map_err(|_| memory_store_err("lock poisoned"))?;
 
-        // 1. BM25 text search.
-        let mut bm25_scores: std::collections::HashMap<String, f32> =
-            std::collections::HashMap::new();
-        {
-            // Escape FTS5 special characters in query.
-            let safe_query = query
-                .replace('"', "\"\"")
-                .split_whitespace()
-                .filter(|w| !w.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            if !safe_query.is_empty() {
-                let fts_query = format!("\"{safe_query}\"");
-                let mut stmt = db
-                    .prepare(
-                        "SELECT mc.id, bm25(memory_fts) as score
-                         FROM memory_fts
-                         JOIN memory_chunks mc ON mc.rowid = memory_fts.rowid
-                         WHERE memory_fts MATCH ?1
-                         ORDER BY score
-                         LIMIT ?2",
-                    )
-                    .map_err(|e| memory_store_err(format!("FTS query failed: {e}")))?;
-
-                let rows = stmt
-                    .query_map(params![fts_query, options.limit as i64 * 3], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-                    })
-                    .map_err(|e| memory_store_err(format!("FTS query failed: {e}")))?;
-
-                for row in rows {
-                    if let Ok((id, score)) = row {
-                        // bm25() returns negative scores (lower = better). Normalize.
-                        bm25_scores.insert(id, (-score as f32).max(0.0));
-                    }
-                }
-            }
-        }
-
-        // Normalize BM25 scores to 0..1.
-        let bm25_max = bm25_scores.values().copied().fold(0.0f32, f32::max);
-        if bm25_max > 0.0 {
-            for score in bm25_scores.values_mut() {
-                *score /= bm25_max;
-            }
-        }
-
-        // 2. Vector similarity (cosine) — load all embeddings.
-        let mut vec_scores: std::collections::HashMap<String, f32> =
-            std::collections::HashMap::new();
-        if !query_embedding.is_empty() {
-            let mut stmt = db
-                .prepare(
-                    "SELECT e.chunk_id, e.embedding
-                     FROM memory_embeddings e",
-                )
-                .map_err(|e| memory_store_err(format!("embedding query failed: {e}")))?;
-
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(|e| memory_store_err(format!("embedding query failed: {e}")))?;
-
-            for row in rows {
-                if let Ok((id, blob)) = row {
-                    let emb = bytes_to_f32(&blob);
-                    let sim = cosine_similarity(query_embedding, &emb);
-                    if sim > 0.0 {
-                        vec_scores.insert(id, sim);
-                    }
-                }
-            }
-        }
-
-        // 3. Merge scores with weighted combination.
-        let mut all_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-        all_ids.extend(bm25_scores.keys().cloned());
-        all_ids.extend(vec_scores.keys().cloned());
-
-        let vw = options.vector_weight;
-        let bw = 1.0 - vw;
-
-        let mut scored: Vec<(String, f32)> = all_ids
-            .into_iter()
-            .map(|id| {
-                let vs = vec_scores.get(&id).copied().unwrap_or(0.0);
-                let bs = bm25_scores.get(&id).copied().unwrap_or(0.0);
-                let combined = vs * vw + bs * bw;
-                (id, combined)
-            })
-            .filter(|(_, score)| *score >= options.min_score)
-            .collect();
-
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(options.limit);
+        let bm25_scores = Self::bm25_scores(&db, query, options.limit)?;
+        let vector_scores = Self::vector_scores(&db, query_embedding)?;
+        let scored = Self::ranked_ids(&bm25_scores, &vector_scores, options);
 
         // 4. Load chunk data for top results.
         let mut results = Vec::with_capacity(scored.len());
         for (id, score) in scored {
-            let chunk = db
-                .query_row(
-                    "SELECT id, source, text, line_start, line_end, chunk_index, created_at
-                     FROM memory_chunks WHERE id = ?1",
-                    params![id],
-                    |row| {
-                        Ok(ChunkEntry {
-                            id: row.get(0)?,
-                            source: row.get(1)?,
-                            text: row.get(2)?,
-                            line_start: row.get::<_, i64>(3)? as usize,
-                            line_end: row.get::<_, i64>(4)? as usize,
-                            chunk_index: row.get::<_, i64>(5)? as usize,
-                            created_at: row
-                                .get::<_, String>(6)?
-                                .parse()
-                                .unwrap_or_else(|_| chrono::Utc::now()),
-                        })
-                    },
-                )
-                .map_err(|e| memory_store_err(format!("failed to load chunk {id}: {e}")))?;
+            let chunk = Self::load_chunk(&db, &id)?;
             results.push(SearchResult { chunk, score });
         }
 
@@ -328,7 +348,7 @@ impl MemoryStore for SqliteMemoryStore {
                 })
             })
             .map_err(|e| memory_store_err(format!("list sources failed: {e}")))?
-            .filter_map(|r| r.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
 
         Ok(sources)
@@ -398,7 +418,11 @@ fn f32_to_bytes(data: &[f32]) -> Vec<u8> {
 
 fn bytes_to_f32(data: &[u8]) -> Vec<f32> {
     data.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .map(|chunk| {
+            let mut bytes = [0; 4];
+            bytes.copy_from_slice(chunk);
+            f32::from_le_bytes(bytes)
+        })
         .collect()
 }
 
@@ -408,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn store_and_search() {
-        let store = SqliteMemoryStore::in_memory().unwrap();
+        let store = SqliteMemoryStore::in_memory().expect("in-memory store should open");
         let chunk = ChunkEntry {
             id: "c1".into(),
             source: "test.md".into(),
@@ -419,7 +443,10 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         let embedding = vec![1.0, 0.0, 0.0];
-        store.store_chunk(&chunk, &embedding).await.unwrap();
+        store
+            .store_chunk(&chunk, &embedding)
+            .await
+            .expect("chunk should store");
 
         let results = store
             .search_hybrid(
@@ -428,7 +455,7 @@ mod tests {
                 &SearchOptions::default(),
             )
             .await
-            .unwrap();
+            .expect("search should succeed");
 
         assert!(!results.is_empty());
         assert_eq!(results[0].chunk.id, "c1");
@@ -436,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_by_source_removes_chunks() {
-        let store = SqliteMemoryStore::in_memory().unwrap();
+        let store = SqliteMemoryStore::in_memory().expect("in-memory store should open");
         let chunk = ChunkEntry {
             id: "c1".into(),
             source: "file.md".into(),
@@ -446,17 +473,33 @@ mod tests {
             chunk_index: 0,
             created_at: chrono::Utc::now(),
         };
-        store.store_chunk(&chunk, &[1.0]).await.unwrap();
-        assert!(store.has_source("file.md").await.unwrap());
+        store
+            .store_chunk(&chunk, &[1.0])
+            .await
+            .expect("chunk should store");
+        assert!(
+            store
+                .has_source("file.md")
+                .await
+                .expect("source lookup should succeed")
+        );
 
-        let deleted = store.delete_by_source("file.md").await.unwrap();
+        let deleted = store
+            .delete_by_source("file.md")
+            .await
+            .expect("delete should succeed");
         assert_eq!(deleted, 1);
-        assert!(!store.has_source("file.md").await.unwrap());
+        assert!(
+            !store
+                .has_source("file.md")
+                .await
+                .expect("source lookup should succeed")
+        );
     }
 
     #[tokio::test]
     async fn list_sources() {
-        let store = SqliteMemoryStore::in_memory().unwrap();
+        let store = SqliteMemoryStore::in_memory().expect("in-memory store should open");
         for i in 0..3 {
             let chunk = ChunkEntry {
                 id: format!("c{i}"),
@@ -467,10 +510,16 @@ mod tests {
                 chunk_index: i,
                 created_at: chrono::Utc::now(),
             };
-            store.store_chunk(&chunk, &[1.0]).await.unwrap();
+            store
+                .store_chunk(&chunk, &[1.0])
+                .await
+                .expect("chunk should store");
         }
 
-        let sources = store.list_sources().await.unwrap();
+        let sources = store
+            .list_sources()
+            .await
+            .expect("listing sources should succeed");
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].source, "src.md");
         assert_eq!(sources[0].chunk_count, 3);

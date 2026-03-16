@@ -418,16 +418,16 @@ mod tests {
     async fn spawn_accepted_within_limits() {
         let registry = SubagentRegistry::new();
         let result = registry.register_spawn(&spawn_request(0)).await;
-        match result {
-            SpawnResult::Accepted {
-                run_id,
-                child_session_key,
-            } => {
-                assert!(!run_id.0.is_empty());
-                assert!(child_session_key.as_str().starts_with("subagent:"));
-            }
-            SpawnResult::Rejected { reason } => panic!("expected accepted, got rejected: {reason}"),
-        }
+        assert!(matches!(&result, SpawnResult::Accepted { .. }));
+        let SpawnResult::Accepted {
+            run_id,
+            child_session_key,
+        } = result
+        else {
+            return;
+        };
+        assert!(!run_id.0.is_empty());
+        assert!(child_session_key.as_str().starts_with("subagent:"));
     }
 
     #[tokio::test]
@@ -456,17 +456,19 @@ mod tests {
         let _r2 = registry.register_spawn(&spawn_request(0)).await;
 
         // Complete the first run.
-        if let SpawnResult::Accepted { run_id, .. } = r1 {
-            registry
-                .complete(CompletionNotice {
-                    run_id,
-                    state: RunState::Completed,
-                    result_text: Some("done".into()),
-                    error: None,
-                })
-                .await
-                .unwrap();
-        }
+        assert!(matches!(&r1, SpawnResult::Accepted { .. }));
+        let SpawnResult::Accepted { run_id, .. } = r1 else {
+            return;
+        };
+        registry
+            .complete(CompletionNotice {
+                run_id,
+                state: RunState::Completed,
+                result_text: Some("done".into()),
+                error: None,
+            })
+            .await
+            .expect("completing the first run should succeed");
 
         // Now a third spawn should succeed.
         let r3 = registry.register_spawn(&spawn_request(0)).await;
@@ -476,16 +478,26 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_transitions() {
         let registry = SubagentRegistry::new();
-        let SpawnResult::Accepted { run_id, .. } = registry.register_spawn(&spawn_request(0)).await
-        else {
-            panic!("expected accepted");
+        let result = registry.register_spawn(&spawn_request(0)).await;
+        assert!(matches!(&result, SpawnResult::Accepted { .. }));
+        let SpawnResult::Accepted { run_id, .. } = result else {
+            return;
         };
 
-        let record = registry.get_run(&run_id).await.unwrap();
+        let record = registry
+            .get_run(&run_id)
+            .await
+            .expect("run should exist immediately after spawn");
         assert_eq!(record.state, RunState::Pending);
 
-        registry.mark_running(&run_id).await.unwrap();
-        let record = registry.get_run(&run_id).await.unwrap();
+        registry
+            .mark_running(&run_id)
+            .await
+            .expect("marking run as running should succeed");
+        let record = registry
+            .get_run(&run_id)
+            .await
+            .expect("run should still exist after mark_running");
         assert_eq!(record.state, RunState::Running);
         assert!(record.started_at.is_some());
 
@@ -497,9 +509,12 @@ mod tests {
                 error: None,
             })
             .await
-            .unwrap();
+            .expect("completing the run should succeed");
 
-        let record = registry.get_run(&run_id).await.unwrap();
+        let record = registry
+            .get_run(&run_id)
+            .await
+            .expect("run should still exist after completion");
         assert_eq!(record.state, RunState::Completed);
         assert_eq!(record.result_text.as_deref(), Some("result"));
         assert!(record.ended_at.is_some());
@@ -508,12 +523,16 @@ mod tests {
     #[tokio::test]
     async fn completion_notification_delivered() {
         let registry = SubagentRegistry::new();
-        let SpawnResult::Accepted { run_id, .. } = registry.register_spawn(&spawn_request(0)).await
-        else {
-            panic!("expected accepted");
+        let result = registry.register_spawn(&spawn_request(0)).await;
+        assert!(matches!(&result, SpawnResult::Accepted { .. }));
+        let SpawnResult::Accepted { run_id, .. } = result else {
+            return;
         };
 
-        let rx = registry.listen_completion(&run_id).await.unwrap();
+        let rx = registry
+            .listen_completion(&run_id)
+            .await
+            .expect("registering completion listener should succeed");
 
         registry
             .complete(CompletionNotice {
@@ -523,27 +542,41 @@ mod tests {
                 error: None,
             })
             .await
-            .unwrap();
+            .expect("completing the run should notify the listener");
 
-        let notice = rx.await.unwrap();
+        let notice = rx
+            .await
+            .expect("completion listener should receive the notice");
         assert_eq!(notice.result_text.as_deref(), Some("hello from child"));
     }
 
     #[tokio::test]
     async fn kill_sets_state_and_notifies() {
         let registry = SubagentRegistry::new();
-        let SpawnResult::Accepted { run_id, .. } = registry.register_spawn(&spawn_request(0)).await
-        else {
-            panic!("expected accepted");
+        let result = registry.register_spawn(&spawn_request(0)).await;
+        assert!(matches!(&result, SpawnResult::Accepted { .. }));
+        let SpawnResult::Accepted { run_id, .. } = result else {
+            return;
         };
 
-        let rx = registry.listen_completion(&run_id).await.unwrap();
-        registry.kill(&run_id).await.unwrap();
+        let rx = registry
+            .listen_completion(&run_id)
+            .await
+            .expect("registering completion listener should succeed");
+        registry
+            .kill(&run_id)
+            .await
+            .expect("killing a registered run should succeed");
 
-        let notice = rx.await.unwrap();
+        let notice = rx
+            .await
+            .expect("completion listener should receive the kill notice");
         assert_eq!(notice.state, RunState::Killed);
 
-        let record = registry.get_run(&run_id).await.unwrap();
+        let record = registry
+            .get_run(&run_id)
+            .await
+            .expect("run should remain recorded after kill");
         assert_eq!(record.state, RunState::Killed);
     }
 
@@ -572,11 +605,13 @@ mod tests {
     #[tokio::test]
     async fn depth_of_returns_correct_depth() {
         let registry = SubagentRegistry::new();
+        let result = registry.register_spawn(&spawn_request(0)).await;
+        assert!(matches!(&result, SpawnResult::Accepted { .. }));
         let SpawnResult::Accepted {
             child_session_key, ..
-        } = registry.register_spawn(&spawn_request(0)).await
+        } = result
         else {
-            panic!("expected accepted");
+            return;
         };
 
         assert_eq!(registry.depth_of(&child_session_key).await, 1);
@@ -586,9 +621,10 @@ mod tests {
     #[tokio::test]
     async fn cleanup_removes_old_completed_runs() {
         let registry = SubagentRegistry::new();
-        let SpawnResult::Accepted { run_id, .. } = registry.register_spawn(&spawn_request(0)).await
-        else {
-            panic!("expected accepted");
+        let result = registry.register_spawn(&spawn_request(0)).await;
+        assert!(matches!(&result, SpawnResult::Accepted { .. }));
+        let SpawnResult::Accepted { run_id, .. } = result else {
+            return;
         };
 
         registry
@@ -599,14 +635,16 @@ mod tests {
                 error: None,
             })
             .await
-            .unwrap();
+            .expect("completing the finished run should succeed");
 
         // Spawn an active run that should survive cleanup.
+        let active_result = registry.register_spawn(&spawn_request(0)).await;
+        assert!(matches!(&active_result, SpawnResult::Accepted { .. }));
         let SpawnResult::Accepted {
             run_id: active_id, ..
-        } = registry.register_spawn(&spawn_request(0)).await
+        } = active_result
         else {
-            panic!("expected accepted");
+            return;
         };
 
         // With a large max_age, the just-completed run survives (it's recent).

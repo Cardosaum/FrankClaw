@@ -108,14 +108,15 @@ mod tests {
 
     #[test]
     fn local_model_is_free() {
-        let (input, output) = model_cost("llama3").unwrap();
+        let (input, output) = model_cost("llama3").expect("local models should have free pricing");
         assert_eq!(input, 0.0);
         assert_eq!(output, 0.0);
     }
 
     #[test]
     fn ollama_tagged_model_is_free() {
-        let (input, output) = model_cost("mistral:latest").unwrap();
+        let (input, output) =
+            model_cost("mistral:latest").expect("tagged ollama models should have free pricing");
         assert_eq!(input, 0.0);
         assert_eq!(output, 0.0);
     }
@@ -139,14 +140,16 @@ mod tests {
 
     #[test]
     fn openrouter_free_suffix_returns_zero() {
-        let (input, output) = model_cost("stepfun/step-3.5-flash:free").unwrap();
+        let (input, output) = model_cost("stepfun/step-3.5-flash:free")
+            .expect("openrouter free-tier models should resolve to zero pricing");
         assert_eq!(input, 0.0);
         assert_eq!(output, 0.0);
     }
 
     #[test]
     fn openrouter_free_router_returns_zero() {
-        let (input, output) = model_cost("openrouter/free").unwrap();
+        let (input, output) =
+            model_cost("openrouter/free").expect("openrouter/free should resolve to zero pricing");
         assert_eq!(input, 0.0);
         assert_eq!(output, 0.0);
     }

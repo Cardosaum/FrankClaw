@@ -270,7 +270,7 @@ mod tests {
 
     #[async_trait]
     impl ModelProvider for MockProvider {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "mock"
         }
 

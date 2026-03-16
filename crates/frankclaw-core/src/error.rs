@@ -329,6 +329,10 @@ mod tests {
     use crate::types::{AgentId, ChannelId, SessionKey};
 
     /// Build every error variant. Returns (error, expected_display, expected_status, expected_retryable).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of all error variants keeps tests complete"
+    )]
     fn error_cases() -> Vec<(FrankClawError, &'static str, u16, bool)> {
         vec![
             (AuthRequired.build(), "authentication required", 401, false),
@@ -514,10 +518,7 @@ mod tests {
                 false,
             ),
             (
-                Crypto {
-                    source: frankclaw_crypto::CryptoError::EncryptionFailed,
-                }
-                .build(),
+                frankclaw_crypto::CryptoError::EncryptionFailed.into(),
                 "cryptographic operation failed",
                 500,
                 false,
@@ -571,8 +572,7 @@ mod tests {
             assert_eq!(
                 error.status_code(),
                 *expected_status,
-                "status_code for '{}' (index {idx})",
-                error
+                "status_code for '{error}' (index {idx})"
             );
         }
     }
@@ -583,8 +583,7 @@ mod tests {
             assert_eq!(
                 error.is_retryable(),
                 *expected_retry,
-                "is_retryable for '{}' (index {idx})",
-                error
+                "is_retryable for '{error}' (index {idx})"
             );
         }
     }
@@ -624,12 +623,11 @@ mod tests {
             crypto_result?;
             Ok(())
         }
-        let err = inner().unwrap_err();
+        let err = inner().expect_err("crypto error should convert into FrankClawError");
         assert_eq!(err.status_code(), 500);
         assert!(
             err.to_string().contains("cryptographic operation failed"),
-            "got: {}",
-            err
+            "got: {err}"
         );
     }
 }

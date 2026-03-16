@@ -469,6 +469,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::panic,
+        reason = "test intentionally triggers a panic inside a hook"
+    )]
     async fn handler_error_does_not_crash() {
         let registry = HookRegistry::new();
 

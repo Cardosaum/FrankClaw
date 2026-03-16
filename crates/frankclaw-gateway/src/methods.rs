@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use frankclaw_core::protocol::{EventFrame, EventType, Frame, RequestFrame, ResponseFrame};
 use frankclaw_core::session::SessionStore;
+use frankclaw_core::tool_services::CronManager;
 use frankclaw_core::types::{AgentId, ConnId, SessionKey};
 
 use crate::state::GatewayState;
@@ -356,6 +357,7 @@ pub async fn chat_send(
 
 /// Handle `chat.cancel` method.
 pub async fn chat_cancel(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    std::future::ready(()).await;
     let request_id = match request.params.get("request_id").and_then(|v| v.as_str()) {
         Some(id) if !id.trim().is_empty() => id.trim().to_string(),
         _ => return ResponseFrame::err(request.id, 400, "request_id is required"),
@@ -655,24 +657,24 @@ fn parse_canvas_blocks(
 
 /// Handle `usage.get` method — return aggregated usage stats for sessions.
 pub async fn usage_get(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    std::future::ready(()).await;
     let agent_id = request
         .params
         .get("agent_id")
         .and_then(|v| v.as_str())
-        .map(AgentId::new)
-        .unwrap_or_else(AgentId::default_agent);
+        .map_or_else(AgentId::default_agent, AgentId::new);
 
     let limit = request
         .params
         .get("limit")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(50)
         .min(200) as usize;
 
     let offset = request
         .params
         .get("offset")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as usize;
 
     match state.sessions.list(&agent_id, limit, offset).await {
@@ -688,22 +690,22 @@ pub async fn usage_get(state: &Arc<GatewayState>, request: RequestFrame) -> Resp
                     let input = s
                         .metadata
                         .get("total_input_tokens")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let output = s
                         .metadata
                         .get("total_output_tokens")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let turns = s
                         .metadata
                         .get("total_turns")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let cost = s
                         .metadata
                         .get("total_cost_usd")
-                        .and_then(|v| v.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0);
                     let model = s
                         .metadata
@@ -755,14 +757,14 @@ pub async fn tool_approval_resolve(
     state: &Arc<GatewayState>,
     request: RequestFrame,
 ) -> ResponseFrame {
+    std::future::ready(()).await;
     let approval_id = match request.params.get("approval_id").and_then(|v| v.as_str()) {
         Some(id) if !id.trim().is_empty() => id.trim().to_string(),
         _ => return ResponseFrame::err(request.id, 400, "approval_id is required"),
     };
 
-    let decision_str = match request.params.get("decision").and_then(|v| v.as_str()) {
-        Some(d) => d,
-        None => return ResponseFrame::err(request.id, 400, "decision is required"),
+    let Some(decision_str) = request.params.get("decision").and_then(|v| v.as_str()) else {
+        return ResponseFrame::err(request.id, 400, "decision is required");
     };
 
     let decision = match decision_str {
@@ -904,6 +906,10 @@ fn parse_session_key_param(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "gateway test helpers remain near the primary handlers while cron handlers stay below"
+)]
 mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -995,7 +1001,7 @@ mod tests {
 
     #[async_trait]
     impl ModelProvider for MockProvider {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "mock"
         }
 
@@ -1040,7 +1046,7 @@ mod tests {
 
     #[async_trait]
     impl ModelProvider for StreamingMockProvider {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "streaming-mock"
         }
 
@@ -1291,8 +1297,9 @@ mod tests {
             (third, "done", None),
         ] {
             let frame: Frame = serde_json::from_str(&frame).expect("frame should deserialize");
+            assert!(matches!(frame, Frame::Event(_)), "expected event frame");
             let Frame::Event(event) = frame else {
-                panic!("expected event frame");
+                continue;
             };
             assert_eq!(event.event, frankclaw_core::protocol::EventType::ChatDelta);
             assert_eq!(event.payload["request_id"], serde_json::json!("stream-1"));
@@ -1637,7 +1644,13 @@ mod tests {
         )
         .await;
         assert!(response.error.is_none(), "delete should succeed");
-        assert_eq!(response.result.as_ref().unwrap()["status"], "deleted");
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .expect("delete response should include result")["status"],
+            "deleted"
+        );
 
         // Verify it's gone.
         let got = sessions.get(&session_key).await.expect("get should work");
@@ -1708,7 +1721,11 @@ mod tests {
         assert!(response.error.is_none(), "patch should succeed");
 
         // Verify metadata was merged.
-        let updated = sessions.get(&session_key).await.unwrap().unwrap();
+        let updated = sessions
+            .get(&session_key)
+            .await
+            .expect("session lookup should succeed")
+            .expect("updated session should exist");
         assert_eq!(updated.metadata["label"], "new");
         assert_eq!(updated.metadata["extra"], 42);
 
@@ -1781,7 +1798,9 @@ mod tests {
         )
         .await;
         assert!(response.error.is_none(), "usage_get should succeed");
-        let result = response.result.unwrap();
+        let result = response
+            .result
+            .expect("usage_get response should include result");
         assert_eq!(result["totals"]["input_tokens"], 100);
         assert_eq!(result["totals"]["output_tokens"], 50);
         assert_eq!(result["totals"]["turns"], 3);
@@ -1882,10 +1901,11 @@ pub async fn cron_add(state: &Arc<GatewayState>, request: RequestFrame) -> Respo
         .params
         .get("id")
         .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_else(|| format!("job-{}", chrono::Utc::now().timestamp_millis()));
+        .map_or_else(
+            || format!("job-{}", chrono::Utc::now().timestamp_millis()),
+            String::from,
+        );
 
-    use frankclaw_core::tool_services::CronManager;
     let sk = if session_key.is_empty() {
         format!("{agent_id}:cron:{id}")
     } else {
@@ -1909,7 +1929,6 @@ pub async fn cron_remove(state: &Arc<GatewayState>, request: RequestFrame) -> Re
         Some(s) if !s.trim().is_empty() => s.trim(),
         _ => return ResponseFrame::err(request.id, 400, "id is required"),
     };
-    use frankclaw_core::tool_services::CronManager;
     match cron.remove_job(id).await {
         Ok(existed) => ResponseFrame::ok(
             request.id,
@@ -1930,9 +1949,8 @@ pub async fn cron_run(state: &Arc<GatewayState>, request: RequestFrame) -> Respo
     };
 
     let jobs = cron.list().await;
-    let job = match jobs.into_iter().find(|j| j.id == id) {
-        Some(j) => j,
-        None => return ResponseFrame::err(request.id, 404, "job not found"),
+    let Some(job) = jobs.into_iter().find(|j| j.id == id) else {
+        return ResponseFrame::err(request.id, 404, "job not found");
     };
 
     // Spawn the job asynchronously so we don't block the RPC.

@@ -35,10 +35,10 @@ fn redact_secrets(value: &mut serde_json::Value) {
     }
 }
 
-fn navigate_json_path<'a>(
-    value: &'a serde_json::Value,
+fn navigate_json_path<'value>(
+    value: &'value serde_json::Value,
     path: &str,
-) -> Option<&'a serde_json::Value> {
+) -> Option<&'value serde_json::Value> {
     if path.is_empty() {
         return Some(value);
     }
@@ -102,7 +102,7 @@ impl Tool for ConfigGetTool {
         } else {
             navigate_json_path(&json, path).cloned().ok_or_else(|| {
                 InvalidRequest {
-                    msg: format!("config path '{}' not found", path),
+                    msg: format!("config path '{path}' not found"),
                 }
                 .build()
             })?

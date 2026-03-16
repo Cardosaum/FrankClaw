@@ -47,11 +47,13 @@ mod tests {
     #[test]
     fn approval_decision_serializes() {
         assert_eq!(
-            serde_json::to_string(&ApprovalDecision::AllowOnce).unwrap(),
+            serde_json::to_string(&ApprovalDecision::AllowOnce)
+                .expect("approval decision should serialize"),
             "\"allow_once\""
         );
         assert_eq!(
-            serde_json::to_string(&ApprovalDecision::Deny).unwrap(),
+            serde_json::to_string(&ApprovalDecision::Deny)
+                .expect("approval decision should serialize"),
             "\"deny\""
         );
     }
@@ -66,7 +68,7 @@ mod tests {
             session_key: "session-1".into(),
             agent_id: "agent-1".into(),
         };
-        let json = serde_json::to_value(&req).unwrap();
+        let json = serde_json::to_value(&req).expect("approval request should serialize");
         assert_eq!(json["tool_name"], "bash");
         assert_eq!(json["risk_level"], "destructive");
     }

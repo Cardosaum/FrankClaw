@@ -412,12 +412,8 @@ mod tests {
                 last_run: None,
             })
             .await;
-        assert!(err.is_err());
-        assert!(
-            err.unwrap_err()
-                .to_string()
-                .contains("prompt must not be empty")
-        );
+        let err = err.expect_err("empty prompts should be rejected");
+        assert!(err.to_string().contains("prompt must not be empty"));
     }
 
     #[tokio::test]
@@ -425,7 +421,7 @@ mod tests {
         let service = CronService::new();
         let err = service
             .add(CronJob {
-                id: "".into(),
+                id: String::new(),
                 schedule: "0 * * * * *".into(),
                 agent_id: AgentId::default_agent(),
                 session_key: SessionKey::from_raw("default:cron:test"),
@@ -435,12 +431,8 @@ mod tests {
                 last_run: None,
             })
             .await;
-        assert!(err.is_err());
-        assert!(
-            err.unwrap_err()
-                .to_string()
-                .contains("id must not be empty")
-        );
+        let err = err.expect_err("empty job ids should be rejected");
+        assert!(err.to_string().contains("id must not be empty"));
     }
 
     #[tokio::test]
@@ -458,11 +450,7 @@ mod tests {
                 last_run: None,
             })
             .await;
-        assert!(err.is_err());
-        assert!(
-            err.unwrap_err()
-                .to_string()
-                .contains("invalid cron schedule")
-        );
+        let err = err.expect_err("invalid cron schedules should be rejected");
+        assert!(err.to_string().contains("invalid cron schedule"));
     }
 }

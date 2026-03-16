@@ -456,8 +456,14 @@ mod tests {
     #[test]
     fn build_reply_headers_adds_re_prefix() {
         let builder = lettre::Message::builder()
-            .from("test@example.com".parse().unwrap())
-            .to("other@example.com".parse().unwrap());
+            .from(
+                "test@example.com"
+                    .parse()
+                    .expect("test sender address should parse"),
+            )
+            .to("other@example.com"
+                .parse()
+                .expect("test recipient address should parse"));
         let builder =
             build_reply_headers(builder, Some("<msg-123@example.com>"), "Original Subject");
         let email = builder
@@ -478,8 +484,14 @@ mod tests {
     #[test]
     fn build_reply_headers_preserves_existing_re() {
         let builder = lettre::Message::builder()
-            .from("test@example.com".parse().unwrap())
-            .to("other@example.com".parse().unwrap());
+            .from(
+                "test@example.com"
+                    .parse()
+                    .expect("test sender address should parse"),
+            )
+            .to("other@example.com"
+                .parse()
+                .expect("test recipient address should parse"));
         let builder = build_reply_headers(builder, None, "Re: Already replied");
         let email = builder
             .header(ContentType::TEXT_PLAIN)
@@ -503,9 +515,10 @@ mod tests {
         let channel = make_test_channel(vec![]);
         let raw = build_raw_email("sender@example.com", "Test Subject", "Hello world");
         let msg = channel.parse_email(raw.as_bytes()).expect("should parse");
+        let text = msg.text.as_ref().expect("parsed email should contain text");
         assert_eq!(msg.sender_id, "sender@example.com");
-        assert!(msg.text.as_ref().unwrap().contains("Hello world"));
-        assert!(msg.text.as_ref().unwrap().contains("Test Subject"));
+        assert!(text.contains("Hello world"));
+        assert!(text.contains("Test Subject"));
     }
 
     #[test]

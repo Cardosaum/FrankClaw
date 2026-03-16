@@ -262,7 +262,7 @@ mod tests {
                 name: "test_tool".into(),
                 description: "a tool".into(),
                 parameters: serde_json::json!({}),
-                risk_level: Default::default(),
+                risk_level: frankclaw_core::model::ToolRiskLevel::default(),
             }],
             ..Default::default()
         }

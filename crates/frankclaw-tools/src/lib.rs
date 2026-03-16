@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
@@ -274,12 +275,11 @@ impl Default for ToolRegistry {
 /// The `_image_content` key is removed from the output to avoid sending raw base64 to the LLM
 /// as text (it will be sent as proper image content parts instead).
 fn extract_image_content(output: &mut serde_json::Value) -> Vec<ImageContent> {
-    let arr = match output
+    let Some(serde_json::Value::Array(arr)) = output
         .as_object_mut()
         .and_then(|obj| obj.remove("_image_content"))
-    {
-        Some(serde_json::Value::Array(arr)) => arr,
-        _ => return Vec::new(),
+    else {
+        return Vec::new();
     };
     arr.into_iter()
         .filter_map(|v| {
@@ -764,7 +764,7 @@ impl BrowserClient {
             .cloned()
             .ok_or_else(|| {
                 InvalidRequest {
-                    msg: format!("browser session '{}' was not opened yet", session_id),
+                    msg: format!("browser session '{session_id}' was not opened yet"),
                 }
                 .build()
             })?;
@@ -801,7 +801,6 @@ impl BrowserClient {
             }
             .build()
         })?;
-        use base64::Engine;
         base64::engine::general_purpose::STANDARD
             .decode(b64_data)
             .map_err(|e| {
@@ -825,7 +824,7 @@ impl BrowserClient {
             .cloned()
             .ok_or_else(|| {
                 InvalidRequest {
-                    msg: format!("browser session '{}' was not opened yet", session_id),
+                    msg: format!("browser session '{session_id}' was not opened yet"),
                 }
                 .build()
             })?;
@@ -1378,7 +1377,7 @@ impl Tool for CanvasGetTool {
         let canvas = canvas_service(&ctx)?;
         let id = canvas_id_from_args(&args, &ctx);
         match canvas.get(&id).await {
-            Some(doc) => Ok(serde_json::to_value(&doc).unwrap_or(serde_json::json!({}))),
+            Some(doc) => Ok(serde_json::to_value(&doc).unwrap_or_else(|_| serde_json::json!({}))),
             None => Ok(
                 serde_json::json!({ "canvas_id": id, "status": "empty", "message": "No canvas document exists yet. Use canvas_set to create one." }),
             ),
@@ -1445,7 +1444,7 @@ impl Tool for CanvasSetTool {
             updated_at: chrono::Utc::now(),
         };
         let result = canvas.set(doc).await?;
-        Ok(serde_json::to_value(&result).unwrap_or(serde_json::json!({"status": "ok"})))
+        Ok(serde_json::to_value(&result).unwrap_or_else(|_| serde_json::json!({"status": "ok"})))
     }
 }
 
@@ -1496,7 +1495,7 @@ impl Tool for CanvasAppendTool {
             .build());
         }
         let result = canvas.patch(&id, title, body, blocks).await?;
-        Ok(serde_json::to_value(&result).unwrap_or(serde_json::json!({"status": "ok"})))
+        Ok(serde_json::to_value(&result).unwrap_or_else(|_| serde_json::json!({"status": "ok"})))
     }
 }
 
@@ -1559,7 +1558,7 @@ impl Tool for BrowserOpenTool {
             &ctx,
         )?;
         let snapshot = self.client.open(session_id, url).await?;
-        Ok(snapshot_result(snapshot, false, 800))
+        Ok(snapshot_result(&snapshot, false, 800))
     }
 }
 
@@ -1592,7 +1591,7 @@ impl Tool for BrowserExtractTool {
             .unwrap_or(2000)
             .clamp(1, 8000) as usize;
         let snapshot = self.client.extract(&session_id).await?;
-        Ok(snapshot_result(snapshot, false, max_chars))
+        Ok(snapshot_result(&snapshot, false, max_chars))
     }
 }
 
@@ -1624,7 +1623,7 @@ impl Tool for BrowserSnapshotTool {
             .unwrap_or(8000)
             .clamp(1, 32000) as usize;
         let snapshot = self.client.extract(&session_id).await?;
-        Ok(snapshot_result(snapshot, true, max_chars))
+        Ok(snapshot_result(&snapshot, true, max_chars))
     }
 }
 
@@ -1663,7 +1662,7 @@ impl Tool for BrowserClickTool {
                 .build()
             })?;
         let snapshot = self.client.click(&session_id, selector).await?;
-        Ok(snapshot_result(snapshot, false, 1000))
+        Ok(snapshot_result(&snapshot, false, 1000))
     }
 }
 
@@ -1712,7 +1711,7 @@ impl Tool for BrowserTypeTool {
                 .build()
             })?;
         let snapshot = self.client.type_text(&session_id, selector, text).await?;
-        Ok(snapshot_result(snapshot, false, 1000))
+        Ok(snapshot_result(&snapshot, false, 1000))
     }
 }
 
@@ -1758,7 +1757,7 @@ impl Tool for BrowserWaitTool {
             .client
             .wait_for(&session_id, selector, text, timeout_ms)
             .await?;
-        Ok(snapshot_result(snapshot, false, 1000))
+        Ok(snapshot_result(&snapshot, false, 1000))
     }
 }
 
@@ -1809,7 +1808,7 @@ impl Tool for BrowserPressTool {
                 .build()
             })?;
         let snapshot = self.client.press_key(&session_id, selector, key).await?;
-        Ok(snapshot_result(snapshot, false, 1000))
+        Ok(snapshot_result(&snapshot, false, 1000))
     }
 }
 
@@ -1881,10 +1880,6 @@ impl Tool for BrowserCloseTool {
     }
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "snapshot is consumed to build the JSON result"
-)]
 #[async_trait]
 impl Tool for BrowserScreenshotTool {
     fn definition(&self) -> ToolDef {
@@ -1909,10 +1904,9 @@ impl Tool for BrowserScreenshotTool {
         )?;
         let full_page = args
             .get("full_page")
-            .and_then(|value| value.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         let png_bytes = self.client.screenshot(&session_id, full_page).await?;
-        use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
         Ok(serde_json::json!({
             "session_id": session_id,
@@ -1952,11 +1946,11 @@ impl Tool for BrowserAriaSnapshotTool {
         let options = aria::AriaSnapshotOptions {
             interactive_only: args
                 .get("interactive_only")
-                .and_then(|value| value.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
             max_depth: args
                 .get("max_depth")
-                .and_then(|value| value.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(20)
                 .clamp(1, 50) as usize,
         };
@@ -1971,17 +1965,17 @@ impl Tool for BrowserAriaSnapshotTool {
 }
 
 fn snapshot_result(
-    snapshot: BrowserSnapshot,
+    snapshot: &BrowserSnapshot,
     include_html: bool,
     max_chars: usize,
 ) -> serde_json::Value {
     let mut value = serde_json::json!({
-        "session_id": snapshot.session_id,
-        "target_id": snapshot.target_id,
-        "url": snapshot.url,
-        "title": snapshot.title,
+        "session_id": &snapshot.session_id,
+        "target_id": &snapshot.target_id,
+        "url": &snapshot.url,
+        "title": &snapshot.title,
         "text": truncate_chars(&snapshot.text, max_chars),
-        "captured_at": snapshot.captured_at,
+        "captured_at": &snapshot.captured_at,
     });
     if include_html {
         value["html"] = serde_json::json!(truncate_chars(&snapshot.html, max_chars));
@@ -2422,6 +2416,10 @@ mod tests {
         assert_eq!(tool_risk_level("session_inspect"), ToolRiskLevel::ReadOnly);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "integration-style browser flow coverage is clearer as one end-to-end test"
+    )]
     #[tokio::test]
     async fn browser_tools_drive_mock_devtools_server() {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -2720,6 +2718,10 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "real Chromium coverage is kept as one end-to-end scenario"
+    )]
     #[tokio::test]
     #[ignore = "requires a live Chromium DevTools endpoint via FRANKCLAW_BROWSER_DEVTOOLS_URL"]
     async fn browser_tools_drive_real_chromium() {
@@ -2996,12 +2998,12 @@ mod tests {
                         "window.location.href" => {
                             serde_json::json!(state.page_url.lock().await.clone())
                         }
-                        expression if expression.contains(".click();") => {
+                        _ if expression.contains(".click();") => {
                             *state.title.lock().await = "Clicked".into();
                             *state.text.lock().await = "Clicked submit".into();
                             serde_json::json!(true)
                         }
-                        expression if expression.contains("dispatchEvent(new Event('input'") => {
+                        _ if expression.contains("dispatchEvent(new Event('input'") => {
                             let typed = expression
                                 .split("el.value = ")
                                 .nth(1)
@@ -3012,12 +3014,12 @@ mod tests {
                             *state.text.lock().await = format!("Typed {typed}");
                             serde_json::json!(true)
                         }
-                        expression if expression.contains("new KeyboardEvent") => {
+                        _ if expression.contains("new KeyboardEvent") => {
                             *state.title.lock().await = "Pressed".into();
                             *state.text.lock().await = "Pressed Enter".into();
                             serde_json::json!(true)
                         }
-                        expression if expression.contains("const selector = ") => {
+                        _ if expression.contains("const selector = ") => {
                             let text = state.text.lock().await.clone();
                             serde_json::json!(text.contains("Typed frankclaw"))
                         }
@@ -3049,35 +3051,42 @@ mod tests {
     #[tokio::test]
     async fn navigation_ssrf_blocks_private_ips() {
         // Loopback
-        let err = validate_navigation_url("http://127.0.0.1/secret").await;
-        assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("private/internal"));
+        let err = validate_navigation_url("http://127.0.0.1/secret")
+            .await
+            .expect_err("loopback URLs should be rejected");
+        assert!(err.to_string().contains("private/internal"));
 
         // Private network
-        let err = validate_navigation_url("http://192.168.1.1/admin").await;
-        assert!(err.is_err());
+        validate_navigation_url("http://192.168.1.1/admin")
+            .await
+            .expect_err("private IPv4 URLs should be rejected");
 
-        let err = validate_navigation_url("http://10.0.0.1/").await;
-        assert!(err.is_err());
+        validate_navigation_url("http://10.0.0.1/")
+            .await
+            .expect_err("RFC1918 URLs should be rejected");
     }
 
     #[tokio::test]
     async fn navigation_ssrf_blocks_non_http_schemes() {
-        let err = validate_navigation_url("file:///etc/passwd").await;
-        assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("http/https"));
+        let err = validate_navigation_url("file:///etc/passwd")
+            .await
+            .expect_err("file URLs should be rejected");
+        assert!(err.to_string().contains("http/https"));
 
-        let err = validate_navigation_url("javascript:alert(1)").await;
-        assert!(err.is_err());
+        validate_navigation_url("javascript:alert(1)")
+            .await
+            .expect_err("javascript URLs should be rejected");
 
-        let err = validate_navigation_url("ftp://evil.com/file").await;
-        assert!(err.is_err());
+        validate_navigation_url("ftp://evil.com/file")
+            .await
+            .expect_err("ftp URLs should be rejected");
     }
 
     #[tokio::test]
     async fn navigation_ssrf_blocks_urls_without_host() {
-        let err = validate_navigation_url("http://").await;
-        assert!(err.is_err());
+        validate_navigation_url("http://")
+            .await
+            .expect_err("URLs without a host should be rejected");
     }
 
     #[tokio::test]
@@ -3104,13 +3113,9 @@ mod tests {
         // Opening a new session should fail with limit error.
         let err = client
             .open("new-session".into(), "https://example.com/")
-            .await;
-        assert!(err.is_err());
-        assert!(
-            err.unwrap_err()
-                .to_string()
-                .contains("session limit reached")
-        );
+            .await
+            .expect_err("opening past the browser session limit should fail");
+        assert!(err.to_string().contains("session limit reached"));
     }
 
     #[tokio::test]
@@ -3154,7 +3159,9 @@ mod tests {
         )
         .await;
         // Either our internal CDP_COMMAND_TIMEOUT or our test timeout should fire.
-        assert!(result.is_err() || result.unwrap().is_err());
+        if let Ok(command_result) = result {
+            let _ = command_result.expect_err("CDP command should time out without a response");
+        }
     }
 
     #[tokio::test]
@@ -3209,14 +3216,14 @@ mod tests {
 
     #[test]
     fn press_key_validation_rejects_unknown_keys() {
-        assert!(validate_press_key("Enter").is_ok());
-        assert!(validate_press_key("Tab").is_ok());
-        assert!(validate_press_key("Escape").is_ok());
-        assert!(validate_press_key("ArrowDown").is_ok());
-        assert!(validate_press_key("ArrowUp").is_ok());
-        assert!(validate_press_key("Delete").is_err());
-        assert!(validate_press_key("F1").is_err());
-        assert!(validate_press_key("a").is_err());
+        validate_press_key("Enter").expect("Enter should be allowed");
+        validate_press_key("Tab").expect("Tab should be allowed");
+        validate_press_key("Escape").expect("Escape should be allowed");
+        validate_press_key("ArrowDown").expect("ArrowDown should be allowed");
+        validate_press_key("ArrowUp").expect("ArrowUp should be allowed");
+        validate_press_key("Delete").expect_err("Delete should be rejected");
+        validate_press_key("F1").expect_err("F1 should be rejected");
+        validate_press_key("a").expect_err("arbitrary keys should be rejected");
     }
 
     #[test]

@@ -8,8 +8,11 @@ pub mod prompts;
 pub mod sanitize;
 pub mod subagent;
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+    sync::Arc,
+};
 
 use chrono::Utc;
 use secrecy::SecretString;
@@ -31,6 +34,8 @@ use frankclaw_models::{
 };
 use frankclaw_plugin_sdk::{SkillManifest, load_workspace_skills};
 use frankclaw_tools::{ToolContext, ToolOutput, ToolRegistry};
+
+type RoutedProvider = (Arc<dyn frankclaw_core::model::ModelProvider>, Vec<String>);
 
 pub struct Runtime {
     config: FrankClawConfig,
@@ -136,7 +141,7 @@ impl Runtime {
         providers: Vec<Arc<dyn ModelProvider>>,
     ) -> Result<Self> {
         // Wrap with empty model ID lists — routing will try all providers.
-        let providers: Vec<(Arc<dyn ModelProvider>, Vec<String>)> =
+        let providers: Vec<RoutedProvider> =
             providers.into_iter().map(|p| (p, Vec::new())).collect();
         Self::from_providers_with_models(config, sessions, providers).await
     }
@@ -144,7 +149,7 @@ impl Runtime {
     async fn from_providers_with_models(
         config: &FrankClawConfig,
         sessions: Arc<dyn SessionStore>,
-        providers: Vec<(Arc<dyn ModelProvider>, Vec<String>)>,
+        providers: Vec<RoutedProvider>,
     ) -> Result<Self> {
         let cooldown_secs = config
             .models
@@ -377,7 +382,9 @@ impl Runtime {
             CompletionMessage::with_images(sanitized_message.clone(), image_contents)
         } else if !request.attachments.is_empty() && !model_def.compat.supports_vision {
             // Model doesn't support vision — try understanding pipeline for text descriptions.
-            let understanding_context = if !self.understanding_providers.is_empty() {
+            let understanding_context = if self.understanding_providers.is_empty() {
+                String::new()
+            } else {
                 let media_attachments: Vec<_> = request
                     .attachments
                     .iter()
@@ -406,17 +413,9 @@ impl Runtime {
                     .await;
                     frankclaw_media::understanding::format_as_context(&outputs)
                 }
-            } else {
-                String::new()
             };
 
-            if !understanding_context.is_empty() {
-                // Understanding pipeline produced descriptions — prepend to message.
-                CompletionMessage::text(
-                    Role::User,
-                    format!("{}\n\n{}", understanding_context, sanitized_message),
-                )
-            } else {
+            if understanding_context.is_empty() {
                 // Fallback: simple text labels for attachments.
                 let attachment_notes: Vec<String> = request
                     .attachments
@@ -424,18 +423,21 @@ impl Runtime {
                     .filter(|a| a.mime_type.starts_with("image/"))
                     .map(|a| {
                         let name = a.filename.as_deref().unwrap_or("image");
-                        format!("[Image attached: {}]", name)
+                        format!("[Image attached: {name}]")
                     })
                     .collect();
                 if attachment_notes.is_empty() {
                     CompletionMessage::text(Role::User, sanitized_message.clone())
                 } else {
                     let prefix = attachment_notes.join("\n");
-                    CompletionMessage::text(
-                        Role::User,
-                        format!("{}\n\n{}", prefix, sanitized_message),
-                    )
+                    CompletionMessage::text(Role::User, format!("{prefix}\n\n{sanitized_message}"))
                 }
+            } else {
+                // Understanding pipeline produced descriptions — prepend to message.
+                CompletionMessage::text(
+                    Role::User,
+                    format!("{understanding_context}\n\n{sanitized_message}"),
+                )
             }
         } else {
             CompletionMessage::text(Role::User, sanitized_message.clone())
@@ -510,7 +512,7 @@ impl Runtime {
             if request
                 .cancel_token
                 .as_ref()
-                .is_some_and(|t| t.is_cancelled())
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
             {
                 return Err(TurnCancelled.build());
             }
@@ -542,7 +544,7 @@ impl Runtime {
             let response = if let Some(ref token) = request.cancel_token {
                 tokio::select! {
                     result = completion_future => result?,
-                    _ = token.cancelled() => return Err(TurnCancelled.build()),
+                    () = token.cancelled() => return Err(TurnCancelled.build()),
                 }
             } else {
                 completion_future.await?
@@ -627,7 +629,7 @@ impl Runtime {
                 if request
                     .cancel_token
                     .as_ref()
-                    .is_some_and(|t| t.is_cancelled())
+                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
                 {
                     return Err(TurnCancelled.build());
                 }
@@ -705,7 +707,7 @@ impl Runtime {
                             approval_id: approval_id.clone(),
                             tool_name: tool_call.name.clone(),
                             tool_args: arguments.clone(),
-                            risk_level: format!("{:?}", risk),
+                            risk_level: format!("{risk:?}"),
                             session_key: session_key.as_str().to_string(),
                             agent_id: agent_id.as_str().to_string(),
                         };
@@ -1002,6 +1004,10 @@ impl Runtime {
     ///
     /// This prunes old messages and optionally uses the LLM to generate a real
     /// summary of the pruned content (instead of just a marker).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "session compaction orchestrates loading, pruning, summarizing, and persistence"
+    )]
     pub async fn compact_session(
         &self,
         session_key: &SessionKey,
@@ -1035,10 +1041,8 @@ impl Runtime {
             });
         }
 
-        let messages: Vec<CompletionMessage> = entries
-            .iter()
-            .map(|entry| transcript_entry_to_message(entry))
-            .collect();
+        let messages: Vec<CompletionMessage> =
+            entries.iter().map(transcript_entry_to_message).collect();
 
         let allowed_tools = self.tools.definitions(&agent.tools).unwrap_or_default();
         let system_prompt =
@@ -1062,7 +1066,9 @@ impl Runtime {
 
         // Try LLM-based summarization of the pruned messages.
         let pruned_messages = &messages[..context_result.pruned_count];
-        let summary = if !pruned_messages.is_empty() {
+        let summary = if pruned_messages.is_empty() {
+            None
+        } else {
             match self
                 .generate_compaction_summary(pruned_messages, &model_id)
                 .await
@@ -1076,24 +1082,23 @@ impl Runtime {
                     None
                 }
             }
-        } else {
-            None
         };
 
         // Build the compacted message list to persist.
         let mut compacted = context_result.messages;
 
         // Replace the generic marker with real summary if available.
-        if let Some(ref summary_text) = summary {
-            if !compacted.is_empty() && compacted[0].role == Role::User {
-                compacted[0] = CompletionMessage::text(
-                    Role::User,
-                    format!(
-                        "[Conversation summary — {} earlier messages compacted]\n\n{}",
-                        context_result.pruned_count, summary_text
-                    ),
-                );
-            }
+        if let Some(ref summary_text) = summary
+            && !compacted.is_empty()
+            && compacted[0].role == Role::User
+        {
+            compacted[0] = CompletionMessage::text(
+                Role::User,
+                format!(
+                    "[Conversation summary — {} earlier messages compacted]\n\n{}",
+                    context_result.pruned_count, summary_text
+                ),
+            );
         }
 
         let tokens_after = context::estimate_messages_tokens(&compacted);
@@ -1143,7 +1148,7 @@ impl Runtime {
                 Role::System => "System",
                 Role::Tool => "Tool",
             };
-            conversation.push_str(&format!("{role_label}: {}\n\n", msg.content));
+            let _ = writeln!(conversation, "{role_label}: {}\n", msg.content);
             // Cap conversation text to avoid token exhaustion during summarization.
             if conversation.len() > 80_000 {
                 conversation.push_str("[... earlier messages omitted ...]\n");
@@ -1312,6 +1317,10 @@ impl Runtime {
         Ok((agent_id, agent))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "system prompt assembly intentionally keeps the full prompt recipe in one place"
+    )]
     fn build_system_prompt(
         &self,
         agent_id: &AgentId,
@@ -1562,47 +1571,48 @@ impl Runtime {
         let Ok(Some(mut session)) = self.sessions.get(session_key).await else {
             return;
         };
-        let meta = session.metadata.as_object_mut();
-        let meta = match meta {
-            Some(m) => m,
-            None => {
-                session.metadata = serde_json::json!({});
-                session.metadata.as_object_mut().unwrap()
-            }
-        };
+        if !session.metadata.is_object() {
+            session.metadata = serde_json::json!({});
+        }
+        let meta = session
+            .metadata
+            .as_object_mut()
+            .expect("session metadata should be an object after initialization");
 
         // Accumulate totals.
         let prev_input = meta
             .get("total_input_tokens")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let prev_output = meta
             .get("total_output_tokens")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let prev_turns = meta
             .get("total_turns")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
 
         meta.insert(
             "total_input_tokens".into(),
-            (prev_input + turn_usage.input_tokens as u64).into(),
+            (prev_input + u64::from(turn_usage.input_tokens)).into(),
         );
         meta.insert(
             "total_output_tokens".into(),
-            (prev_output + turn_usage.output_tokens as u64).into(),
+            (prev_output + u64::from(turn_usage.output_tokens)).into(),
         );
         meta.insert("total_turns".into(), (prev_turns + 1).into());
         meta.insert("last_model".into(), model_id.into());
 
         // Calculate cost if available.
         if let Some((input_cost, output_cost)) = frankclaw_models::costs::model_cost(model_id) {
-            let turn_cost = (turn_usage.input_tokens as f64 * input_cost)
-                + (turn_usage.output_tokens as f64 * output_cost);
+            let turn_cost = f64::from(turn_usage.input_tokens).mul_add(
+                input_cost,
+                f64::from(turn_usage.output_tokens) * output_cost,
+            );
             let prev_cost = meta
                 .get("total_cost_usd")
-                .and_then(|v| v.as_f64())
+                .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.0);
             meta.insert(
                 "total_cost_usd".into(),
@@ -1696,9 +1706,8 @@ fn read_workspace_bootstrap_files(workspace: &std::path::Path) -> String {
 
     for filename in BOOTSTRAP_FILES {
         let path = workspace.join(filename);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
         };
 
         if content.trim().is_empty() {
@@ -1711,7 +1720,7 @@ fn read_workspace_bootstrap_files(workspace: &std::path::Path) -> String {
         // Per-file size limit
         let content = if content.len() > MAX_BOOTSTRAP_FILE_BYTES {
             let truncated: String = content.chars().take(MAX_BOOTSTRAP_FILE_BYTES).collect();
-            format!("{}\n\n[... truncated, file too large ...]", truncated)
+            format!("{truncated}\n\n[... truncated, file too large ...]")
         } else {
             content
         };
@@ -1889,7 +1898,7 @@ async fn fetch_image_attachments(attachments: &[InboundAttachment]) -> Vec<Image
             continue;
         };
 
-        match fetcher.fetch(&url).await {
+        match fetcher.fetch_url(&url).await {
             Ok(fetch_result) => {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&fetch_result.bytes);
                 // Use the fetched content-type if it's an image, otherwise fall back
@@ -1929,11 +1938,8 @@ fn parse_tool_arguments(tool_call: &ToolCallResponse) -> Result<serde_json::Valu
     })
 }
 
-fn build_providers(
-    config: &FrankClawConfig,
-) -> Result<Vec<(Arc<dyn frankclaw_core::model::ModelProvider>, Vec<String>)>> {
-    let mut providers: Vec<(Arc<dyn frankclaw_core::model::ModelProvider>, Vec<String>)> =
-        Vec::new();
+fn build_providers(config: &FrankClawConfig) -> Result<Vec<RoutedProvider>> {
+    let mut providers: Vec<RoutedProvider> = Vec::new();
     let mut seen_ids = HashSet::new();
 
     for provider in &config.models.providers {
@@ -2176,6 +2182,55 @@ mod tests {
         }
     }
 
+    struct SlowProvider;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for SlowProvider {
+        fn id(&self) -> &'static str {
+            "slow"
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+            _stream_tx: Option<tokio::sync::mpsc::Sender<StreamDelta>>,
+        ) -> frankclaw_core::error::Result<CompletionResponse> {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(CompletionResponse {
+                content: "should not reach".into(),
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn list_models(&self) -> frankclaw_core::error::Result<Vec<ModelDef>> {
+            Ok(vec![ModelDef {
+                id: "slow-model".into(),
+                name: "slow-model".into(),
+                api: frankclaw_core::model::ModelApi::Ollama,
+                reasoning: false,
+                input: vec![frankclaw_core::model::InputModality::Text],
+                cost: ModelCost::default(),
+                context_window: 4096,
+                max_output_tokens: 1024,
+                compat: ModelCompat::default(),
+            }])
+        }
+
+        async fn health(&self) -> bool {
+            true
+        }
+    }
+
+    fn default_agent_mut(config: &mut FrankClawConfig) -> &mut AgentDef {
+        config
+            .agents
+            .agents
+            .get_mut(&AgentId::default_agent())
+            .expect("default agent should exist in the config")
+    }
+
     #[async_trait]
     impl ModelProvider for MockProvider {
         fn id(&self) -> &str {
@@ -2187,21 +2242,27 @@ mod tests {
             request: CompletionRequest,
             _stream_tx: Option<tokio::sync::mpsc::Sender<frankclaw_core::model::StreamDelta>>,
         ) -> Result<CompletionResponse> {
+            let CompletionRequest {
+                messages,
+                system,
+                tools,
+                ..
+            } = request;
             self.seen_requests
                 .lock()
                 .expect("request capture should lock")
                 .push(CapturedRequest {
-                    messages: request.messages.clone(),
-                    system: request.system.clone(),
-                    tools: request.tools.clone(),
+                    messages,
+                    system,
+                    tools,
                 });
-            match self
+            let next_response = self
                 .responses
                 .lock()
                 .expect("response queue should lock")
                 .pop_front()
-                .unwrap_or(None)
-            {
+                .unwrap_or(None);
+            match next_response {
                 Some(response) => Ok(CompletionResponse {
                     content: response.content,
                     tool_calls: response.tool_calls,
@@ -2266,9 +2327,7 @@ mod tests {
             &config,
             sessions.clone() as Arc<dyn SessionStore>,
             vec![
-                Arc::new(MockProvider {
-                    ..MockProvider::failing("primary", "mock-primary")
-                }),
+                Arc::new(MockProvider::failing("primary", "mock-primary")),
                 Arc::new(MockProvider::reply(
                     "secondary",
                     "mock-secondary",
@@ -2320,12 +2379,7 @@ mod tests {
         let sessions =
             Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config
-            .agents
-            .agents
-            .get_mut(&AgentId::default_agent())
-            .unwrap()
-            .tools = vec!["session_inspect".into()];
+        default_agent_mut(&mut config).tools = vec!["session_inspect".into()];
         let runtime = Runtime::from_providers(
             &config,
             sessions.clone() as Arc<dyn SessionStore>,
@@ -2465,18 +2519,12 @@ mod tests {
                 .expect("sessions should open"),
         );
         let mut config = FrankClawConfig::default();
-        let agent = config
-            .agents
-            .agents
-            .get_mut(&AgentId::default_agent())
-            .unwrap();
+        let agent = default_agent_mut(&mut config);
         agent.workspace = Some(workspace.clone());
         agent.system_prompt = Some("Base system".into());
         agent.skills = vec!["briefing".into()];
 
-        let provider = Arc::new(MockProvider {
-            ..MockProvider::reply("primary", "mock-primary", "reply")
-        });
+        let provider = Arc::new(MockProvider::reply("primary", "mock-primary", "reply"));
         let runtime = Runtime::from_providers(
             &config,
             sessions as Arc<dyn SessionStore>,
@@ -2529,12 +2577,7 @@ mod tests {
         let sessions =
             Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config
-            .agents
-            .agents
-            .get_mut(&AgentId::default_agent())
-            .unwrap()
-            .tools = vec!["session_inspect".into()];
+        default_agent_mut(&mut config).tools = vec!["session_inspect".into()];
 
         let provider = Arc::new(MockProvider::scripted(
             "primary",
@@ -2600,24 +2643,24 @@ mod tests {
                 .metadata
                 .as_ref()
                 .and_then(|metadata| metadata["tool_calls"].as_array())
-                .map(|calls| calls.len()),
+                .map(std::vec::Vec::len),
             Some(1)
         );
         assert!(transcript[2].content.contains("\"session\""));
 
-        let seen = provider
-            .seen_requests
-            .lock()
-            .expect("request capture should lock");
-        assert_eq!(seen.len(), 2);
-        // Agent has 1 tool + spawn_subagent injected by runtime.
-        assert_eq!(seen[0].tools.len(), 2);
-        assert!(seen[0].tools.iter().any(|t| t.name == "session_inspect"));
-        assert!(
-            seen[1].messages.iter().any(
+        {
+            let seen = provider
+                .seen_requests
+                .lock()
+                .expect("request capture should lock");
+            assert_eq!(seen.len(), 2);
+            // Agent has 1 tool + spawn_subagent injected by runtime.
+            assert_eq!(seen[0].tools.len(), 2);
+            assert!(seen[0].tools.iter().any(|t| t.name == "session_inspect"));
+            assert!(seen[1].messages.iter().any(
                 |message| message.role == Role::Tool && message.content.contains("\"entries\"")
-            )
-        );
+            ));
+        }
 
         let activity = runtime
             .tool_activity(&response.session_key, 10)
@@ -2640,12 +2683,7 @@ mod tests {
         let sessions: Arc<dyn SessionStore> =
             Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config
-            .agents
-            .agents
-            .get_mut(&AgentId::default_agent())
-            .unwrap()
-            .tools = vec!["session_inspect".into()];
+        default_agent_mut(&mut config).tools = vec!["session_inspect".into()];
 
         // First response: tool call with invalid JSON args.
         // Second response: model sees the error result and replies with text.
@@ -2724,12 +2762,7 @@ mod tests {
         let sessions =
             Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config
-            .agents
-            .agents
-            .get_mut(&AgentId::default_agent())
-            .unwrap()
-            .tools = vec!["session_inspect".into()];
+        default_agent_mut(&mut config).tools = vec!["session_inspect".into()];
         let tool_calls = (0..9)
             .map(|index| ToolCallResponse {
                 id: format!("call-{index}"),
@@ -2839,16 +2872,11 @@ mod tests {
         let sessions =
             Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config
-            .agents
-            .agents
-            .get_mut(&AgentId::default_agent())
-            .unwrap()
-            .tools = vec!["session_inspect".into()];
+        default_agent_mut(&mut config).tools = vec!["session_inspect".into()];
 
         // Model keeps calling same tool with same args every round.
         let mut responses = Vec::new();
-        for _ in 0..MAX_TOOL_ROUNDS + 1 {
+        for _ in 0..=MAX_TOOL_ROUNDS {
             responses.push(Some(MockResponse {
                 content: String::new(),
                 tool_calls: vec![ToolCallResponse {
@@ -2937,12 +2965,7 @@ mod tests {
         let sessions =
             Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config
-            .agents
-            .agents
-            .get_mut(&AgentId::default_agent())
-            .unwrap()
-            .tools = vec!["session_inspect".into()];
+        default_agent_mut(&mut config).tools = vec!["session_inspect".into()];
 
         // Round 1: model returns text + tool call
         // Round 2: model returns final response (no tool calls)
@@ -2999,10 +3022,10 @@ mod tests {
         // The intermediate text from round 1 should have been streamed.
         let mut received_intermediate = false;
         while let Ok(delta) = rx.try_recv() {
-            if let StreamDelta::Text(text) = delta {
-                if text.contains("Let me check") {
-                    received_intermediate = true;
-                }
+            if let StreamDelta::Text(text) = delta
+                && text.contains("Let me check")
+            {
+                received_intermediate = true;
             }
         }
         assert!(
@@ -3022,12 +3045,7 @@ mod tests {
         let sessions =
             Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config
-            .agents
-            .agents
-            .get_mut(&AgentId::default_agent())
-            .unwrap()
-            .tools = vec!["session_inspect".into()];
+        default_agent_mut(&mut config).tools = vec!["session_inspect".into()];
 
         // Round 1: tool call with large output that should trigger mid-loop compaction
         // Round 2: final response
@@ -3214,7 +3232,10 @@ mod tests {
             .await
             .expect("chat should succeed");
 
-        let seen = mock.seen_requests.lock().unwrap();
+        let seen = mock
+            .seen_requests
+            .lock()
+            .expect("request capture should lock");
         assert_eq!(seen.len(), 1);
         let system = seen[0]
             .system
@@ -3277,7 +3298,10 @@ mod tests {
             .await
             .expect("chat should succeed");
 
-        let seen = mock.seen_requests.lock().unwrap();
+        let seen = mock
+            .seen_requests
+            .lock()
+            .expect("request capture should lock");
         assert_eq!(seen.len(), 1);
         let system = seen[0]
             .system
@@ -3299,48 +3323,6 @@ mod tests {
             frankclaw_sessions::SqliteSessionStore::open(&temp, None)
                 .expect("sessions should open"),
         );
-
-        // Use a provider that sleeps to simulate a slow model call.
-        struct SlowProvider;
-
-        #[async_trait::async_trait]
-        impl ModelProvider for SlowProvider {
-            fn id(&self) -> &str {
-                "slow"
-            }
-
-            async fn complete(
-                &self,
-                _request: CompletionRequest,
-                _stream_tx: Option<tokio::sync::mpsc::Sender<StreamDelta>>,
-            ) -> frankclaw_core::error::Result<CompletionResponse> {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                Ok(CompletionResponse {
-                    content: "should not reach".into(),
-                    tool_calls: Vec::new(),
-                    usage: Usage::default(),
-                    finish_reason: FinishReason::Stop,
-                })
-            }
-
-            async fn list_models(&self) -> frankclaw_core::error::Result<Vec<ModelDef>> {
-                Ok(vec![ModelDef {
-                    id: "slow-model".into(),
-                    name: "slow-model".into(),
-                    api: frankclaw_core::model::ModelApi::Ollama,
-                    reasoning: false,
-                    input: vec![frankclaw_core::model::InputModality::Text],
-                    cost: Default::default(),
-                    context_window: 4096,
-                    max_output_tokens: 1024,
-                    compat: Default::default(),
-                }])
-            }
-
-            async fn health(&self) -> bool {
-                true
-            }
-        }
 
         let config = FrankClawConfig::default();
         let runtime =
@@ -3385,7 +3367,7 @@ mod tests {
         // The slow provider won't return TurnCancelled — it will be a provider error
         // because the cancellation check happens between rounds, not during the model call.
         // But the test validates that the cancel_token field works end-to-end.
-        assert!(result.is_err());
+        let _err = result.expect_err("cancellation should end the chat with an error");
 
         let _ = std::fs::remove_file(temp);
     }
@@ -3414,10 +3396,12 @@ mod tests {
     #[test]
     fn bootstrap_reads_existing_files() {
         let dir = std::env::temp_dir().join(format!("fc-bootstrap-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("bootstrap test dir should be created");
 
-        std::fs::write(dir.join("SOUL.md"), "You are a helpful assistant.").unwrap();
-        std::fs::write(dir.join("IDENTITY.md"), "Name: TestBot").unwrap();
+        std::fs::write(dir.join("SOUL.md"), "You are a helpful assistant.")
+            .expect("SOUL.md should be written");
+        std::fs::write(dir.join("IDENTITY.md"), "Name: TestBot")
+            .expect("IDENTITY.md should be written");
 
         let result = read_workspace_bootstrap_files(&dir);
         assert!(result.contains("# Workspace Context"));
@@ -3432,7 +3416,7 @@ mod tests {
     #[test]
     fn bootstrap_skips_missing_files() {
         let dir = std::env::temp_dir().join(format!("fc-bootstrap-empty-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("empty bootstrap test dir should be created");
 
         let result = read_workspace_bootstrap_files(&dir);
         assert!(result.is_empty());
@@ -3443,13 +3427,13 @@ mod tests {
     #[test]
     fn bootstrap_strips_yaml_front_matter() {
         let dir = std::env::temp_dir().join(format!("fc-bootstrap-yaml-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("yaml bootstrap test dir should be created");
 
         std::fs::write(
             dir.join("SOUL.md"),
             "---\ntitle: Soul\nauthor: test\n---\nActual content here.",
         )
-        .unwrap();
+        .expect("SOUL.md should be written");
 
         let result = read_workspace_bootstrap_files(&dir);
         assert!(result.contains("Actual content here."));
@@ -3461,11 +3445,12 @@ mod tests {
     #[test]
     fn bootstrap_truncates_large_files() {
         let dir = std::env::temp_dir().join(format!("fc-bootstrap-big-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("large bootstrap test dir should be created");
 
         // Write a file larger than MAX_BOOTSTRAP_FILE_BYTES (50KB)
         let large_content = "A".repeat(60 * 1024);
-        std::fs::write(dir.join("SOUL.md"), &large_content).unwrap();
+        std::fs::write(dir.join("SOUL.md"), &large_content)
+            .expect("large SOUL.md should be written");
 
         let result = read_workspace_bootstrap_files(&dir);
         assert!(result.contains("[... truncated, file too large ...]"));

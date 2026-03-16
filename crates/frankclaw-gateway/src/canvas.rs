@@ -136,10 +136,18 @@ impl CanvasStore {
         "main".to_string()
     }
 
+    #[expect(
+        clippy::same_name_method,
+        reason = "external gateway callers and the CanvasService trait intentionally share these method names"
+    )]
     pub async fn get(&self, canvas_id: &str) -> Option<CanvasDocument> {
         self.documents.read().await.get(canvas_id).cloned()
     }
 
+    #[expect(
+        clippy::same_name_method,
+        reason = "external gateway callers and the CanvasService trait intentionally share these method names"
+    )]
     pub async fn set(&self, mut document: CanvasDocument) -> Result<CanvasDocument> {
         validate_document_size(&document)?;
         let mut documents = self.documents.write().await;
@@ -151,6 +159,10 @@ impl CanvasStore {
         Ok(document)
     }
 
+    #[expect(
+        clippy::same_name_method,
+        reason = "external gateway callers and the CanvasService trait intentionally share these method names"
+    )]
     pub async fn patch(&self, canvas_id: &str, patch: CanvasPatch) -> Result<CanvasDocument> {
         let mut documents = self.documents.write().await;
         let existing = documents
@@ -205,6 +217,10 @@ impl CanvasStore {
         Ok(document)
     }
 
+    #[expect(
+        clippy::same_name_method,
+        reason = "external gateway callers and the CanvasService trait intentionally share these method names"
+    )]
     pub async fn clear(&self, canvas_id: &str) {
         self.documents.write().await.remove(canvas_id);
     }
@@ -473,7 +489,8 @@ mod tests {
                 },
             ],
             revision: 3,
-            updated_at: chrono::DateTime::from_timestamp(1_710_000_000, 0).unwrap(),
+            updated_at: chrono::DateTime::from_timestamp(1_710_000_000, 0)
+                .expect("fixed test timestamp should be valid"),
         };
 
         let export = export_document(&document, CanvasExportFormat::Markdown);
@@ -511,7 +528,8 @@ mod tests {
                 },
             ],
             revision: 1,
-            updated_at: chrono::DateTime::from_timestamp(1_710_000_123, 0).unwrap(),
+            updated_at: chrono::DateTime::from_timestamp(1_710_000_123, 0)
+                .expect("fixed test timestamp should be valid"),
         };
 
         let export = export_document(&document, CanvasExportFormat::Markdown);
@@ -536,13 +554,17 @@ mod tests {
             })
             .await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("size exceeds limit"));
+        assert!(
+            err.expect_err("oversized document should be rejected")
+                .to_string()
+                .contains("size exceeds limit")
+        );
     }
 
     #[tokio::test]
     async fn block_count_limit_rejects_excess_blocks() {
         let store = CanvasStore::new();
-        let blocks: Vec<CanvasBlock> = (0..MAX_BLOCKS_PER_DOCUMENT + 1)
+        let blocks: Vec<CanvasBlock> = (0..=MAX_BLOCKS_PER_DOCUMENT)
             .map(|i| CanvasBlock {
                 kind: CanvasBlockKind::Markdown,
                 text: format!("block-{i}"),
@@ -559,7 +581,11 @@ mod tests {
             )
             .await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("block count exceeds"));
+        assert!(
+            err.expect_err("too many blocks should be rejected")
+                .to_string()
+                .contains("block count exceeds")
+        );
     }
 
     #[tokio::test]
@@ -604,7 +630,11 @@ mod tests {
             )
             .await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("revision conflict"));
+        assert!(
+            err.expect_err("stale revision should be rejected")
+                .to_string()
+                .contains("revision conflict")
+        );
     }
 
     #[test]
@@ -634,7 +664,8 @@ mod tests {
                 meta: None,
             }],
             revision: 1,
-            updated_at: chrono::DateTime::from_timestamp(1_710_000_000, 0).unwrap(),
+            updated_at: chrono::DateTime::from_timestamp(1_710_000_000, 0)
+                .expect("fixed test timestamp should be valid"),
         };
         let export = export_document(&document, CanvasExportFormat::Markdown);
         assert!(!export.contains("<script>"));

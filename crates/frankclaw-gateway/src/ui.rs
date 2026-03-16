@@ -6,7 +6,7 @@ use axum::response::Html;
 )]
 pub async fn index() -> Html<&'static str> {
     Html(
-        r##"<!doctype html>
+        r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -2075,6 +2075,6 @@ pub async fn index() -> Html<&'static str> {
   <div data-controller="system" class="hidden"></div>
 
 </body>
-</html>"##,
+</html>"#,
     )
 }

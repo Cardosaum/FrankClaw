@@ -87,7 +87,7 @@ impl Tool for WebFetchTool {
 
         let max_chars = args
             .get("max_chars")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(50_000)
             .clamp(100, MAX_FETCH_CHARS as u64) as usize;
 
@@ -198,14 +198,13 @@ impl Tool for WebSearchTool {
 
         if query.len() > MAX_SEARCH_QUERY {
             return Err(invalid_request_err(format!(
-                "web.search query exceeds {} char limit",
-                MAX_SEARCH_QUERY
+                "web.search query exceeds {MAX_SEARCH_QUERY} char limit"
             )));
         }
 
         let count = args
             .get("count")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(5)
             .clamp(1, 10);
 
@@ -273,7 +272,7 @@ mod tests {
 
     #[test]
     fn extract_html_title_basic() {
-        let html = r#"<html><head><title>Hello World</title></head><body></body></html>"#;
+        let html = "<html><head><title>Hello World</title></head><body></body></html>";
         assert_eq!(extract_html_title(html), Some("Hello World".into()));
     }
 

@@ -5,7 +5,7 @@
 //! Converts Chrome DevTools Protocol `Accessibility.getFullAXTree` responses
 //! into a compact, indented text representation with element references.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Write as _};
 
 /// Reference to an ARIA element by role and name.
 #[derive(Debug, Clone)]
@@ -196,8 +196,7 @@ pub fn build_role_snapshot(
         .filter(|n| {
             n.parent_id
                 .as_deref()
-                .map(|pid| !node_map.contains_key(pid))
-                .unwrap_or(true)
+                .is_none_or(|pid| !node_map.contains_key(pid))
         })
         .map(|n| n.node_id.as_str())
         .collect();
@@ -220,20 +219,25 @@ pub fn build_role_snapshot(
         }
     }
 
+    let mut render_state = RenderState {
+        output: &mut output,
+        refs: &mut refs,
+        ref_counter: &mut ref_counter,
+        role_name_counts: &role_name_counts,
+    };
+
     for root_id in &roots {
-        render_node(
-            root_id,
-            &node_map,
-            options,
-            0,
-            &mut output,
-            &mut refs,
-            &mut ref_counter,
-            &role_name_counts,
-        );
+        render_node(root_id, &node_map, options, 0, &mut render_state);
     }
 
     (output, refs)
+}
+
+struct RenderState<'render> {
+    output: &'render mut String,
+    refs: &'render mut RoleRefMap,
+    ref_counter: &'render mut usize,
+    role_name_counts: &'render HashMap<(String, String), usize>,
 }
 
 fn render_node(
@@ -241,10 +245,7 @@ fn render_node(
     node_map: &HashMap<&str, &AXNode>,
     options: &AriaSnapshotOptions,
     depth: usize,
-    output: &mut String,
-    refs: &mut RoleRefMap,
-    ref_counter: &mut usize,
-    role_name_counts: &HashMap<(String, String), usize>,
+    render_state: &mut RenderState<'_>,
 ) {
     if depth > options.max_depth {
         return;
@@ -274,27 +275,30 @@ fn render_node(
 
     if should_print {
         let indent = "  ".repeat(depth);
-        *ref_counter += 1;
-        let ref_id = format!("e{}", *ref_counter);
+        *render_state.ref_counter += 1;
+        let ref_id = format!("e{}", *render_state.ref_counter);
 
-        let nth = if !name.is_empty() {
+        let nth = if name.is_empty() {
+            None
+        } else {
             let key = (role.clone(), name.clone());
-            let count = role_name_counts.get(&key).copied().unwrap_or(1);
-            if count > 1 {
+            let count = render_state
+                .role_name_counts
+                .get(&key)
+                .copied()
+                .unwrap_or(1);
+            (count > 1).then(|| {
                 // Count how many we've assigned so far
-                let assigned = refs
+                let assigned = render_state
+                    .refs
                     .values()
                     .filter(|r| r.role == *role && r.name == *name)
                     .count();
-                Some(assigned + 1)
-            } else {
-                None
-            }
-        } else {
-            None
+                assigned + 1
+            })
         };
 
-        refs.insert(
+        render_state.refs.insert(
             ref_id.clone(),
             RoleRef {
                 role: role.clone(),
@@ -317,9 +321,10 @@ fn render_node(
 
         let nth_part = nth.map(|n| format!(" nth={n}")).unwrap_or_default();
 
-        output.push_str(&format!(
-            "{indent}- {role}{name_part}{value_part} [ref={ref_id}]{nth_part}\n"
-        ));
+        let _ = writeln!(
+            render_state.output,
+            "{indent}- {role}{name_part}{value_part} [ref={ref_id}]{nth_part}"
+        );
     }
 
     // Recurse into children
@@ -329,10 +334,7 @@ fn render_node(
             node_map,
             options,
             if should_print { depth + 1 } else { depth },
-            output,
-            refs,
-            ref_counter,
-            role_name_counts,
+            render_state,
         );
     }
 }
@@ -382,7 +384,7 @@ mod tests {
                 }
             ]"#,
         )
-        .unwrap()
+        .expect("sample accessibility tree JSON should deserialize")
     }
 
     #[test]
@@ -460,7 +462,7 @@ mod tests {
                 }
             ]"#,
         )
-        .unwrap();
+        .expect("duplicate role-name tree JSON should deserialize");
 
         let options = AriaSnapshotOptions::default();
         let (tree, refs) = build_role_snapshot(&nodes, &options);
@@ -468,8 +470,7 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert!(tree.contains("nth="));
         // Both should have nth disambiguation
-        let with_nth: Vec<_> = refs.values().filter(|r| r.nth.is_some()).collect();
-        assert_eq!(with_nth.len(), 2);
+        assert_eq!(refs.values().filter(|r| r.nth.is_some()).count(), 2);
     }
 
     #[test]
@@ -499,7 +500,7 @@ mod tests {
                 }
             ]"#,
         )
-        .unwrap();
+        .expect("ignored-node tree JSON should deserialize");
 
         let (tree, refs) = build_role_snapshot(&nodes, &AriaSnapshotOptions::default());
         assert!(refs.is_empty());

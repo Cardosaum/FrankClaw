@@ -73,7 +73,7 @@ impl AcpServer {
     /// Handle a single JSON-RPC request.
     pub async fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         match req.method.as_str() {
-            "initialize" => self.handle_initialize(req),
+            "initialize" => Self::handle_initialize(req),
             "newSession" => self.handle_new_session(req),
             "loadSession" => self.handle_load_session(req),
             "prompt" => self.handle_prompt(req).await,
@@ -87,7 +87,7 @@ impl AcpServer {
         }
     }
 
-    fn handle_initialize(&self, req: JsonRpcRequest) -> JsonRpcResponse {
+    fn handle_initialize(req: JsonRpcRequest) -> JsonRpcResponse {
         JsonRpcResponse::success(
             req.id,
             serde_json::json!({
@@ -167,6 +167,10 @@ impl AcpServer {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "request validation, streaming, and session management are intentionally kept together"
+    )]
     async fn handle_prompt(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         let session_id = req
             .params
@@ -217,12 +221,12 @@ impl AcpServer {
             max_tokens: req
                 .params
                 .get("maxTokens")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .map(|n| n as u32),
             temperature: req
                 .params
                 .get("temperature")
-                .and_then(|v| v.as_f64())
+                .and_then(serde_json::Value::as_f64)
                 .map(|f| f as f32),
             stream_tx: Some(stream_tx),
             thinking_budget: None,
@@ -254,7 +258,7 @@ impl AcpServer {
                     StreamDelta::Error(msg) => {
                         serde_json::json!({"type": "error", "message": msg})
                     }
-                    _ => continue,
+                    StreamDelta::ToolCallDelta { .. } => continue,
                 };
                 // Write event as NDJSON (best-effort).
                 let _ = acp_transport::write_response(&JsonRpcResponse {
@@ -271,11 +275,11 @@ impl AcpServer {
         match chat_result {
             Ok(resp) => {
                 // Update session key if created.
-                if !session_id.is_empty() {
-                    if let Some(mut entry) = self.sessions.get_mut(session_id) {
-                        entry.session_key = resp.session_key.clone();
-                        entry.last_touched = Instant::now();
-                    }
+                if !session_id.is_empty()
+                    && let Some(mut entry) = self.sessions.get_mut(session_id)
+                {
+                    entry.session_key = resp.session_key.clone();
+                    entry.last_touched = Instant::now();
                 }
 
                 JsonRpcResponse::success(
@@ -311,7 +315,7 @@ impl AcpServer {
             .params
             .get("arguments")
             .cloned()
-            .unwrap_or(serde_json::json!({}));
+            .unwrap_or_else(|| serde_json::json!({}));
 
         let session_id = req
             .params
@@ -319,10 +323,10 @@ impl AcpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let session_key = if !session_id.is_empty() {
-            self.sessions.get(session_id).map(|e| e.session_key.clone())
-        } else {
+        let session_key = if session_id.is_empty() {
             None
+        } else {
+            self.sessions.get(session_id).map(|e| e.session_key.clone())
         };
 
         let tool_request = frankclaw_runtime::ToolRequest {
@@ -408,8 +412,12 @@ mod tests {
             AcpSession {
                 session_id: "old".to_string(),
                 session_key: SessionKey::from_raw("acp:old".to_string()),
-                created_at: Instant::now() - Duration::from_secs(100),
-                last_touched: Instant::now() - Duration::from_secs(100),
+                created_at: Instant::now()
+                    .checked_sub(Duration::from_secs(100))
+                    .expect("recent instant subtraction should succeed"),
+                last_touched: Instant::now()
+                    .checked_sub(Duration::from_secs(100))
+                    .expect("recent instant subtraction should succeed"),
             },
         );
 
@@ -423,8 +431,12 @@ mod tests {
     #[test]
     fn session_lru_eviction() {
         let sessions: DashMap<String, AcpSession> = DashMap::new();
-        let old = Instant::now() - Duration::from_secs(200);
-        let recent = Instant::now() - Duration::from_secs(10);
+        let old = Instant::now()
+            .checked_sub(Duration::from_secs(200))
+            .expect("recent instant subtraction should succeed");
+        let recent = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("recent instant subtraction should succeed");
 
         sessions.insert(
             "old".to_string(),
@@ -465,7 +477,9 @@ mod tests {
         let window_duration = Duration::from_secs(10);
 
         for _ in 0..3 {
-            let mut guard = window.lock().unwrap();
+            let mut guard = window
+                .lock()
+                .expect("rate limiter test lock should succeed");
             let now = Instant::now();
             if now.duration_since(guard.0) > window_duration {
                 *guard = (now, 1);
@@ -476,7 +490,9 @@ mod tests {
         }
 
         // 4th should exceed.
-        let guard = window.lock().unwrap();
+        let guard = window
+            .lock()
+            .expect("rate limiter test lock should succeed");
         assert!(guard.1 >= limit);
     }
 

@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
-/// Terminal color and table rendering utilities.
-///
-/// Respects `NO_COLOR` env and `TERM=dumb` conventions.
+//! Terminal color and table rendering utilities.
+//!
+//! Respects `NO_COLOR` env and `TERM=dumb` conventions.
 
 /// ANSI 256-color codes used throughout the CLI.
 pub mod colors {
@@ -19,10 +19,10 @@ pub fn is_color_enabled() -> bool {
     if std::env::var("NO_COLOR").is_ok() {
         return false;
     }
-    if let Ok(term) = std::env::var("TERM") {
-        if term == "dumb" {
-            return false;
-        }
+    if let Ok(term) = std::env::var("TERM")
+        && term == "dumb"
+    {
+        return false;
     }
     true
 }

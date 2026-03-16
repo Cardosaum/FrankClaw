@@ -467,7 +467,7 @@ mod tests {
             &SandboxMode::None,
         )
         .await
-        .unwrap();
+        .expect("echo command should execute successfully");
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout.trim(), "hello");
         assert!(result.stderr.is_empty());
@@ -478,7 +478,7 @@ mod tests {
     async fn execute_with_exit_code() {
         let result = execute_command("exit 42", None, Duration::from_secs(10), &SandboxMode::None)
             .await
-            .unwrap();
+            .expect("exit command should return an exit code");
         assert_eq!(result.exit_code, Some(42));
     }
 
@@ -491,7 +491,7 @@ mod tests {
             &SandboxMode::None,
         )
         .await
-        .unwrap();
+        .expect("stderr command should execute successfully");
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stderr.trim(), "error");
     }
@@ -500,7 +500,7 @@ mod tests {
     async fn execute_with_timeout() {
         let result = execute_command("sleep 60", None, Duration::from_secs(1), &SandboxMode::None)
             .await
-            .unwrap();
+            .expect("sleep command should return a timeout result");
         assert!(result.exit_code.is_none());
         assert!(result.stderr.contains("timed out"));
     }
@@ -514,7 +514,7 @@ mod tests {
             &SandboxMode::None,
         )
         .await
-        .unwrap();
+        .expect("pwd command should execute successfully");
         assert_eq!(result.exit_code, Some(0));
         // On some systems /tmp may be a symlink.
         let output = result.stdout.trim();
@@ -526,7 +526,10 @@ mod tests {
         let tool = BashTool::new(BashPolicy::DenyAll);
         let args = serde_json::json!({ "command": "echo hello" });
         let ctx = test_context();
-        let err = tool.invoke(args, ctx).await.unwrap_err();
+        let err = tool
+            .invoke(args, ctx)
+            .await
+            .expect_err("deny-all policy should reject shell execution");
         assert!(err.to_string().contains("not allowed"));
     }
 
@@ -535,9 +538,17 @@ mod tests {
         let tool = BashTool::new(BashPolicy::AllowAll);
         let args = serde_json::json!({ "command": "echo test123" });
         let ctx = test_context();
-        let result = tool.invoke(args, ctx).await.unwrap();
+        let result = tool
+            .invoke(args, ctx)
+            .await
+            .expect("allow-all policy should permit shell execution");
         assert_eq!(result["exit_code"], 0);
-        assert!(result["stdout"].as_str().unwrap().contains("test123"));
+        assert!(
+            result["stdout"]
+                .as_str()
+                .expect("stdout should be serialized as a string")
+                .contains("test123")
+        );
     }
 
     #[test]
@@ -571,7 +582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires ai-jail installed and not already inside a sandbox
+    #[ignore = "requires ai-jail installed and not already inside a sandbox"]
     async fn execute_echo_in_sandbox() {
         if !SandboxMode::is_available() {
             return;
@@ -583,7 +594,7 @@ mod tests {
             &SandboxMode::AiJail,
         )
         .await
-        .unwrap();
+        .expect("sandboxed echo command should execute when ai-jail is available");
         // If we're already inside a bwrap sandbox, nesting fails — skip gracefully.
         if result.exit_code == Some(1) && result.stderr.contains("bwrap") {
             eprintln!("skipping: already inside a bwrap sandbox, cannot nest");

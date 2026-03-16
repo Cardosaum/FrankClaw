@@ -94,19 +94,22 @@ mod tests {
         // Attempt 0: base 1000ms, jitter ±250ms → 750..1250
         for _ in 0..100 {
             let d = retry_backoff_delay(0).as_millis();
-            assert!(d >= 750 && d <= 1250, "attempt 0 delay {d}ms out of range");
+            assert!(
+                (750..=1250).contains(&d),
+                "attempt 0 delay {d}ms out of range"
+            );
         }
     }
 
     #[test]
     fn backoff_delay_increases_exponentially() {
         // Average of attempt 1 should be roughly 2x attempt 0.
-        let avg_0: u128 = (0..100)
-            .map(|_| retry_backoff_delay(0).as_millis())
+        let avg_0: u128 = std::iter::repeat_with(|| retry_backoff_delay(0).as_millis())
+            .take(100)
             .sum::<u128>()
             / 100;
-        let avg_1: u128 = (0..100)
-            .map(|_| retry_backoff_delay(1).as_millis())
+        let avg_1: u128 = std::iter::repeat_with(|| retry_backoff_delay(1).as_millis())
+            .take(100)
             .sum::<u128>()
             / 100;
         assert!(

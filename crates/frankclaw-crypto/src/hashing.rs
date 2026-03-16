@@ -66,22 +66,22 @@ mod tests {
     #[test]
     fn hash_and_verify() {
         let pw = SecretString::from("my-secure-password");
-        let hash = hash_password(&pw).unwrap();
-        assert!(verify_password(&pw, &hash).unwrap());
+        let hash = hash_password(&pw).expect("hashing should succeed");
+        assert!(verify_password(&pw, &hash).expect("verification should succeed"));
     }
 
     #[test]
     fn wrong_password_fails() {
         let pw = SecretString::from("correct");
         let wrong = SecretString::from("wrong");
-        let hash = hash_password(&pw).unwrap();
-        assert!(!verify_password(&wrong, &hash).unwrap());
+        let hash = hash_password(&pw).expect("hashing should succeed");
+        assert!(!verify_password(&wrong, &hash).expect("verification should succeed"));
     }
 
     #[test]
     fn hash_format_is_phc() {
         let pw = SecretString::from("test");
-        let hash = hash_password(&pw).unwrap();
+        let hash = hash_password(&pw).expect("hashing should succeed");
         assert!(hash.as_str().starts_with("$argon2id$"));
     }
 }

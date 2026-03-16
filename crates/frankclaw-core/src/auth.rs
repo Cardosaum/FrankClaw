@@ -150,14 +150,12 @@ mod tests {
         let json = serde_json::to_string(&auth).expect("token mode should serialize");
         let decoded: AuthMode = serde_json::from_str(&json).expect("token mode should deserialize");
 
-        match decoded {
-            AuthMode::Token { token } => {
-                assert_eq!(
-                    token.expect("token should be present").expose_secret(),
-                    "secret-token"
-                );
-            }
-            other => panic!("unexpected auth mode: {other:?}"),
+        assert!(matches!(decoded, AuthMode::Token { .. }));
+        if let AuthMode::Token { token } = decoded {
+            assert_eq!(
+                token.expect("token should be present").expose_secret(),
+                "secret-token"
+            );
         }
     }
 

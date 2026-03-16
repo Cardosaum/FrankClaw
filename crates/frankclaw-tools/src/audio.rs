@@ -38,7 +38,7 @@ fn audio_mime_from_extension(path: &Path) -> Result<&'static str> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .unwrap_or_default();
     SUPPORTED_AUDIO
         .iter()
@@ -99,7 +99,7 @@ impl Tool for AudioTranscribeTool {
         let path_str = args
             .get("path")
             .and_then(|v| v.as_str())
-            .map(|s| s.trim())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| invalid_request_err("audio.transcribe requires a 'path' string"))?;
 
@@ -108,7 +108,7 @@ impl Tool for AudioTranscribeTool {
 
         let metadata = tokio::fs::metadata(&resolved)
             .await
-            .map_err(|e| agent_runtime_err(format!("failed to read '{}': {e}", path_str)))?;
+            .map_err(|e| agent_runtime_err(format!("failed to read '{path_str}': {e}")))?;
 
         if metadata.len() > MAX_AUDIO_BYTES {
             return Err(invalid_request_err(format!(
@@ -120,7 +120,7 @@ impl Tool for AudioTranscribeTool {
 
         let bytes = tokio::fs::read(&resolved)
             .await
-            .map_err(|e| agent_runtime_err(format!("failed to read audio '{}': {e}", path_str)))?;
+            .map_err(|e| agent_runtime_err(format!("failed to read audio '{path_str}': {e}")))?;
 
         let filename = resolved
             .file_name()
@@ -144,19 +144,25 @@ mod tests {
     #[test]
     fn audio_mime_mp3() {
         let path = Path::new("voice.mp3");
-        assert_eq!(audio_mime_from_extension(path).unwrap(), "audio/mpeg");
+        assert_eq!(
+            audio_mime_from_extension(path).expect("mp3 extension should be supported"),
+            "audio/mpeg"
+        );
     }
 
     #[test]
     fn audio_mime_wav() {
         let path = Path::new("recording.WAV");
-        assert_eq!(audio_mime_from_extension(path).unwrap(), "audio/wav");
+        assert_eq!(
+            audio_mime_from_extension(path).expect("wav extension should be supported"),
+            "audio/wav"
+        );
     }
 
     #[test]
     fn audio_mime_unsupported() {
         let path = Path::new("video.mp4");
-        assert!(audio_mime_from_extension(path).is_err());
+        audio_mime_from_extension(path).expect_err("mp4 should be rejected");
     }
 
     #[test]

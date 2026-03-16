@@ -50,7 +50,8 @@ fn authenticate_bearer(
 
     // Use a no-op rate limiter for the API path — the main rate limiter
     // requires SocketAddr which we don't always have here.
-    let limiter = crate::rate_limit::AuthRateLimiter::new(Default::default());
+    let limiter =
+        crate::rate_limit::AuthRateLimiter::new(frankclaw_core::auth::RateLimitConfig::default());
     match crate::auth::authenticate(&config.gateway.auth, &credential, None, &limiter) {
         Ok(_) => Ok(()),
         Err(_) => Err((
@@ -214,7 +215,7 @@ pub async fn chat_completions_handler(
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
     if stream {
-        handle_streaming(state, body, message, request_id, cancel_token).await
+        handle_streaming(state, body, message, request_id, cancel_token)
     } else {
         handle_non_streaming(state, body, message, request_id, cancel_token).await
     }
@@ -279,7 +280,11 @@ async fn handle_non_streaming(
     }
 }
 
-async fn handle_streaming(
+#[expect(
+    clippy::too_many_lines,
+    reason = "SSE translation is easier to follow in one OpenAI-compat handler"
+)]
+fn handle_streaming(
     state: Arc<GatewayState>,
     body: ChatCompletionRequest,
     message: String,
@@ -387,7 +392,7 @@ async fn handle_streaming(
                     let err = serde_json::json!({
                         "error": { "message": msg, "type": "server_error" }
                     });
-                    let _ = sse_tx.send(Ok(format!("data: {}\n\n", err))).await;
+                    let _ = sse_tx.send(Ok(format!("data: {err}\n\n"))).await;
                     break;
                 }
                 // Skip tool-related deltas — the OpenAI compat API is text-only.
@@ -448,7 +453,7 @@ mod tests {
     #[test]
     fn error_response_serializes_correctly() {
         let err = ErrorResponse::new("invalid_request_error", "test message");
-        let json = serde_json::to_value(&err).unwrap();
+        let json = serde_json::to_value(&err).expect("error response should serialize");
         assert_eq!(json["error"]["type"], "invalid_request_error");
         assert_eq!(json["error"]["message"], "test message");
     }
@@ -474,7 +479,7 @@ mod tests {
                 total_tokens: 15,
             },
         };
-        let json = serde_json::to_value(&resp).unwrap();
+        let json = serde_json::to_value(&resp).expect("chat completion response should serialize");
         assert_eq!(json["object"], "chat.completion");
         assert_eq!(json["choices"][0]["message"]["role"], "assistant");
         assert_eq!(json["choices"][0]["finish_reason"], "stop");
@@ -497,7 +502,7 @@ mod tests {
                 finish_reason: None,
             }],
         };
-        let json = serde_json::to_value(&chunk).unwrap();
+        let json = serde_json::to_value(&chunk).expect("stream chunk should serialize");
         assert_eq!(json["object"], "chat.completion.chunk");
         assert_eq!(json["choices"][0]["delta"]["content"], "Hello");
         assert!(json["choices"][0]["delta"].get("role").is_none());
@@ -515,7 +520,7 @@ mod tests {
                 owned_by: "openai".into(),
             }],
         };
-        let json = serde_json::to_value(&resp).unwrap();
+        let json = serde_json::to_value(&resp).expect("models response should serialize");
         assert_eq!(json["object"], "list");
         assert_eq!(json["data"][0]["id"], "gpt-4");
         assert_eq!(json["data"][0]["object"], "model");

@@ -1733,7 +1733,7 @@ mod tests {
     use frankclaw_channels::{ChannelSet, whatsapp::WhatsAppChannel};
     use frankclaw_core::channel::{ChannelPlugin, SendResult};
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
-    use frankclaw_core::error::{FrankClawError, Provider};
+    use frankclaw_core::error::Provider;
     use frankclaw_core::model::{
         CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi, ModelCompat,
         ModelCost, ModelDef, ModelProvider,
@@ -1865,7 +1865,7 @@ mod tests {
 
     #[async_trait]
     impl ModelProvider for MockProvider {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "mock"
         }
 
@@ -1920,7 +1920,7 @@ mod tests {
             }
         }
 
-        fn label(&self) -> &str {
+        fn label(&self) -> &'static str {
             self.label
         }
 
@@ -1994,18 +1994,18 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-frankclaw-password", HeaderValue::from_static("secret"));
 
-        match extract_credential(
+        let credential = extract_credential(
             &headers,
             None,
             &frankclaw_core::auth::AuthMode::Password {
                 hash: "hash".into(),
             },
-        ) {
-            AuthCredential::Password(password) => {
-                assert_eq!(password.expose_secret(), "secret");
-            }
-            _ => panic!("expected password credential"),
-        }
+        );
+        assert!(matches!(credential, AuthCredential::Password(_)));
+        let AuthCredential::Password(password) = credential else {
+            return;
+        };
+        assert_eq!(password.expose_secret(), "secret");
     }
 
     #[test]
@@ -2013,18 +2013,18 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-auth-user", HeaderValue::from_static("alice@example.com"));
 
-        match extract_credential(
+        let credential = extract_credential(
             &headers,
             None,
             &frankclaw_core::auth::AuthMode::TrustedProxy {
                 identity_header: "x-auth-user".into(),
             },
-        ) {
-            AuthCredential::ProxyIdentity(identity) => {
-                assert_eq!(identity, "alice@example.com");
-            }
-            _ => panic!("expected proxy identity"),
-        }
+        );
+        assert!(matches!(credential, AuthCredential::ProxyIdentity(_)));
+        let AuthCredential::ProxyIdentity(identity) = credential else {
+            return;
+        };
+        assert_eq!(identity, "alice@example.com");
     }
 
     #[test]
@@ -2036,18 +2036,18 @@ mod tests {
             identity: None,
         };
 
-        match extract_credential(
+        let credential = extract_credential(
             &headers,
             Some(&query),
             &frankclaw_core::auth::AuthMode::Token {
                 token: Some(secrecy::SecretString::from("expected".to_string())),
             },
-        ) {
-            AuthCredential::BearerToken(token) => {
-                assert_eq!(token.expose_secret(), "browser-token");
-            }
-            _ => panic!("expected token credential"),
-        }
+        );
+        assert!(matches!(credential, AuthCredential::BearerToken(_)));
+        let AuthCredential::BearerToken(token) = credential else {
+            return;
+        };
+        assert_eq!(token.expose_secret(), "browser-token");
     }
 
     #[tokio::test]
@@ -2272,6 +2272,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "HTTP roundtrip coverage is clearer as one end-to-end test"
+    )]
     #[tokio::test]
     async fn web_inbound_http_honors_explicit_session_and_returns_it() {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -2350,7 +2354,7 @@ mod tests {
                 .metadata
                 .as_ref()
                 .and_then(|metadata| metadata["attachments"].as_array())
-                .map(|attachments| attachments.len()),
+                .map(std::vec::Vec::len),
             Some(1)
         );
         assert_eq!(
@@ -2386,6 +2390,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "recipient filtering is best covered in one end-to-end route test"
+    )]
     #[tokio::test]
     async fn web_outbound_route_only_drains_messages_for_requested_recipient() {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -2972,6 +2980,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "WhatsApp webhook coverage is clearer as one end-to-end scenario"
+    )]
     #[tokio::test]
     async fn whatsapp_webhook_route_verifies_and_processes_inbound_messages() {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -3192,7 +3204,7 @@ mod tests {
 
     #[async_trait]
     impl ModelProvider for FailingProvider {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "failing"
         }
 

@@ -44,7 +44,7 @@ pub(crate) fn validate_workspace_path(workspace: &Path, requested: &str) -> Resu
 
     // Reject .. traversal.
     for component in Path::new(requested).components() {
-        if let std::path::Component::ParentDir = component {
+        if component == std::path::Component::ParentDir {
             return Err(invalid_request_err(
                 "file path must not contain '..' components",
             ));
@@ -132,16 +132,19 @@ impl Tool for FileReadTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| invalid_request_err("file.read requires a path"))?;
         let resolved = validate_workspace_path(workspace, path_str)?;
-        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let offset = args
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
         let limit = args
             .get("limit")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(2000)
             .clamp(1, 10000) as usize;
 
         let content = tokio::fs::read_to_string(&resolved)
             .await
-            .map_err(|e| agent_runtime_err(format!("failed to read file '{}': {e}", path_str)))?;
+            .map_err(|e| agent_runtime_err(format!("failed to read file '{path_str}': {e}")))?;
 
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
@@ -215,8 +218,7 @@ impl Tool for FileWriteTool {
 
         if content.len() > MAX_WRITE_BYTES {
             return Err(invalid_request_err(format!(
-                "file.write content exceeds {} byte limit",
-                MAX_WRITE_BYTES
+                "file.write content exceeds {MAX_WRITE_BYTES} byte limit"
             )));
         }
 
@@ -226,15 +228,14 @@ impl Tool for FileWriteTool {
         if let Some(parent) = resolved.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 agent_runtime_err(format!(
-                    "failed to create directories for '{}': {e}",
-                    path_str
+                    "failed to create directories for '{path_str}': {e}"
                 ))
             })?;
         }
 
         tokio::fs::write(&resolved, content)
             .await
-            .map_err(|e| agent_runtime_err(format!("failed to write file '{}': {e}", path_str)))?;
+            .map_err(|e| agent_runtime_err(format!("failed to write file '{path_str}': {e}")))?;
 
         // Set file permissions to owner-only.
         #[cfg(unix)]
@@ -310,19 +311,17 @@ impl Tool for FileEditTool {
         let resolved = validate_workspace_path(workspace, path_str)?;
         let content = tokio::fs::read_to_string(&resolved)
             .await
-            .map_err(|e| agent_runtime_err(format!("failed to read file '{}': {e}", path_str)))?;
+            .map_err(|e| agent_runtime_err(format!("failed to read file '{path_str}': {e}")))?;
 
         let match_count = content.matches(old_text).count();
         if match_count == 0 {
             return Err(agent_runtime_err(format!(
-                "file.edit: old_text not found in '{}'",
-                path_str
+                "file.edit: old_text not found in '{path_str}'"
             )));
         }
         if match_count > 1 {
             return Err(agent_runtime_err(format!(
-                "file.edit: old_text matches {} times in '{}' (must match exactly once)",
-                match_count, path_str
+                "file.edit: old_text matches {match_count} times in '{path_str}' (must match exactly once)"
             )));
         }
 
@@ -330,14 +329,13 @@ impl Tool for FileEditTool {
 
         if new_content.len() > MAX_WRITE_BYTES {
             return Err(invalid_request_err(format!(
-                "file.edit result would exceed {} byte limit",
-                MAX_WRITE_BYTES
+                "file.edit result would exceed {MAX_WRITE_BYTES} byte limit"
             )));
         }
 
         tokio::fs::write(&resolved, &new_content)
             .await
-            .map_err(|e| agent_runtime_err(format!("failed to write file '{}': {e}", path_str)))?;
+            .map_err(|e| agent_runtime_err(format!("failed to write file '{path_str}': {e}")))?;
 
         Ok(serde_json::json!({
             "path": path_str,
@@ -355,35 +353,38 @@ mod tests {
     #[test]
     fn validates_relative_paths() {
         let workspace = PathBuf::from("/tmp/test-workspace");
-        std::fs::create_dir_all(&workspace).ok();
+        let _ = std::fs::create_dir_all(&workspace);
 
         // Absolute paths rejected.
-        assert!(validate_workspace_path(&workspace, "/etc/passwd").is_err());
+        validate_workspace_path(&workspace, "/etc/passwd")
+            .expect_err("absolute paths should be rejected");
 
         // Parent traversal rejected.
-        assert!(validate_workspace_path(&workspace, "../etc/passwd").is_err());
-        assert!(validate_workspace_path(&workspace, "foo/../../etc/passwd").is_err());
+        validate_workspace_path(&workspace, "../etc/passwd")
+            .expect_err("parent traversal should be rejected");
+        validate_workspace_path(&workspace, "foo/../../etc/passwd")
+            .expect_err("nested parent traversal should be rejected");
 
         // Empty path rejected.
-        assert!(validate_workspace_path(&workspace, "").is_err());
+        validate_workspace_path(&workspace, "").expect_err("empty path should be rejected");
     }
 
     #[test]
     fn validates_normal_relative_path() {
         let workspace = std::env::temp_dir().join("frankclaw-file-test");
-        std::fs::create_dir_all(&workspace).ok();
+        let _ = std::fs::create_dir_all(&workspace);
 
         // Normal relative path should work.
         let result = validate_workspace_path(&workspace, "hello.txt");
-        assert!(result.is_ok());
+        result.expect("normal relative path should be valid");
     }
 
     #[tokio::test]
     async fn file_edit_rejects_ambiguous_match() {
         let workspace = std::env::temp_dir().join("frankclaw-edit-test");
-        std::fs::create_dir_all(&workspace).ok();
+        let _ = std::fs::create_dir_all(&workspace);
         let test_file = workspace.join("test.txt");
-        std::fs::write(&test_file, "aaa bbb aaa").ok();
+        let _ = std::fs::write(&test_file, "aaa bbb aaa");
 
         let tool = FileEditTool;
         let ctx = crate::test_tool_context(Some(workspace.clone()));
@@ -399,18 +400,19 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("ambiguous replacement should be rejected")
+            .to_string();
         assert!(err.contains("matches 2 times"));
 
         // Cleanup.
-        std::fs::remove_dir_all(&workspace).ok();
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[tokio::test]
     async fn file_read_write_roundtrip() {
         let workspace = std::env::temp_dir().join("frankclaw-rw-test");
-        std::fs::create_dir_all(&workspace).ok();
+        let _ = std::fs::create_dir_all(&workspace);
 
         let ctx = crate::test_tool_context(Some(workspace.clone()));
 
@@ -435,11 +437,13 @@ mod tests {
             .await
             .expect("read should succeed");
         assert_eq!(result["total_lines"], 3);
-        let content = result["content"].as_str().unwrap();
+        let content = result["content"]
+            .as_str()
+            .expect("file.read should return string content");
         assert!(content.contains("line1"));
         assert!(content.contains("line3"));
 
         // Cleanup.
-        std::fs::remove_dir_all(&workspace).ok();
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 }

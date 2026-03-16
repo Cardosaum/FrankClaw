@@ -336,40 +336,41 @@ mod tests {
 
     #[test]
     fn detect_known_command() {
-        let cmd = detect_command("/help").unwrap();
+        let cmd = detect_command("/help").expect("known /help command should be detected");
         assert_eq!(cmd.name, "help");
         assert_eq!(cmd.args, "");
     }
 
     #[test]
     fn detect_command_with_args() {
-        let cmd = detect_command("/model gpt-4o").unwrap();
+        let cmd = detect_command("/model gpt-4o")
+            .expect("known /model command with args should be detected");
         assert_eq!(cmd.name, "model");
         assert_eq!(cmd.args, "gpt-4o");
     }
 
     #[test]
     fn detect_alias() {
-        let cmd = detect_command("/h").unwrap();
+        let cmd = detect_command("/h").expect("help alias should be detected");
         assert_eq!(cmd.name, "help");
 
-        let cmd = detect_command("/t high").unwrap();
+        let cmd = detect_command("/t high").expect("think alias should be detected");
         assert_eq!(cmd.name, "think");
         assert_eq!(cmd.args, "high");
 
-        let cmd = detect_command("/new").unwrap();
+        let cmd = detect_command("/new").expect("reset alias should be detected");
         assert_eq!(cmd.name, "reset");
     }
 
     #[test]
     fn detect_command_case_insensitive() {
-        let cmd = detect_command("/HELP").unwrap();
+        let cmd = detect_command("/HELP").expect("uppercase command should be detected");
         assert_eq!(cmd.name, "help");
     }
 
     #[test]
     fn detect_command_with_bot_suffix() {
-        let cmd = detect_command("/help@mybot").unwrap();
+        let cmd = detect_command("/help@mybot").expect("bot-suffixed command should be detected");
         assert_eq!(cmd.name, "help");
     }
 
@@ -386,7 +387,8 @@ mod tests {
 
     #[test]
     fn detect_command_whitespace_trimming() {
-        let cmd = detect_command("  /status  ").unwrap();
+        let cmd =
+            detect_command("  /status  ").expect("whitespace-padded command should be detected");
         assert_eq!(cmd.name, "status");
     }
 

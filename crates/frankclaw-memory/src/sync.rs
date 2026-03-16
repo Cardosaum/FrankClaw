@@ -67,11 +67,11 @@ impl MemorySyncer {
 
             let hash = content_hash(&content);
 
-            if let Some(existing_hash) = existing_map.get(&source) {
-                if *existing_hash == hash {
-                    report.skipped += 1;
-                    continue;
-                }
+            if let Some(existing_hash) = existing_map.get(&source)
+                && *existing_hash == hash
+            {
+                report.skipped += 1;
+                continue;
             }
 
             // File is new or changed — re-index.
@@ -103,7 +103,7 @@ impl MemorySyncer {
                     chunk_index: chunk.index,
                     created_at: chrono::Utc::now(),
                 };
-                let embedding = embeddings.get(i).map(|e| e.as_slice()).unwrap_or(&[]);
+                let embedding = embeddings.get(i).map_or(&[][..], Vec::as_slice);
                 self.store.store_chunk(&entry, embedding).await?;
             }
 
@@ -115,7 +115,7 @@ impl MemorySyncer {
             .iter()
             .map(|f| file_source(&self.memory_dir, f))
             .collect();
-        for (source, _) in &existing_map {
+        for source in existing_map.keys() {
             if !disk_sources.contains(source) {
                 info!(source = %source, "removing deleted memory source");
                 self.store.delete_by_source(source).await?;
@@ -149,16 +149,15 @@ fn scan_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| memory_store_err(format!("failed to read memory directory: {e}")))?;
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
         if path.is_dir() {
             // Recurse into subdirectories.
             files.extend(scan_files(&path)?);
         } else if is_text_file(&path) {
             files.push(path);
+        } else {
+            // Non-text files are intentionally skipped.
         }
     }
     files.sort();

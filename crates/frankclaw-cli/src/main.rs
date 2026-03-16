@@ -404,8 +404,7 @@ async fn main() -> anyhow::Result<()> {
                 .config
                 .clone()
                 .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
-            let config = load_config(Some(&config_path), &state_dir)?;
-            let mut config = config;
+            let mut config = load_config(Some(&config_path), &state_dir)?;
             if let Some(port) = port {
                 config.gateway.port = port;
             }
@@ -1253,9 +1252,7 @@ fn load_config(
     path: Option<&std::path::Path>,
     state_dir: &std::path::Path,
 ) -> anyhow::Result<frankclaw_core::config::FrankClawConfig> {
-    let config_path = path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
+    let config_path = path.map_or_else(|| state_dir.join("frankclaw.toml"), PathBuf::from);
 
     if !config_path.exists() {
         info!(
@@ -1269,6 +1266,10 @@ fn load_config(
         .map_err(anyhow::Error::from)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "doctor warnings aggregate many independent config checks"
+)]
 fn collect_doctor_warnings(
     config: &frankclaw_core::config::FrankClawConfig,
     state_dir: &std::path::Path,
@@ -1519,45 +1520,42 @@ fn browser_runtime_status_with_policy(
     let warnings =
         collect_browser_tool_warnings_with_policy(config, browser_endpoint, policy.clone());
     if warnings.is_empty() {
-        if config
+        return config
             .agents
             .agents
             .values()
             .flat_map(|agent| agent.tools.iter())
             .any(|tool| tool.starts_with("browser_"))
-        {
-            let has_mutating = config
-                .agents
-                .agents
-                .values()
-                .flat_map(|agent| agent.tools.iter())
-                .any(|tool| {
-                    frankclaw_tools::tool_risk_level(tool)
-                        >= frankclaw_core::model::ToolRiskLevel::Mutating
-                });
-            let mutation_state = if has_mutating {
-                if policy
-                    .approval_level
-                    .approves(frankclaw_core::model::ToolRiskLevel::Mutating)
-                {
-                    t!("cmd.status.mutations_enabled").to_string()
+            .then(|| {
+                let has_mutating = config
+                    .agents
+                    .agents
+                    .values()
+                    .flat_map(|agent| agent.tools.iter())
+                    .any(|tool| {
+                        frankclaw_tools::tool_risk_level(tool)
+                            >= frankclaw_core::model::ToolRiskLevel::Mutating
+                    });
+                let mutation_state = if has_mutating {
+                    if policy
+                        .approval_level
+                        .approves(frankclaw_core::model::ToolRiskLevel::Mutating)
+                    {
+                        t!("cmd.status.mutations_enabled").to_string()
+                    } else {
+                        t!("cmd.status.mutations_gated").to_string()
+                    }
                 } else {
-                    t!("cmd.status.mutations_gated").to_string()
-                }
-            } else {
-                t!("cmd.status.read_only").to_string()
-            };
-            Some(format!(
-                "{} at {}",
-                mutation_state,
-                browser_endpoint.unwrap_or("http://127.0.0.1:9222/")
-            ))
-        } else {
-            None
-        }
-    } else {
-        Some(warnings.join(" | "))
+                    t!("cmd.status.read_only").to_string()
+                };
+                format!(
+                    "{} at {}",
+                    mutation_state,
+                    browser_endpoint.unwrap_or("http://127.0.0.1:9222/")
+                )
+            });
     }
+    Some(warnings.join(" | "))
 }
 
 fn read_password() -> anyhow::Result<secrecy::SecretString> {
@@ -1983,9 +1981,8 @@ fn run_setup(
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
     use frankclaw_core::types::ChannelId;
 
-    let config_path = config_path_override
-        .map(PathBuf::from)
-        .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
+    let config_path =
+        config_path_override.map_or_else(|| state_dir.join("frankclaw.toml"), PathBuf::from);
 
     println!("{}", t!("setup.title"));
     println!("{}", t!("setup.separator"));
@@ -2270,11 +2267,11 @@ async fn run_doctor(
 ) -> anyhow::Result<()> {
     println!(
         "{}",
-        terminal::bold_colored(&t!("doctor.title").to_string(), terminal::colors::ACCENT)
+        terminal::bold_colored(t!("doctor.title").as_ref(), terminal::colors::ACCENT)
     );
     println!(
         "{}",
-        terminal::colored(&t!("doctor.separator").to_string(), terminal::colors::MUTED)
+        terminal::colored(t!("doctor.separator").as_ref(), terminal::colors::MUTED)
     );
 
     // --- System info ---
@@ -2321,9 +2318,8 @@ async fn run_doctor(
     }
 
     // Config file permissions (Unix only)
-    let config_file_path = config_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
+    let config_file_path =
+        config_path.map_or_else(|| state_dir.join("frankclaw.toml"), PathBuf::from);
     config_checks.extend(check_file_permissions(&config_file_path, "config file"));
 
     let warnings = collect_doctor_warnings(&config, state_dir)?;
@@ -2695,7 +2691,7 @@ enum AuditCode {
 }
 
 impl AuditCode {
-    fn name(&self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Self::AuthDisabled => "auth_disabled",
             Self::AuthWeak => "auth_weak",
@@ -2730,8 +2726,8 @@ struct Finding {
 }
 
 #[expect(
-    clippy::unnecessary_wraps,
-    reason = "Result return kept for consistency with other CLI subcommand functions"
+    clippy::too_many_lines,
+    reason = "security audit report generation intentionally stays in one dispatch function"
 )]
 fn run_security_audit(
     config: &frankclaw_core::config::FrankClawConfig,
@@ -2847,11 +2843,11 @@ fn run_security_audit(
     } else {
         println!(
             "{}",
-            terminal::bold_colored(&t!("audit.title").to_string(), terminal::colors::ACCENT)
+            terminal::bold_colored(t!("audit.title").as_ref(), terminal::colors::ACCENT)
         );
         println!(
             "{}",
-            terminal::colored(&t!("audit.separator").to_string(), terminal::colors::MUTED)
+            terminal::colored(t!("audit.separator").as_ref(), terminal::colors::MUTED)
         );
         println!();
 
@@ -2877,13 +2873,13 @@ fn run_security_audit(
             for finding in category_findings {
                 println!(
                     "    {} {}",
-                    terminal::severity_badge(&finding.severity.to_string().trim().to_string()),
+                    terminal::severity_badge(finding.severity.to_string().trim()),
                     finding.message
                 );
                 println!(
                     "          {}",
                     terminal::colored(
-                        &t!("audit.fix_label", remediation = finding.remediation).to_string(),
+                        t!("audit.fix_label", remediation = finding.remediation).as_ref(),
                         terminal::colors::MUTED,
                     )
                 );
@@ -2929,22 +2925,21 @@ fn audit_auth(config: &frankclaw_core::config::FrankClawConfig, findings: &mut V
                 json_path: None,
             });
         }
-        frankclaw_core::auth::AuthMode::Token { token } => {
-            if let Some(token) = token {
-                use secrecy::ExposeSecret;
-                let token_str = token.expose_secret();
-                if token_str.len() < 16 {
-                    findings.push(Finding {
-                        severity: Severity::Medium,
-                        code: AuditCode::AuthWeak,
-                        category: "auth",
-                        message: t!("audit.auth.token_short").to_string(),
-                        remediation: t!("audit.auth.token_short_fix").to_string(),
-                        json_path: None,
-                    });
-                }
+        frankclaw_core::auth::AuthMode::Token { token: Some(token) } => {
+            use secrecy::ExposeSecret;
+            let token_str = token.expose_secret();
+            if token_str.len() < 16 {
+                findings.push(Finding {
+                    severity: Severity::Medium,
+                    code: AuditCode::AuthWeak,
+                    category: "auth",
+                    message: t!("audit.auth.token_short").to_string(),
+                    remediation: t!("audit.auth.token_short_fix").to_string(),
+                    json_path: None,
+                });
             }
         }
+        frankclaw_core::auth::AuthMode::Token { token: None } => {}
         frankclaw_core::auth::AuthMode::Password { hash } => {
             if hash.trim().is_empty() {
                 findings.push(Finding {
@@ -3012,7 +3007,7 @@ fn audit_inline_secrets(
                             env_key = env_key
                         )
                         .to_string(),
-                        json_path: Some(format!("channels.{}.accounts", channel_id)),
+                        json_path: Some(format!("channels.{channel_id}.accounts")),
                     });
                 }
             }
@@ -3173,19 +3168,16 @@ fn audit_channel_policies(
             continue;
         }
 
-        let policy = match channel.security_policy() {
-            Ok(p) => p,
-            Err(_) => {
-                findings.push(Finding {
-                    severity: Severity::High,
-                    code: AuditCode::ChannelPolicy,
-                    category: "channels",
-                    message: t!("audit.channels.invalid_policy", channel = channel_id).to_string(),
-                    remediation: t!("audit.channels.invalid_policy_fix").to_string(),
-                    json_path: None,
-                });
-                continue;
-            }
+        let Ok(policy) = channel.security_policy() else {
+            findings.push(Finding {
+                severity: Severity::High,
+                code: AuditCode::ChannelPolicy,
+                category: "channels",
+                message: t!("audit.channels.invalid_policy", channel = channel_id).to_string(),
+                remediation: t!("audit.channels.invalid_policy_fix").to_string(),
+                json_path: None,
+            });
+            continue;
         };
 
         if group_surface_needs_guard(channel_id.as_str())
@@ -3542,7 +3534,7 @@ fn audit_secret_refs(
                         .to_string(),
                         remediation: t!("audit.secrets.ref_shadowed_fix", inline_key = inline_key)
                             .to_string(),
-                        json_path: Some(format!("channels.{}.accounts", channel_id)),
+                        json_path: Some(format!("channels.{channel_id}.accounts")),
                     });
                 }
             }
@@ -3566,9 +3558,8 @@ fn audit_dotenv_plaintext(findings: &mut Vec<Finding>) {
         if !path.exists() {
             continue;
         }
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
         };
         for line in content.lines() {
             let line = line.trim();
@@ -3678,6 +3669,97 @@ async fn run_login(provider: &str, state_dir: &std::path::Path) -> anyhow::Resul
         }
     }
     Ok(())
+}
+
+fn open_pairing_store(
+    state_dir: &std::path::Path,
+) -> anyhow::Result<std::sync::Arc<frankclaw_gateway::pairing::PairingStore>> {
+    let path = state_dir.join("pairings.json");
+    Ok(std::sync::Arc::new(
+        frankclaw_gateway::pairing::PairingStore::open(&path)
+            .context("failed to open pairing store")?,
+    ))
+}
+
+fn open_cron_service(
+    state_dir: &std::path::Path,
+) -> anyhow::Result<std::sync::Arc<frankclaw_cron::CronService>> {
+    let path = state_dir.join("cron-jobs.json");
+    Ok(std::sync::Arc::new(
+        frankclaw_cron::CronService::open(&path).context("failed to open cron store")?,
+    ))
+}
+
+async fn build_runtime(
+    config: &frankclaw_core::config::FrankClawConfig,
+    sessions: std::sync::Arc<frankclaw_sessions::SqliteSessionStore>,
+) -> anyhow::Result<std::sync::Arc<frankclaw_runtime::Runtime>> {
+    Ok(std::sync::Arc::new(
+        frankclaw_runtime::Runtime::from_config(
+            config,
+            sessions as std::sync::Arc<dyn frankclaw_core::session::SessionStore>,
+        )
+        .await
+        .context(t!("ctx.failed_init_runtime").to_string())?,
+    ))
+}
+
+fn redact_config(config: &frankclaw_core::config::FrankClawConfig) -> serde_json::Value {
+    let mut val = serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = val.as_object_mut() {
+        if let Some(gateway) = obj
+            .get_mut("gateway")
+            .and_then(|value| value.as_object_mut())
+            && let Some(auth) = gateway
+                .get_mut("auth")
+                .and_then(|value| value.as_object_mut())
+        {
+            if let Some(token) = auth.get_mut("token") {
+                *token = serde_json::json!("[REDACTED]");
+            }
+            if let Some(hash) = auth.get_mut("hash") {
+                *hash = serde_json::json!("[REDACTED]");
+            }
+        }
+
+        if let Some(models) = obj
+            .get_mut("models")
+            .and_then(|value| value.as_object_mut())
+            && let Some(providers) = models
+                .get_mut("providers")
+                .and_then(|value| value.as_array_mut())
+        {
+            for provider in providers {
+                if let Some(api_key_ref) = provider.get_mut("api_key_ref") {
+                    *api_key_ref = serde_json::json!("[REDACTED]");
+                }
+            }
+        }
+    }
+    val
+}
+
+fn load_master_key_from_env() -> anyhow::Result<Option<frankclaw_crypto::MasterKey>> {
+    if let Ok(raw_key) = std::env::var("FRANKCLAW_MASTER_KEY") {
+        if raw_key.trim().is_empty() {
+            anyhow::bail!("FRANKCLAW_MASTER_KEY is set but empty");
+        }
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(raw_key.trim())
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw_key.trim()))
+            .context("FRANKCLAW_MASTER_KEY must be valid base64")?;
+
+        if decoded.len() != 32 {
+            anyhow::bail!("FRANKCLAW_MASTER_KEY must decode to exactly 32 bytes");
+        }
+
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&decoded);
+        return Ok(Some(frankclaw_crypto::MasterKey::from_bytes(bytes)));
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -3971,10 +4053,8 @@ mod tests {
             "whatsapp.toml",
         ] {
             let path = examples_dir.join(filename);
-            let content = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err));
-            toml::from_str::<toml::Value>(&content)
-                .unwrap_or_else(|err| panic!("invalid TOML in {}: {}", path.display(), err));
+            let content = std::fs::read_to_string(&path).expect("channel example file should read");
+            toml::from_str::<toml::Value>(&content).expect("channel example TOML should parse");
         }
     }
 
@@ -3990,8 +4070,8 @@ mod tests {
     fn docker_compose_template_includes_gateway_and_browser_services() {
         let compose_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker-compose.yml");
-        let content = std::fs::read_to_string(&compose_path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {}", compose_path.display(), err));
+        let content =
+            std::fs::read_to_string(&compose_path).expect("docker-compose file should read");
 
         assert!(content.contains("gateway:"));
         assert!(content.contains("chromium:"));
@@ -4086,7 +4166,7 @@ mod tests {
             },
         )
         .expect("status should exist");
-        assert!(enabled.contains(&format!("mutations enabled at {}", endpoint)));
+        assert!(enabled.contains(&format!("mutations enabled at {endpoint}")));
     }
 
     // --- Doctor diagnostic helper tests ---
@@ -4347,7 +4427,11 @@ mod tests {
 
         let status = daemon_pid_status(&pid_path);
         assert!(status.is_some());
-        assert!(status.unwrap().contains("running"));
+        assert!(
+            status
+                .expect("running pid should yield daemon status")
+                .contains("running")
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4368,7 +4452,11 @@ mod tests {
 
         let status = daemon_pid_status(&pid_path);
         assert!(status.is_some());
-        assert!(status.unwrap().contains("stale"));
+        assert!(
+            status
+                .expect("stale pid should yield daemon status")
+                .contains("stale")
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4642,9 +4730,9 @@ mod tests {
             AuditCode::FilePermissions,
             AuditCode::MediaScanning,
         ];
-        let mut names: Vec<&str> = codes.iter().map(|c| c.name()).collect();
+        let mut names: Vec<&str> = codes.into_iter().map(super::AuditCode::name).collect();
         let len_before = names.len();
-        names.sort();
+        names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), len_before, "audit code names must be unique");
     }
@@ -4660,95 +4748,4 @@ mod tests {
         let _exit_code = run_security_audit(&config, config_path, state_dir, "text")
             .expect("audit should succeed");
     }
-}
-
-fn open_pairing_store(
-    state_dir: &std::path::Path,
-) -> anyhow::Result<std::sync::Arc<frankclaw_gateway::pairing::PairingStore>> {
-    let path = state_dir.join("pairings.json");
-    Ok(std::sync::Arc::new(
-        frankclaw_gateway::pairing::PairingStore::open(&path)
-            .context("failed to open pairing store")?,
-    ))
-}
-
-fn open_cron_service(
-    state_dir: &std::path::Path,
-) -> anyhow::Result<std::sync::Arc<frankclaw_cron::CronService>> {
-    let path = state_dir.join("cron-jobs.json");
-    Ok(std::sync::Arc::new(
-        frankclaw_cron::CronService::open(&path).context("failed to open cron store")?,
-    ))
-}
-
-async fn build_runtime(
-    config: &frankclaw_core::config::FrankClawConfig,
-    sessions: std::sync::Arc<frankclaw_sessions::SqliteSessionStore>,
-) -> anyhow::Result<std::sync::Arc<frankclaw_runtime::Runtime>> {
-    Ok(std::sync::Arc::new(
-        frankclaw_runtime::Runtime::from_config(
-            config,
-            sessions as std::sync::Arc<dyn frankclaw_core::session::SessionStore>,
-        )
-        .await
-        .context(t!("ctx.failed_init_runtime").to_string())?,
-    ))
-}
-
-fn redact_config(config: &frankclaw_core::config::FrankClawConfig) -> serde_json::Value {
-    let mut val = serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}));
-    if let Some(obj) = val.as_object_mut() {
-        if let Some(gateway) = obj
-            .get_mut("gateway")
-            .and_then(|value| value.as_object_mut())
-            && let Some(auth) = gateway
-                .get_mut("auth")
-                .and_then(|value| value.as_object_mut())
-        {
-            if let Some(token) = auth.get_mut("token") {
-                *token = serde_json::json!("[REDACTED]");
-            }
-            if let Some(hash) = auth.get_mut("hash") {
-                *hash = serde_json::json!("[REDACTED]");
-            }
-        }
-
-        if let Some(models) = obj
-            .get_mut("models")
-            .and_then(|value| value.as_object_mut())
-            && let Some(providers) = models
-                .get_mut("providers")
-                .and_then(|value| value.as_array_mut())
-        {
-            for provider in providers {
-                if let Some(api_key_ref) = provider.get_mut("api_key_ref") {
-                    *api_key_ref = serde_json::json!("[REDACTED]");
-                }
-            }
-        }
-    }
-    val
-}
-
-fn load_master_key_from_env() -> anyhow::Result<Option<frankclaw_crypto::MasterKey>> {
-    if let Ok(raw_key) = std::env::var("FRANKCLAW_MASTER_KEY") {
-        if raw_key.trim().is_empty() {
-            anyhow::bail!("FRANKCLAW_MASTER_KEY is set but empty");
-        }
-
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(raw_key.trim())
-            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw_key.trim()))
-            .context("FRANKCLAW_MASTER_KEY must be valid base64")?;
-
-        if decoded.len() != 32 {
-            anyhow::bail!("FRANKCLAW_MASTER_KEY must decode to exactly 32 bytes");
-        }
-
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&decoded);
-        return Ok(Some(frankclaw_crypto::MasterKey::from_bytes(bytes)));
-    }
-
-    Ok(None)
 }

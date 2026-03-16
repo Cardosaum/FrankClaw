@@ -294,8 +294,10 @@ mod tests {
     fn malicious_threshold_is_reasonable() {
         // Sanity check: threshold should be > 0 (single engine FP protection)
         // and reasonable (not so high that real malware passes).
-        assert!(MALICIOUS_THRESHOLD >= 2);
-        assert!(MALICIOUS_THRESHOLD <= 5);
+        const {
+            assert!(MALICIOUS_THRESHOLD >= 2);
+            assert!(MALICIOUS_THRESHOLD <= 5);
+        }
     }
 
     #[test]

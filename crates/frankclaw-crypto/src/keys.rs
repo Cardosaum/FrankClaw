@@ -88,16 +88,16 @@ mod tests {
     #[test]
     fn derive_different_contexts_produce_different_keys() {
         let master = MasterKey::from_bytes([42u8; 32]);
-        let k1 = derive_subkey(&master, "session").unwrap();
-        let k2 = derive_subkey(&master, "config").unwrap();
+        let k1 = derive_subkey(&master, "session").expect("first derivation should succeed");
+        let k2 = derive_subkey(&master, "config").expect("second derivation should succeed");
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn same_context_produces_same_key() {
         let master = MasterKey::from_bytes([42u8; 32]);
-        let k1 = derive_subkey(&master, "session").unwrap();
-        let k2 = derive_subkey(&master, "session").unwrap();
+        let k1 = derive_subkey(&master, "session").expect("first derivation should succeed");
+        let k2 = derive_subkey(&master, "session").expect("second derivation should succeed");
         assert_eq!(k1, k2);
     }
 
@@ -105,7 +105,8 @@ mod tests {
     fn from_passphrase_works() {
         let passphrase = SecretString::from("test-passphrase-123");
         let salt = [1u8; 16];
-        let key = MasterKey::from_passphrase(&passphrase, &salt).unwrap();
+        let key = MasterKey::from_passphrase(&passphrase, &salt)
+            .expect("passphrase derivation should succeed");
         assert_ne!(key.as_bytes(), &[0u8; 32]);
     }
 }

@@ -702,13 +702,9 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> serde_json::Value {
-        match name {
-            "event_message_with_file" => {
-                serde_json::from_str(include_str!("fixture_slack_event_message_with_file.json"))
-                    .expect("fixture should parse")
-            }
-            _ => panic!("unknown fixture: {name}"),
-        }
+        assert_eq!(name, "event_message_with_file", "unknown fixture: {name}");
+        serde_json::from_str(include_str!("fixture_slack_event_message_with_file.json"))
+            .expect("fixture should parse")
     }
 
     #[test]

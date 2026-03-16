@@ -92,7 +92,7 @@ impl frankclaw_core::tool_services::MessageSender for ChannelSet {
         let channel_id = ChannelId::new(channel);
         let plugin = self.get(&channel_id).ok_or_else(|| {
             InvalidRequest {
-                msg: format!("channel '{}' not found or not enabled", channel),
+                msg: format!("channel '{channel}' not found or not enabled"),
             }
             .build()
         })?;
@@ -111,7 +111,7 @@ impl frankclaw_core::tool_services::MessageSender for ChannelSet {
             SendResult::Sent {
                 platform_message_id,
             } => Ok(platform_message_id),
-            other => Ok(format!("{:?}", other)),
+            other => Ok(format!("{other:?}")),
         }
     }
 
@@ -127,7 +127,7 @@ impl frankclaw_core::tool_services::MessageSender for ChannelSet {
         let channel_id = ChannelId::new(channel);
         let plugin = self.get(&channel_id).ok_or_else(|| {
             InvalidRequest {
-                msg: format!("channel '{}' not found or not enabled", channel),
+                msg: format!("channel '{channel}' not found or not enabled"),
             }
             .build()
         })?;

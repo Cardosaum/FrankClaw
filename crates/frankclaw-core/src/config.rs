@@ -9,7 +9,7 @@ use crate::session::{PruningConfig, SessionResetPolicy, SessionScoping};
 use crate::types::{AgentId, ChannelId, SessionKey};
 
 /// Top-level FrankClaw configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FrankClawConfig {
     pub gateway: GatewayConfig,
@@ -27,26 +27,6 @@ pub struct FrankClawConfig {
     /// Named browser profiles for CDP connections.
     #[serde(default)]
     pub browser_profiles: Vec<BrowserProfileConfig>,
-}
-
-impl Default for FrankClawConfig {
-    fn default() -> Self {
-        Self {
-            gateway: GatewayConfig::default(),
-            agents: AgentsConfig::default(),
-            channels: HashMap::new(),
-            models: ModelsConfig::default(),
-            session: SessionConfig::default(),
-            cron: CronConfig::default(),
-            hooks: HooksConfig::default(),
-            logging: LoggingConfig::default(),
-            media: MediaConfig::default(),
-            security: SecurityConfig::default(),
-            memory: MemoryConfig::default(),
-            understanding: MediaUnderstandingConfig::default(),
-            browser_profiles: Vec::new(),
-        }
-    }
 }
 
 impl FrankClawConfig {
@@ -1109,7 +1089,9 @@ mod tests {
             "id": "incoming",
             "text_field": "message"
         })];
-        assert!(config.validate().is_ok());
+        config
+            .validate()
+            .expect("config should validate once token and mapping are set");
     }
 
     #[test]

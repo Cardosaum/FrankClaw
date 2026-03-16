@@ -375,7 +375,8 @@ mod tests {
 
     #[test]
     fn sanitize_limits_filename_length() {
-        let long_name = "a".repeat(200) + ".txt";
+        let mut long_name = "a".repeat(200);
+        long_name.push_str(".txt");
         let result = sanitize_filename(&long_name);
         assert!(result.len() <= MAX_FILENAME_LEN);
     }
@@ -441,7 +442,11 @@ mod tests {
             .expect("media should exist");
         assert_eq!(loaded.bytes, b"hello");
         assert_eq!(loaded.mime_type, "text/plain; charset=utf-8");
-        assert!(loaded.filename.ends_with(".txt"));
+        assert!(
+            std::path::Path::new(&loaded.filename)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -500,8 +505,7 @@ mod tests {
         let result = store
             .store("evil.exe", "application/octet-stream", b"MZ\x00")
             .await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("malware scanner should reject unsafe content");
         let msg = err.to_string();
         assert!(
             msg.contains("malware detected"),
@@ -541,7 +545,7 @@ mod tests {
             .with_scanner(std::sync::Arc::new(FakeCleanScanner));
 
         let result = store.store("clean.txt", "text/plain", b"hello").await;
-        assert!(result.is_ok());
+        let _media = result.expect("clean scanner should allow safe content");
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -554,7 +558,7 @@ mod tests {
         assert!(!store.has_scanner());
 
         let result = store.store("file.txt", "text/plain", b"data").await;
-        assert!(result.is_ok());
+        let _media = result.expect("store without scanner should still accept content");
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

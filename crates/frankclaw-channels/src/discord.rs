@@ -677,13 +677,15 @@ mod tests {
     use frankclaw_core::channel::OutboundAttachment;
 
     fn fixture(name: &str) -> serde_json::Value {
-        match name {
-            "message_create_with_attachment" => serde_json::from_str(include_str!(
+        let contents = match name {
+            "message_create_with_attachment" => Some(include_str!(
                 "fixture_discord_message_create_with_attachment.json"
-            ))
-            .expect("fixture should parse"),
-            _ => panic!("unknown fixture: {name}"),
+            )),
+            _ => None,
         }
+        .expect("fixture name should be known");
+
+        serde_json::from_str(contents).expect("fixture should parse")
     }
 
     #[test]
@@ -1016,7 +1018,7 @@ mod tests {
     #[test]
     fn chunk_discord_text_handles_multibyte_characters() {
         // 2001 emoji characters (each 4 bytes in UTF-8)
-        let text: String = std::iter::repeat('🦀').take(2001).collect();
+        let text = "🦀".repeat(2001);
         let chunks = chunk_discord_text(&text, 2000);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chars().count(), 2000);

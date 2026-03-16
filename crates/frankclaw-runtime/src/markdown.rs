@@ -51,6 +51,10 @@ impl MarkdownIR {
 }
 
 /// Parse a markdown string into a `MarkdownIR`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the markdown parser intentionally walks the event stream in one place"
+)]
 pub fn parse_markdown(input: &str) -> MarkdownIR {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -67,7 +71,6 @@ pub fn parse_markdown(input: &str) -> MarkdownIR {
     // Track open link as (start_byte_offset, href).
     let mut link_stack: Vec<(usize, String)> = Vec::new();
 
-    let mut in_code_block = false;
     let mut list_depth: u32 = 0;
     let mut at_block_start = true;
 
@@ -87,7 +90,6 @@ pub fn parse_markdown(input: &str) -> MarkdownIR {
                     if !at_block_start {
                         text.push('\n');
                     }
-                    in_code_block = true;
                     style_stack.push((text.len(), MarkdownStyle::CodeBlock));
                 }
                 Tag::BlockQuote(_) => {
@@ -125,42 +127,39 @@ pub fn parse_markdown(input: &str) -> MarkdownIR {
             Event::End(tag_end) => match tag_end {
                 TagEnd::Emphasis => {
                     if let Some((start, style)) = pop_style(&mut style_stack, MarkdownStyle::Italic)
+                        && start < text.len()
                     {
-                        if start < text.len() {
-                            styles.push(StyleSpan {
-                                start,
-                                end: text.len(),
-                                style,
-                            });
-                        }
+                        styles.push(StyleSpan {
+                            start,
+                            end: text.len(),
+                            style,
+                        });
                     }
                 }
                 TagEnd::Strong => {
-                    if let Some((start, style)) = pop_style(&mut style_stack, MarkdownStyle::Bold) {
-                        if start < text.len() {
-                            styles.push(StyleSpan {
-                                start,
-                                end: text.len(),
-                                style,
-                            });
-                        }
+                    if let Some((start, style)) = pop_style(&mut style_stack, MarkdownStyle::Bold)
+                        && start < text.len()
+                    {
+                        styles.push(StyleSpan {
+                            start,
+                            end: text.len(),
+                            style,
+                        });
                     }
                 }
                 TagEnd::Strikethrough => {
                     if let Some((start, style)) =
                         pop_style(&mut style_stack, MarkdownStyle::Strikethrough)
+                        && start < text.len()
                     {
-                        if start < text.len() {
-                            styles.push(StyleSpan {
-                                start,
-                                end: text.len(),
-                                style,
-                            });
-                        }
+                        styles.push(StyleSpan {
+                            start,
+                            end: text.len(),
+                            style,
+                        });
                     }
                 }
                 TagEnd::CodeBlock => {
-                    in_code_block = false;
                     if let Some((start, style)) =
                         pop_style(&mut style_stack, MarkdownStyle::CodeBlock)
                     {
@@ -178,25 +177,24 @@ pub fn parse_markdown(input: &str) -> MarkdownIR {
                 TagEnd::BlockQuote(_) => {
                     if let Some((start, style)) =
                         pop_style(&mut style_stack, MarkdownStyle::Blockquote)
+                        && start < text.len()
                     {
-                        if start < text.len() {
-                            styles.push(StyleSpan {
-                                start,
-                                end: text.len(),
-                                style,
-                            });
-                        }
+                        styles.push(StyleSpan {
+                            start,
+                            end: text.len(),
+                            style,
+                        });
                     }
                 }
                 TagEnd::Link => {
-                    if let Some((start, href)) = link_stack.pop() {
-                        if start < text.len() {
-                            links.push(LinkSpan {
-                                start,
-                                end: text.len(),
-                                href,
-                            });
-                        }
+                    if let Some((start, href)) = link_stack.pop()
+                        && start < text.len()
+                    {
+                        links.push(LinkSpan {
+                            start,
+                            end: text.len(),
+                            href,
+                        });
                     }
                 }
                 TagEnd::List(_) => {
@@ -207,14 +205,14 @@ pub fn parse_markdown(input: &str) -> MarkdownIR {
                     at_block_start = false;
                 }
                 TagEnd::Heading(_) => {
-                    if let Some((start, style)) = pop_style(&mut style_stack, MarkdownStyle::Bold) {
-                        if start < text.len() {
-                            styles.push(StyleSpan {
-                                start,
-                                end: text.len(),
-                                style,
-                            });
-                        }
+                    if let Some((start, style)) = pop_style(&mut style_stack, MarkdownStyle::Bold)
+                        && start < text.len()
+                    {
+                        styles.push(StyleSpan {
+                            start,
+                            end: text.len(),
+                            style,
+                        });
                     }
                     at_block_start = false;
                 }
@@ -237,11 +235,7 @@ pub fn parse_markdown(input: &str) -> MarkdownIR {
                 at_block_start = false;
             }
             Event::SoftBreak | Event::HardBreak => {
-                if in_code_block {
-                    text.push('\n');
-                } else {
-                    text.push('\n');
-                }
+                text.push('\n');
             }
             Event::Rule => {
                 if !at_block_start {
@@ -266,11 +260,10 @@ fn pop_style(
     stack: &mut Vec<(usize, MarkdownStyle)>,
     target: MarkdownStyle,
 ) -> Option<(usize, MarkdownStyle)> {
-    if let Some(pos) = stack.iter().rposition(|(_, s)| *s == target) {
-        Some(stack.remove(pos))
-    } else {
-        None
-    }
+    stack
+        .iter()
+        .rposition(|(_, s)| *s == target)
+        .map(|pos| stack.remove(pos))
 }
 
 /// ANSI SGR escape codes.
@@ -311,7 +304,6 @@ pub fn render_ansi(ir: &MarkdownIR) -> String {
 
     for (offset, _is_close, code) in &events {
         if *offset > pos {
-            // Safety: offsets come from string positions built during parsing.
             result.push_str(&ir.text[pos..*offset]);
         }
         result.push_str(code);

@@ -69,8 +69,8 @@ mod tests {
     fn encrypt_decrypt_roundtrip() {
         let key = [99u8; 32];
         let plaintext = b"hello, frankclaw!";
-        let blob = encrypt(&key, plaintext).unwrap();
-        let decrypted = decrypt(&key, &blob).unwrap();
+        let blob = encrypt(&key, plaintext).expect("encrypt should succeed");
+        let decrypted = decrypt(&key, &blob).expect("decrypt should succeed");
         assert_eq!(decrypted, plaintext);
     }
 
@@ -78,25 +78,25 @@ mod tests {
     fn wrong_key_fails() {
         let key1 = [1u8; 32];
         let key2 = [2u8; 32];
-        let blob = encrypt(&key1, b"secret").unwrap();
-        assert!(decrypt(&key2, &blob).is_err());
+        let blob = encrypt(&key1, b"secret").expect("encrypt should succeed");
+        let _ = decrypt(&key2, &blob).expect_err("decrypt with wrong key should fail");
     }
 
     #[test]
     fn tampered_ciphertext_fails() {
         let key = [99u8; 32];
-        let mut blob = encrypt(&key, b"secret").unwrap();
+        let mut blob = encrypt(&key, b"secret").expect("encrypt should succeed");
         if let Some(byte) = blob.ciphertext.first_mut() {
             *byte ^= 0xFF;
         }
-        assert!(decrypt(&key, &blob).is_err());
+        let _ = decrypt(&key, &blob).expect_err("decrypt should fail for tampered ciphertext");
     }
 
     #[test]
     fn unique_nonces() {
         let key = [99u8; 32];
-        let b1 = encrypt(&key, b"same").unwrap();
-        let b2 = encrypt(&key, b"same").unwrap();
+        let b1 = encrypt(&key, b"same").expect("first encrypt should succeed");
+        let b2 = encrypt(&key, b"same").expect("second encrypt should succeed");
         assert_ne!(b1.nonce, b2.nonce);
         assert_ne!(b1.ciphertext, b2.ciphertext);
     }
@@ -105,18 +105,21 @@ mod tests {
     fn nonces_from_csprng_have_entropy() {
         let key = [99u8; 32];
         // Generate 50 blobs and verify all nonces are unique.
-        let nonces: Vec<[u8; 12]> = (0..50)
-            .map(|_| encrypt(&key, b"test").unwrap().nonce)
-            .collect();
-        let unique: std::collections::HashSet<[u8; 12]> = nonces.into_iter().collect();
+        let unique: std::collections::HashSet<[u8; 12]> = std::iter::repeat_with(|| {
+            encrypt(&key, b"test")
+                .expect("encrypt should succeed")
+                .nonce
+        })
+        .take(50)
+        .collect();
         assert_eq!(unique.len(), 50, "all 50 nonces should be unique");
     }
 
     #[test]
     fn empty_plaintext_roundtrip() {
         let key = [99u8; 32];
-        let blob = encrypt(&key, b"").unwrap();
-        let decrypted = decrypt(&key, &blob).unwrap();
+        let blob = encrypt(&key, b"").expect("encrypt should succeed");
+        let decrypted = decrypt(&key, &blob).expect("decrypt should succeed");
         assert!(decrypted.is_empty());
     }
 }

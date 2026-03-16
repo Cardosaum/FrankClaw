@@ -728,13 +728,9 @@ mod tests {
     use frankclaw_core::channel::OutboundAttachment;
 
     fn fixture(name: &str) -> serde_json::Value {
-        match name {
-            "receive_attachment" => {
-                serde_json::from_str(include_str!("fixture_signal_receive_attachment.json"))
-                    .expect("fixture should parse")
-            }
-            _ => panic!("unknown fixture: {name}"),
-        }
+        assert_eq!(name, "receive_attachment", "unknown fixture: {name}");
+        serde_json::from_str(include_str!("fixture_signal_receive_attachment.json"))
+            .expect("fixture should parse")
     }
 
     #[test]

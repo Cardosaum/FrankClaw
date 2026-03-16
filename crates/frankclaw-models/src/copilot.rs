@@ -14,7 +14,10 @@ use secrecy::{ExposeSecret, SecretString};
 use tracing::{debug, warn};
 
 use frankclaw_core::error::{ConfigValidation, Internal, Provider, Result};
-use frankclaw_core::model::*;
+use frankclaw_core::model::{
+    CompletionRequest, CompletionResponse, InputModality, ModelApi, ModelCompat, ModelCost,
+    ModelDef, ModelProvider, StreamDelta,
+};
 
 use crate::OpenAiProvider;
 
@@ -89,8 +92,7 @@ pub async fn resolve_copilot_api_token(
             let base_url = cached
                 .endpoints
                 .as_ref()
-                .map(|ep| ep.api.clone())
-                .unwrap_or_else(default_copilot_api_url);
+                .map_or_else(default_copilot_api_url, |ep| ep.api.clone());
             return Ok((SecretString::from(cached.token), base_url));
         }
     }
@@ -142,8 +144,7 @@ pub async fn resolve_copilot_api_token(
     let base_url = token_response
         .endpoints
         .as_ref()
-        .map(|ep| ep.api.clone())
-        .unwrap_or_else(default_copilot_api_url);
+        .map_or_else(default_copilot_api_url, |ep| ep.api.clone());
 
     // Cache the token
     let cache = CopilotTokenCache {
@@ -293,21 +294,19 @@ pub async fn poll_for_access_token(device_code: &str, interval: u64) -> Result<S
             .build()
         })?;
 
-        if let Some(token) = body.access_token {
-            if !token.is_empty() {
-                return Ok(SecretString::from(token));
-            }
+        if let Some(token) = body.access_token
+            && !token.is_empty()
+        {
+            return Ok(SecretString::from(token));
         }
 
         match body.error.as_deref() {
             Some("authorization_pending") => {
                 debug!("still waiting for user authorization");
-                continue;
             }
             Some("slow_down") => {
                 poll_interval += 5;
                 debug!(new_interval = poll_interval, "slowing down polling");
-                continue;
             }
             Some("expired_token") => {
                 return Err(Internal {
@@ -440,10 +439,10 @@ impl CopilotProvider {
         // Check if current provider is still valid
         {
             let inner = self.inner.read().await;
-            if let Some(ref inner) = *inner {
-                if inner.expires_at > now + 60 {
-                    return Ok(());
-                }
+            if let Some(ref inner) = *inner
+                && inner.expires_at > now + 60
+            {
+                return Ok(());
             }
         }
 
@@ -452,9 +451,8 @@ impl CopilotProvider {
             resolve_copilot_api_token(&self.github_token, &self.cache_path).await?;
 
         // Read expires_at from cache
-        let expires_at = read_token_cache(&self.cache_path)
-            .map(|c| c.expires_at)
-            .unwrap_or(now + 3600);
+        let expires_at =
+            read_token_cache(&self.cache_path).map_or(now + 3600, |cache| cache.expires_at);
 
         let provider =
             OpenAiProvider::new(self.id.clone(), base_url, api_token, self.models.clone())?;
@@ -579,7 +577,13 @@ mod tests {
         let loaded = read_token_cache(&path).expect("read should succeed");
         assert_eq!(loaded.token, "test-token-value");
         assert_eq!(loaded.expires_at, 9999999999);
-        assert_eq!(loaded.endpoints.unwrap().api, "https://api.test.com");
+        assert_eq!(
+            loaded
+                .endpoints
+                .expect("cached endpoints should round-trip")
+                .api,
+            "https://api.test.com"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

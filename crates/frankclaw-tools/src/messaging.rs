@@ -90,8 +90,7 @@ impl Tool for MessageSendTool {
 
         if text.len() > MAX_TEXT_LEN {
             return Err(invalid_request_err(format!(
-                "message.send text exceeds {} char limit",
-                MAX_TEXT_LEN
+                "message.send text exceeds {MAX_TEXT_LEN} char limit"
             )));
         }
 

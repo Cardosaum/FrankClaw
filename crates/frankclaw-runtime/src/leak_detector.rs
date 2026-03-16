@@ -419,7 +419,7 @@ mod tests {
         let masked = mask_secret("sk-proj-abcdefghijklmnop");
         assert!(masked.starts_with("sk-p"));
         assert!(masked.ends_with("mnop"));
-        assert!(masked.contains("*"));
+        assert!(masked.contains('*'));
     }
 
     #[test]
@@ -430,7 +430,9 @@ mod tests {
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].action, LeakAction::Redact);
         assert!(result.redacted_content.is_some());
-        let redacted = result.redacted_content.unwrap();
+        let redacted = result
+            .redacted_content
+            .expect("redacted content should be present for bearer tokens");
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("SomeVeryLongTokenValue123456"));
     }

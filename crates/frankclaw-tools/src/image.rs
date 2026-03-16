@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use base64::Engine;
 
 use frankclaw_core::error::{AgentRuntime, FrankClawError, InvalidRequest, Result};
 use frankclaw_core::model::{ImageContent, ToolDef, ToolRiskLevel};
@@ -40,7 +41,7 @@ fn mime_from_extension(path: &Path) -> Result<&'static str> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .unwrap_or_default();
     SUPPORTED_EXTENSIONS
         .iter()
@@ -117,8 +118,7 @@ impl Tool for ImageDescribeTool {
         }
         if paths.len() > MAX_IMAGES {
             return Err(invalid_request_err(format!(
-                "image.describe accepts at most {} images",
-                MAX_IMAGES
+                "image.describe accepts at most {MAX_IMAGES} images"
             )));
         }
 
@@ -136,7 +136,7 @@ impl Tool for ImageDescribeTool {
 
             let metadata = tokio::fs::metadata(&resolved)
                 .await
-                .map_err(|e| agent_runtime_err(format!("failed to read '{}': {e}", path_str)))?;
+                .map_err(|e| agent_runtime_err(format!("failed to read '{path_str}': {e}")))?;
 
             if metadata.len() > MAX_IMAGE_BYTES {
                 return Err(invalid_request_err(format!(
@@ -147,10 +147,8 @@ impl Tool for ImageDescribeTool {
             }
 
             let bytes = tokio::fs::read(&resolved).await.map_err(|e| {
-                agent_runtime_err(format!("failed to read image '{}': {e}", path_str))
+                agent_runtime_err(format!("failed to read image '{path_str}': {e}"))
             })?;
-
-            use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
             images.push(ImageContent {
@@ -185,19 +183,25 @@ mod tests {
     #[test]
     fn mime_detection_jpg() {
         let path = Path::new("photo.jpg");
-        assert_eq!(mime_from_extension(path).unwrap(), "image/jpeg");
+        assert_eq!(
+            mime_from_extension(path).expect("jpg extension should be supported"),
+            "image/jpeg"
+        );
     }
 
     #[test]
     fn mime_detection_png() {
         let path = Path::new("screenshot.PNG");
-        assert_eq!(mime_from_extension(path).unwrap(), "image/png");
+        assert_eq!(
+            mime_from_extension(path).expect("png extension should be supported"),
+            "image/png"
+        );
     }
 
     #[test]
     fn mime_detection_unsupported() {
         let path = Path::new("doc.pdf");
-        assert!(mime_from_extension(path).is_err());
+        mime_from_extension(path).expect_err("pdf should be rejected as an image");
     }
 
     #[test]

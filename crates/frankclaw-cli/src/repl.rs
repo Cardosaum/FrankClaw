@@ -299,6 +299,7 @@ impl rustyline::Helper for ReplHelper {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustyline::completion::Completer;
 
     #[test]
     fn slash_commands_are_defined() {
@@ -312,10 +313,11 @@ mod tests {
     #[test]
     fn repl_helper_completes_slash_commands() {
         let helper = ReplHelper;
-        use rustyline::completion::Completer;
         let history = DefaultHistory::new();
         let ctx = rustyline::Context::new(&history);
-        let (start, completions) = helper.complete("/he", 3, &ctx).unwrap();
+        let (start, completions) = helper
+            .complete("/he", 3, &ctx)
+            .expect("slash command completion should succeed");
         assert_eq!(start, 0);
         assert!(completions.contains(&"/help".to_string()));
     }
@@ -323,31 +325,34 @@ mod tests {
     #[test]
     fn repl_helper_no_completions_without_slash() {
         let helper = ReplHelper;
-        use rustyline::completion::Completer;
         let history = DefaultHistory::new();
         let ctx = rustyline::Context::new(&history);
-        let (_, completions) = helper.complete("hello", 5, &ctx).unwrap();
+        let (_, completions) = helper
+            .complete("hello", 5, &ctx)
+            .expect("non-slash input should still complete successfully");
         assert!(completions.is_empty());
     }
 
     #[test]
     fn repl_helper_completes_multiple() {
         let helper = ReplHelper;
-        use rustyline::completion::Completer;
         let history = DefaultHistory::new();
         let ctx = rustyline::Context::new(&history);
         // "/e" should match /exit
-        let (_, completions) = helper.complete("/e", 2, &ctx).unwrap();
+        let (_, completions) = helper
+            .complete("/e", 2, &ctx)
+            .expect("prefix completion should succeed");
         assert!(completions.contains(&"/exit".to_string()));
     }
 
     #[test]
     fn repl_helper_no_match_for_unknown() {
         let helper = ReplHelper;
-        use rustyline::completion::Completer;
         let history = DefaultHistory::new();
         let ctx = rustyline::Context::new(&history);
-        let (_, completions) = helper.complete("/zzz", 4, &ctx).unwrap();
+        let (_, completions) = helper
+            .complete("/zzz", 4, &ctx)
+            .expect("unknown slash prefix should complete successfully");
         assert!(completions.is_empty());
     }
 }

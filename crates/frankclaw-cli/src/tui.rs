@@ -97,13 +97,14 @@ pub struct TuiConfig {
 
 /// Run the TUI chat interface.
 pub async fn run_tui(runtime: Arc<Runtime>, config: TuiConfig) -> anyhow::Result<()> {
+    std::future::ready(()).await;
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_tui_loop(&mut terminal, runtime, config).await;
+    let result = run_tui_loop(&mut terminal, &runtime, config);
 
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
@@ -111,9 +112,249 @@ pub async fn run_tui(runtime: Arc<Runtime>, config: TuiConfig) -> anyhow::Result
     result
 }
 
-async fn run_tui_loop(
+type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
+
+fn drain_stream_results(
+    messages: &mut Vec<ChatMessage>,
+    delta_rx: &mut mpsc::Receiver<StreamResult>,
+    session_key: &mut Option<SessionKey>,
+    status: &mut TuiStatus,
+) {
+    while let Ok(result) = delta_rx.try_recv() {
+        match result {
+            StreamResult::Delta(delta) => match delta {
+                StreamDelta::Text(text) => {
+                    if let Some(ChatMessage::Assistant(s)) = messages.last_mut() {
+                        s.push_str(&text);
+                    }
+                }
+                StreamDelta::ToolCallStart { name, .. } => {
+                    messages.push(ChatMessage::ToolCall(format!("{name}...")));
+                }
+                StreamDelta::Done { .. } | StreamDelta::Error(_) => {}
+                StreamDelta::ToolCallDelta { .. } | StreamDelta::ToolCallEnd { .. } => {}
+            },
+            StreamResult::Finished { session_key: sk } => {
+                *session_key = Some(sk);
+                *status = TuiStatus::Idle;
+            }
+            StreamResult::Failed(msg) => {
+                messages.push(ChatMessage::System(msg));
+                *status = TuiStatus::Error;
+            }
+        }
+    }
+}
+
+fn render_tui(
+    terminal: &mut TuiTerminal,
+    messages: &[ChatMessage],
+    input: &str,
+    scroll_offset: u16,
+    session_key: Option<&SessionKey>,
+    model_id: Option<&str>,
+    status: TuiStatus,
+) -> anyhow::Result<()> {
+    terminal.draw(|f| {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(5),    // chat log
+                Constraint::Length(3), // input
+                Constraint::Length(1), // status bar
+            ])
+            .split(f.area());
+        let (Some(chat_area), Some(input_area), Some(status_area)) =
+            (chunks.first(), chunks.get(1), chunks.get(2))
+        else {
+            return;
+        };
+
+        let mut lines: Vec<Line> = Vec::new();
+        for msg in messages {
+            let prefix = Span::styled(msg.prefix(), msg.style().add_modifier(Modifier::BOLD));
+            let content = Span::styled(msg.text(), msg.style());
+            lines.push(Line::from(vec![prefix, content]));
+        }
+
+        let chat = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Chat"))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll_offset, 0));
+        f.render_widget(chat, *chat_area);
+
+        let input_display = if input.is_empty() {
+            t!("tui.input_placeholder").to_string()
+        } else {
+            input.to_string()
+        };
+        let input_widget = Paragraph::new(input_display.as_str())
+            .block(Block::default().borders(Borders::ALL).title("Input"))
+            .style(if input.is_empty() {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::White)
+            });
+        f.render_widget(input_widget, *input_area);
+
+        let model_label = model_id.unwrap_or("default");
+        let session_label = session_key.map_or_else(|| "new".to_string(), ToString::to_string);
+        let status_label = match status {
+            TuiStatus::Idle => t!("tui.status_idle").to_string(),
+            TuiStatus::Streaming => t!("tui.status_streaming").to_string(),
+            TuiStatus::Error => t!("tui.status_error").to_string(),
+        };
+        let status_line = Line::from(vec![
+            Span::styled(
+                format!(" {status_label} "),
+                Style::default().fg(Color::Black).bg(match status {
+                    TuiStatus::Idle => Color::Green,
+                    TuiStatus::Streaming => Color::Yellow,
+                    TuiStatus::Error => Color::Red,
+                }),
+            ),
+            Span::raw(format!(" model: {model_label}  session: {session_label} ")),
+        ]);
+        let status_bar = Paragraph::new(status_line);
+        f.render_widget(status_bar, *status_area);
+    })?;
+
+    Ok(())
+}
+
+fn handle_slash_command(
+    cmd: &str,
+    args: &str,
+    messages: &mut Vec<ChatMessage>,
+    session_key: &mut Option<SessionKey>,
+    model_id: &mut Option<String>,
+    thinking_budget: &mut Option<u32>,
+) -> bool {
+    match cmd {
+        "quit" | "exit" => return true,
+        "clear" => {
+            *session_key = None;
+            messages.clear();
+            messages.push(ChatMessage::System(t!("repl.session_cleared").to_string()));
+        }
+        "help" => {
+            let help_text =
+                "/quit  /clear  /help  /session  /model [id]  /think [n|off]".to_string();
+            messages.push(ChatMessage::System(help_text));
+        }
+        "session" => {
+            let msg = match session_key {
+                Some(key) => format!("{}: {key}", t!("repl.current_session")),
+                None => t!("repl.no_session").to_string(),
+            };
+            messages.push(ChatMessage::System(msg));
+        }
+        "model" => {
+            if args.is_empty() {
+                let msg = match model_id {
+                    Some(id) => format!("{}: {id}", t!("repl.current_model")),
+                    None => t!("repl.default_model").to_string(),
+                };
+                messages.push(ChatMessage::System(msg));
+            } else {
+                *model_id = Some(args.to_string());
+                messages.push(ChatMessage::System(format!(
+                    "{}: {args}",
+                    t!("repl.model_set")
+                )));
+            }
+        }
+        "think" => match args {
+            "" => {
+                let msg = match thinking_budget {
+                    Some(budget) => format!("{}: {budget}", t!("repl.thinking_budget")),
+                    None => t!("repl.thinking_disabled").to_string(),
+                };
+                messages.push(ChatMessage::System(msg));
+            }
+            "off" | "0" => {
+                *thinking_budget = None;
+                messages.push(ChatMessage::System(
+                    t!("repl.thinking_disabled").to_string(),
+                ));
+            }
+            _ => {
+                if let Ok(budget) = args.parse::<u32>() {
+                    *thinking_budget = Some(budget);
+                    messages.push(ChatMessage::System(format!(
+                        "{}: {budget}",
+                        t!("repl.thinking_budget_set")
+                    )));
+                }
+            }
+        },
+        _ => {
+            messages.push(ChatMessage::System(format!(
+                "{}: /{cmd}",
+                t!("repl.unknown_command")
+            )));
+        }
+    }
+
+    false
+}
+
+fn spawn_chat_request(
+    runtime: &Arc<Runtime>,
+    agent_id: Option<AgentId>,
+    session_key: Option<SessionKey>,
+    message: String,
+    model_id: Option<String>,
+    thinking_budget: Option<u32>,
+    result_tx: mpsc::Sender<StreamResult>,
+) {
+    let runtime = runtime.clone();
+    let (stream_tx, mut stream_rx) = mpsc::channel::<StreamDelta>(64);
+    let request = ChatRequest {
+        agent_id,
+        session_key,
+        message,
+        attachments: Vec::new(),
+        model_id,
+        max_tokens: None,
+        temperature: None,
+        stream_tx: Some(stream_tx),
+        thinking_budget,
+        channel_id: None,
+        channel_capabilities: None,
+        canvas: Some(frankclaw_gateway::canvas::CanvasStore::new()),
+        cancel_token: None,
+        approval_tx: None,
+    };
+
+    tokio::spawn(async move {
+        let forward_tx = result_tx.clone();
+        let forward_handle = tokio::spawn(async move {
+            while let Some(delta) = stream_rx.recv().await {
+                let _ = forward_tx.send(StreamResult::Delta(delta)).await;
+            }
+        });
+
+        match runtime.chat(request).await {
+            Ok(resp) => {
+                let _ = forward_handle.await;
+                let _ = result_tx
+                    .send(StreamResult::Finished {
+                        session_key: resp.session_key,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = forward_handle.await;
+                let _ = result_tx.send(StreamResult::Failed(e.to_string())).await;
+            }
+        }
+    });
+}
+
+fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    runtime: Arc<Runtime>,
+    runtime: &Arc<Runtime>,
     config: TuiConfig,
 ) -> anyhow::Result<()> {
     let mut messages: Vec<ChatMessage> = Vec::new();
@@ -131,263 +372,85 @@ async fn run_tui_loop(
     messages.push(ChatMessage::System(t!("repl.welcome").to_string()));
 
     loop {
-        // Drain pending stream deltas.
-        while let Ok(result) = delta_rx.try_recv() {
-            match result {
-                StreamResult::Delta(delta) => match delta {
-                    StreamDelta::Text(text) => {
-                        if let Some(ChatMessage::Assistant(s)) = messages.last_mut() {
-                            s.push_str(&text);
-                        }
-                    }
-                    StreamDelta::ToolCallStart { name, .. } => {
-                        messages.push(ChatMessage::ToolCall(format!("{name}...")));
-                    }
-                    StreamDelta::Done { .. } | StreamDelta::Error(_) => {}
-                    StreamDelta::ToolCallDelta { .. } | StreamDelta::ToolCallEnd { .. } => {}
-                },
-                StreamResult::Finished { session_key: sk } => {
-                    session_key = Some(sk);
-                    status = TuiStatus::Idle;
-                }
-                StreamResult::Failed(msg) => {
-                    messages.push(ChatMessage::System(msg));
-                    status = TuiStatus::Error;
-                }
-            }
-        }
-
-        // Render.
-        terminal.draw(|f| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(5),    // chat log
-                    Constraint::Length(3), // input
-                    Constraint::Length(1), // status bar
-                ])
-                .split(f.area());
-
-            // Chat log.
-            let mut lines: Vec<Line> = Vec::new();
-            for msg in &messages {
-                let prefix = Span::styled(msg.prefix(), msg.style().add_modifier(Modifier::BOLD));
-                let content = Span::styled(msg.text(), msg.style());
-                lines.push(Line::from(vec![prefix, content]));
-            }
-
-            let chat = Paragraph::new(lines.clone())
-                .block(Block::default().borders(Borders::ALL).title("Chat"))
-                .wrap(Wrap { trim: false })
-                .scroll((scroll_offset, 0));
-            f.render_widget(chat, chunks[0]);
-
-            // Input area.
-            let input_display = if input.is_empty() {
-                t!("tui.input_placeholder").to_string()
-            } else {
-                input.clone()
-            };
-            let input_widget = Paragraph::new(input_display.as_str())
-                .block(Block::default().borders(Borders::ALL).title("Input"))
-                .style(if input.is_empty() {
-                    Style::default().fg(Color::DarkGray)
-                } else {
-                    Style::default().fg(Color::White)
-                });
-            f.render_widget(input_widget, chunks[1]);
-
-            // Status bar.
-            let model_label = model_id.as_deref().unwrap_or("default");
-            let session_label = session_key
-                .as_ref()
-                .map(|k| k.to_string())
-                .unwrap_or_else(|| "new".to_string());
-            let status_label = match status {
-                TuiStatus::Idle => t!("tui.status_idle").to_string(),
-                TuiStatus::Streaming => t!("tui.status_streaming").to_string(),
-                TuiStatus::Error => t!("tui.status_error").to_string(),
-            };
-            let status_line = Line::from(vec![
-                Span::styled(
-                    format!(" {status_label} "),
-                    Style::default().fg(Color::Black).bg(match status {
-                        TuiStatus::Idle => Color::Green,
-                        TuiStatus::Streaming => Color::Yellow,
-                        TuiStatus::Error => Color::Red,
-                    }),
-                ),
-                Span::raw(format!(" model: {model_label}  session: {session_label} ")),
-            ]);
-            let status_bar = Paragraph::new(status_line);
-            f.render_widget(status_bar, chunks[2]);
-        })?;
+        drain_stream_results(&mut messages, &mut delta_rx, &mut session_key, &mut status);
+        render_tui(
+            terminal,
+            &messages,
+            &input,
+            scroll_offset,
+            session_key.as_ref(),
+            model_id.as_deref(),
+            status,
+        )?;
 
         // Poll for input events.
-        if event::poll(std::time::Duration::from_millis(POLL_INTERVAL_MS))? {
-            if let Event::Key(key) = event::read()? {
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL)
-                    | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                        break;
-                    }
-                    (KeyCode::Enter, _) => {
-                        let trimmed = input.trim().to_string();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-
-                        // Handle slash commands.
-                        if let Some((cmd, args)) = parse_slash_command(&trimmed) {
-                            match cmd {
-                                "quit" | "exit" => break,
-                                "clear" => {
-                                    session_key = None;
-                                    messages.clear();
-                                    messages.push(ChatMessage::System(
-                                        t!("repl.session_cleared").to_string(),
-                                    ));
-                                }
-                                "help" => {
-                                    let help_text = format!(
-                                        "/quit  /clear  /help  /session  /model [id]  /think [n|off]"
-                                    );
-                                    messages.push(ChatMessage::System(help_text));
-                                }
-                                "session" => {
-                                    let msg = match &session_key {
-                                        Some(k) => format!("{}: {k}", t!("repl.current_session")),
-                                        None => t!("repl.no_session").to_string(),
-                                    };
-                                    messages.push(ChatMessage::System(msg));
-                                }
-                                "model" => {
-                                    if args.is_empty() {
-                                        let msg = match &model_id {
-                                            Some(id) => {
-                                                format!("{}: {id}", t!("repl.current_model"))
-                                            }
-                                            None => t!("repl.default_model").to_string(),
-                                        };
-                                        messages.push(ChatMessage::System(msg));
-                                    } else {
-                                        model_id = Some(args.to_string());
-                                        messages.push(ChatMessage::System(format!(
-                                            "{}: {args}",
-                                            t!("repl.model_set")
-                                        )));
-                                    }
-                                }
-                                "think" => {
-                                    if args.is_empty() {
-                                        let msg = match thinking_budget {
-                                            Some(b) => {
-                                                format!("{}: {b}", t!("repl.thinking_budget"))
-                                            }
-                                            None => t!("repl.thinking_disabled").to_string(),
-                                        };
-                                        messages.push(ChatMessage::System(msg));
-                                    } else if args == "off" || args == "0" {
-                                        thinking_budget = None;
-                                        messages.push(ChatMessage::System(
-                                            t!("repl.thinking_disabled").to_string(),
-                                        ));
-                                    } else if let Ok(b) = args.parse::<u32>() {
-                                        thinking_budget = Some(b);
-                                        messages.push(ChatMessage::System(format!(
-                                            "{}: {b}",
-                                            t!("repl.thinking_budget_set")
-                                        )));
-                                    }
-                                }
-                                _ => {
-                                    messages.push(ChatMessage::System(format!(
-                                        "{}: /{cmd}",
-                                        t!("repl.unknown_command")
-                                    )));
-                                }
-                            }
-                            input.clear();
-                            continue;
-                        }
-
-                        // Send message to runtime.
-                        messages.push(ChatMessage::User(trimmed.clone()));
-                        messages.push(ChatMessage::Assistant(String::new()));
-                        status = TuiStatus::Streaming;
-
-                        let (stream_tx, mut stream_rx) = mpsc::channel::<StreamDelta>(64);
-                        let request = ChatRequest {
-                            agent_id: agent_id.clone(),
-                            session_key: session_key.clone(),
-                            message: trimmed,
-                            attachments: Vec::new(),
-                            model_id: model_id.clone(),
-                            max_tokens: None,
-                            temperature: None,
-                            stream_tx: Some(stream_tx),
-                            thinking_budget,
-                            channel_id: None,
-                            channel_capabilities: None,
-                            canvas: Some(frankclaw_gateway::canvas::CanvasStore::new()),
-                            cancel_token: None,
-                            approval_tx: None,
-                        };
-
-                        let rt = runtime.clone();
-                        let result_tx = delta_tx.clone();
-                        tokio::spawn(async move {
-                            // Forward stream deltas.
-                            let forward_tx = result_tx.clone();
-                            let forward_handle = tokio::spawn(async move {
-                                while let Some(delta) = stream_rx.recv().await {
-                                    let _ = forward_tx.send(StreamResult::Delta(delta)).await;
-                                }
-                            });
-
-                            match rt.chat(request).await {
-                                Ok(resp) => {
-                                    forward_handle.await.ok();
-                                    let _ = result_tx
-                                        .send(StreamResult::Finished {
-                                            session_key: resp.session_key,
-                                        })
-                                        .await;
-                                }
-                                Err(e) => {
-                                    forward_handle.await.ok();
-                                    let _ =
-                                        result_tx.send(StreamResult::Failed(e.to_string())).await;
-                                }
-                            }
-                        });
-
-                        input.clear();
-                        scroll_offset = 0;
-                    }
-                    (KeyCode::Char(c), _) => {
-                        input.push(c);
-                    }
-                    (KeyCode::Backspace, _) => {
-                        input.pop();
-                    }
-                    (KeyCode::Up, _) => {
-                        scroll_offset = scroll_offset.saturating_sub(1);
-                    }
-                    (KeyCode::Down, _) => {
-                        scroll_offset = scroll_offset.saturating_add(1);
-                    }
-                    (KeyCode::PageUp, _) => {
-                        scroll_offset = scroll_offset.saturating_sub(PAGE_SCROLL);
-                    }
-                    (KeyCode::PageDown, _) => {
-                        scroll_offset = scroll_offset.saturating_add(PAGE_SCROLL);
-                    }
-                    (KeyCode::Esc, _) => {
-                        input.clear();
-                    }
-                    _ => {}
+        if event::poll(std::time::Duration::from_millis(POLL_INTERVAL_MS))?
+            && let Event::Key(key) = event::read()?
+        {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) => {
+                    break;
                 }
+                (KeyCode::Enter, _) => {
+                    let trimmed = input.trim().to_string();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    if let Some((cmd, args)) = parse_slash_command(&trimmed) {
+                        let should_exit = handle_slash_command(
+                            cmd,
+                            args,
+                            &mut messages,
+                            &mut session_key,
+                            &mut model_id,
+                            &mut thinking_budget,
+                        );
+                        input.clear();
+                        if should_exit {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    messages.push(ChatMessage::User(trimmed.clone()));
+                    messages.push(ChatMessage::Assistant(String::new()));
+                    status = TuiStatus::Streaming;
+                    spawn_chat_request(
+                        runtime,
+                        agent_id.clone(),
+                        session_key.clone(),
+                        trimmed,
+                        model_id.clone(),
+                        thinking_budget,
+                        delta_tx.clone(),
+                    );
+
+                    input.clear();
+                    scroll_offset = 0;
+                }
+                (KeyCode::Char(c), _) => {
+                    input.push(c);
+                }
+                (KeyCode::Backspace, _) => {
+                    input.pop();
+                }
+                (KeyCode::Up, _) => {
+                    scroll_offset = scroll_offset.saturating_sub(1);
+                }
+                (KeyCode::Down, _) => {
+                    scroll_offset = scroll_offset.saturating_add(1);
+                }
+                (KeyCode::PageUp, _) => {
+                    scroll_offset = scroll_offset.saturating_sub(PAGE_SCROLL);
+                }
+                (KeyCode::PageDown, _) => {
+                    scroll_offset = scroll_offset.saturating_add(PAGE_SCROLL);
+                }
+                (KeyCode::Esc, _) => {
+                    input.clear();
+                }
+                _ => {}
             }
         }
     }

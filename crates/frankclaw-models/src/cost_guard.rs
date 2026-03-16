@@ -262,18 +262,27 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn unlimited_allows_everything(unlimited_guard: CostGuard) {
-        assert!(unlimited_guard.check_allowed().await.is_ok());
+        unlimited_guard
+            .check_allowed()
+            .await
+            .expect("unlimited guard should allow fresh requests");
 
         unlimited_guard
             .record_llm_call("gpt-4o", 100_000, 100_000)
             .await;
-        assert!(unlimited_guard.check_allowed().await.is_ok());
+        unlimited_guard
+            .check_allowed()
+            .await
+            .expect("unlimited guard should stay permissive after usage");
     }
 
     #[rstest]
     #[tokio::test]
     async fn daily_budget_enforcement(daily_budget_guard: CostGuard) {
-        assert!(daily_budget_guard.check_allowed().await.is_ok());
+        daily_budget_guard
+            .check_allowed()
+            .await
+            .expect("daily budget guard should allow requests before spending");
 
         // gpt-4o: input=$0.0000025/tok, output=$0.00001/tok
         // 10000 input + 10000 output ≈ $0.125 >> $0.01
@@ -281,33 +290,38 @@ mod tests {
             .record_llm_call("gpt-4o", 10_000, 10_000)
             .await;
 
-        let result = daily_budget_guard.check_allowed().await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            CostLimitExceeded::DailyBudget { limit_cents, .. } => {
-                assert_eq!(limit_cents, 1);
-            }
-            other => panic!("Expected DailyBudget, got {:?}", other),
-        }
+        let err = daily_budget_guard
+            .check_allowed()
+            .await
+            .expect_err("daily budget guard should reject requests past the limit");
+        assert!(matches!(
+            err,
+            CostLimitExceeded::DailyBudget { limit_cents: 1, .. }
+        ));
     }
 
     #[rstest]
     #[tokio::test]
     async fn hourly_rate_enforcement(hourly_rate_guard: CostGuard) {
         for _ in 0..3 {
-            assert!(hourly_rate_guard.check_allowed().await.is_ok());
+            hourly_rate_guard
+                .check_allowed()
+                .await
+                .expect("hourly rate guard should allow requests before the limit");
             hourly_rate_guard.record_llm_call("gpt-4o", 10, 10).await;
         }
 
-        let result = hourly_rate_guard.check_allowed().await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            CostLimitExceeded::HourlyRate { actions, limit } => {
-                assert_eq!(actions, 3);
-                assert_eq!(limit, 3);
+        let err = hourly_rate_guard
+            .check_allowed()
+            .await
+            .expect_err("hourly rate guard should reject requests past the limit");
+        assert!(matches!(
+            err,
+            CostLimitExceeded::HourlyRate {
+                actions: 3,
+                limit: 3
             }
-            other => panic!("Expected HourlyRate, got {:?}", other),
-        }
+        ));
     }
 
     #[rstest]
@@ -389,11 +403,17 @@ mod tests {
             max_actions_per_hour: Some(100),
         });
 
-        assert!(guard.check_allowed().await.is_ok());
+        guard
+            .check_allowed()
+            .await
+            .expect("fresh guard should allow requests");
         assert_eq!(guard.actions_this_hour().await, 0);
 
         guard.record_llm_call("gpt-4o", 10, 10).await;
-        assert!(guard.check_allowed().await.is_ok());
+        guard
+            .check_allowed()
+            .await
+            .expect("guard should still allow requests below the action limit");
         assert_eq!(guard.actions_this_hour().await, 1);
     }
 }

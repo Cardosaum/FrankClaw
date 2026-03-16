@@ -300,7 +300,7 @@ impl<P: EmbeddingProvider> EmbeddingProvider for CachedEmbeddingProvider<P> {
         }
 
         if !uncached_texts.is_empty() {
-            let refs: Vec<&str> = uncached_texts.iter().map(|s| *s).collect();
+            let refs: Vec<&str> = uncached_texts.clone();
             let fresh = self.inner.embed_batch(&refs).await?;
             for (j, embedding) in fresh.into_iter().enumerate() {
                 let idx = uncached_indices[j];
@@ -534,7 +534,11 @@ fn f32_to_bytes(data: &[f32]) -> Vec<u8> {
 
 fn bytes_to_f32(data: &[u8]) -> Vec<f32> {
     data.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .map(|chunk| {
+            let mut bytes = [0; 4];
+            bytes.copy_from_slice(chunk);
+            f32::from_le_bytes(bytes)
+        })
         .collect()
 }
 
@@ -544,7 +548,7 @@ mod tests {
 
     #[test]
     fn f32_roundtrip() {
-        let data = vec![1.0f32, -2.5, 3.14, 0.0];
+        let data = vec![1.0f32, -2.5, std::f32::consts::PI, 0.0];
         let bytes = f32_to_bytes(&data);
         let restored = bytes_to_f32(&bytes);
         assert_eq!(data, restored);

@@ -173,7 +173,9 @@ mod tests {
         let req = McpRequest::initialize(1);
         assert_eq!(req.method, "initialize");
         assert_eq!(req.id, Some(1));
-        let params = req.params.unwrap();
+        let params = req
+            .params
+            .expect("initialize request should include params");
         assert_eq!(params["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(params["clientInfo"]["name"], "frankclaw");
     }
@@ -198,7 +200,7 @@ mod tests {
         let req = McpRequest::call_tool(3, "my_tool", serde_json::json!({"key": "value"}));
         assert_eq!(req.method, "tools/call");
         assert_eq!(req.id, Some(3));
-        let params = req.params.unwrap();
+        let params = req.params.expect("tool call request should include params");
         assert_eq!(params["name"], "my_tool");
         assert_eq!(params["arguments"]["key"], "value");
     }
@@ -206,7 +208,8 @@ mod tests {
     #[test]
     fn deserialize_response_with_numeric_id() {
         let json = r#"{"jsonrpc":"2.0","id":42,"result":{"ok":true}}"#;
-        let resp: McpResponse = serde_json::from_str(json).unwrap();
+        let resp: McpResponse =
+            serde_json::from_str(json).expect("numeric-id response should deserialize");
         assert_eq!(resp.id, Some(42));
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
@@ -215,16 +218,20 @@ mod tests {
     #[test]
     fn deserialize_response_with_string_id() {
         let json = r#"{"jsonrpc":"2.0","id":"42","result":null}"#;
-        let resp: McpResponse = serde_json::from_str(json).unwrap();
+        let resp: McpResponse =
+            serde_json::from_str(json).expect("string-id response should deserialize");
         assert_eq!(resp.id, Some(42));
     }
 
     #[test]
     fn deserialize_response_with_null_id() {
         let json = r#"{"jsonrpc":"2.0","id":null,"error":{"code":-1,"message":"fail"}}"#;
-        let resp: McpResponse = serde_json::from_str(json).unwrap();
+        let resp: McpResponse =
+            serde_json::from_str(json).expect("null-id response should deserialize");
         assert!(resp.id.is_none());
-        let err = resp.error.unwrap();
+        let err = resp
+            .error
+            .expect("error response should include an error payload");
         assert_eq!(err.code, -1);
         assert_eq!(err.message, "fail");
     }
@@ -240,7 +247,7 @@ mod tests {
                 "required": ["path"]
             }
         }"#;
-        let tool: McpTool = serde_json::from_str(json).unwrap();
+        let tool: McpTool = serde_json::from_str(json).expect("tool definition should deserialize");
         assert_eq!(tool.name, "read_file");
         assert_eq!(tool.description, "Read a file");
         assert!(tool.input_schema["properties"]["path"].is_object());
@@ -254,8 +261,11 @@ mod tests {
             "inputSchema": {"type": "object"},
             "annotations": {"destructiveHint": true, "readOnlyHint": false}
         }"#;
-        let tool: McpTool = serde_json::from_str(json).unwrap();
-        let annotations = tool.annotations.unwrap();
+        let tool: McpTool =
+            serde_json::from_str(json).expect("annotated tool definition should deserialize");
+        let annotations = tool
+            .annotations
+            .expect("annotated tool should include annotations");
         assert!(annotations.destructive_hint);
         assert!(!annotations.read_only_hint);
     }
@@ -263,7 +273,8 @@ mod tests {
     #[test]
     fn deserialize_tool_with_defaults() {
         let json = r#"{"name": "minimal"}"#;
-        let tool: McpTool = serde_json::from_str(json).unwrap();
+        let tool: McpTool =
+            serde_json::from_str(json).expect("minimal tool definition should deserialize");
         assert_eq!(tool.name, "minimal");
         assert_eq!(tool.description, "");
         assert_eq!(tool.input_schema["type"], "object");
@@ -273,10 +284,11 @@ mod tests {
     #[test]
     fn deserialize_content_blocks() {
         let text_json = r#"{"type": "text", "text": "hello"}"#;
-        let block: ContentBlock = serde_json::from_str(text_json).unwrap();
-        match block {
-            ContentBlock::Text { text } => assert_eq!(text, "hello"),
-            _ => panic!("expected text block"),
+        let block: ContentBlock =
+            serde_json::from_str(text_json).expect("content block should deserialize");
+        assert!(matches!(block, ContentBlock::Text { .. }));
+        if let ContentBlock::Text { text } = block {
+            assert_eq!(text, "hello");
         }
     }
 
@@ -286,7 +298,8 @@ mod tests {
             "content": [{"type": "text", "text": "result"}],
             "isError": false
         }"#;
-        let result: CallToolResult = serde_json::from_str(json).unwrap();
+        let result: CallToolResult =
+            serde_json::from_str(json).expect("successful tool result should deserialize");
         assert!(!result.is_error);
         assert_eq!(result.content.len(), 1);
     }
@@ -297,7 +310,8 @@ mod tests {
             "content": [{"type": "text", "text": "something failed"}],
             "isError": true
         }"#;
-        let result: CallToolResult = serde_json::from_str(json).unwrap();
+        let result: CallToolResult =
+            serde_json::from_str(json).expect("error tool result should deserialize");
         assert!(result.is_error);
     }
 }

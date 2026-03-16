@@ -70,6 +70,8 @@ pub fn verify_signature(
 }
 
 pub fn extract_message(mapping: &WebhookMapping, payload: &serde_json::Value) -> Result<String> {
+    const TEXT_PLACEHOLDER: &str = "{text}";
+
     let raw_text = if let Some(ref path) = mapping.json_path {
         extract_by_path(payload, path)
     } else {
@@ -94,7 +96,7 @@ pub fn extract_message(mapping: &WebhookMapping, payload: &serde_json::Value) ->
 
     // Apply template if configured.
     if let Some(ref template) = mapping.template {
-        Ok(template.replace("{text}", &text))
+        Ok(template.replace(TEXT_PLACEHOLDER, &text))
     } else {
         Ok(text)
     }
@@ -281,7 +283,7 @@ mod tests {
         let payload = serde_json::json!({
             "data": { "message": { "text": "nested value" } }
         });
-        let msg = extract_message(&mapping, &payload).unwrap();
+        let msg = extract_message(&mapping, &payload).expect("nested message should extract");
         assert_eq!(msg, "nested value");
     }
 
@@ -293,7 +295,8 @@ mod tests {
             ..Default::default()
         };
         let payload = serde_json::json!({ "data": {} });
-        assert!(extract_message(&mapping, &payload).is_err());
+        let _err = extract_message(&mapping, &payload)
+            .expect_err("missing nested path should return an error");
     }
 
     #[test]
@@ -305,7 +308,8 @@ mod tests {
             ..Default::default()
         };
         let payload = serde_json::json!({ "message": "hello" });
-        let msg = extract_message(&mapping, &payload).unwrap();
+        let msg =
+            extract_message(&mapping, &payload).expect("template should apply to extracted text");
         assert_eq!(msg, "Webhook received: hello");
     }
 

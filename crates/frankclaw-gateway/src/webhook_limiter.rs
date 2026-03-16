@@ -15,6 +15,12 @@ struct RateCounter {
     window_start: std::time::Instant,
 }
 
+impl Default for WebhookLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebhookLimiter {
     pub fn new() -> Self {
         Self {
@@ -84,8 +90,14 @@ mod tests {
         assert!(p2.is_some());
         // Third should block, but we can test that the semaphore is full
         // by using try_acquire on the semaphore directly.
-        let sem = limiter.semaphores.get("test").unwrap().clone();
-        assert!(sem.try_acquire().is_err());
+        let sem = limiter
+            .semaphores
+            .get("test")
+            .expect("semaphore entry should exist after acquiring permits")
+            .clone();
+        let _err = sem
+            .try_acquire()
+            .expect_err("third permit should fail while the semaphore is full");
     }
 
     #[test]

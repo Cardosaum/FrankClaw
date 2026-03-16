@@ -181,7 +181,7 @@ mod tests {
     fn session_key_parse_round_trips(web_channel: ChannelId) {
         let agent = AgentId::new("a1");
         let key = SessionKey::new(&agent, &web_channel, "user42");
-        let (a, c, acct) = key.parse().unwrap();
+        let (a, c, acct) = key.parse().expect("well-formed session key should parse");
         assert_eq!(a.as_str(), "a1");
         assert_eq!(c.as_str(), "web");
         assert_eq!(acct, "user42");

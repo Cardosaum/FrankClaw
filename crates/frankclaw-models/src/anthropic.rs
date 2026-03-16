@@ -399,6 +399,10 @@ impl AnthropicStreamState {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "stream event parsing is easier to audit as one provider-specific state machine"
+)]
 fn apply_stream_event(
     state: &mut AnthropicStreamState,
     event_type: Option<&str>,
@@ -730,7 +734,7 @@ mod tests {
         state
             .tool_calls
             .get_mut(&0)
-            .unwrap()
+            .expect("tool call state should exist")
             .arguments
             .push_str("aw\"}");
 
@@ -767,8 +771,11 @@ mod tests {
         let body = build_request_body(&request);
         assert!(body.get("thinking").is_none());
         // Temperature preserved as-is (f32 precision)
-        assert!(body["temperature"].as_f64().unwrap() > 0.69);
-        assert!(body["temperature"].as_f64().unwrap() < 0.71);
+        let temperature = body["temperature"]
+            .as_f64()
+            .expect("temperature should serialize as f64");
+        assert!(temperature > 0.69);
+        assert!(temperature < 0.71);
     }
 
     #[test]

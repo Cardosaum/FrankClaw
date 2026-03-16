@@ -80,7 +80,13 @@ mod tests {
         let chunks = chunk_text(text, 30);
         assert!(chunks.len() >= 2);
         assert!(chunks[0].text.contains("First paragraph"));
-        assert!(chunks.last().unwrap().text.contains("paragraph"));
+        assert!(
+            chunks
+                .last()
+                .expect("split text should produce a final chunk")
+                .text
+                .contains("paragraph")
+        );
     }
 
     #[test]

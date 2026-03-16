@@ -587,6 +587,21 @@ impl SessionStore for SqliteSessionStore {
     }
 }
 
+/// Extension trait for `rusqlite::Result<Option<T>>`.
+trait OptionalExt<T> {
+    fn optional(self) -> rusqlite::Result<Option<T>>;
+}
+
+impl<T> OptionalExt<T> for rusqlite::Result<T> {
+    fn optional(self) -> rusqlite::Result<Option<T>> {
+        match self {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,8 +834,8 @@ mod tests {
                 },
             )
             .await;
-        assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("maximum size"));
+        let err = err.expect_err("oversized transcript content should be rejected");
+        assert!(err.to_string().contains("maximum size"));
 
         // Content at exactly 1MB should succeed.
         let just_right = "x".repeat(MAX_TRANSCRIPT_ENTRY_BYTES);
@@ -886,8 +901,9 @@ mod tests {
         let key2 = MasterKey::from_bytes([2u8; 32]);
         let store2 = SqliteSessionStore::open(&path, Some(&key2)).expect("store should open");
         let err = store2.get_transcript(&session_key, 10, None).await;
-        assert!(err.is_err());
-        let msg = err.unwrap_err().to_string();
+        let msg = err
+            .expect_err("reading encrypted transcript with the wrong key should fail")
+            .to_string();
         assert!(
             msg.contains("key rotation") || msg.contains("decryption failed"),
             "error should mention key rotation: {msg}"
@@ -1145,7 +1161,13 @@ mod tests {
         let transcript = store.get_transcript(&key, 10, None).await.expect("get");
         assert_eq!(transcript.len(), 1);
         assert_eq!(transcript[0].content, "encrypted content 🔐");
-        assert_eq!(transcript[0].metadata.as_ref().unwrap()["tool"], "bash");
+        assert_eq!(
+            transcript[0]
+                .metadata
+                .as_ref()
+                .expect("encrypted transcript metadata should be preserved")["tool"],
+            "bash"
+        );
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
@@ -1223,20 +1245,5 @@ mod tests {
             .expect("upsert should work after re-migration");
 
         let _ = std::fs::remove_dir_all(temp_dir);
-    }
-}
-
-/// Extension trait for `rusqlite::Result<Option<T>>`.
-trait OptionalExt<T> {
-    fn optional(self) -> rusqlite::Result<Option<T>>;
-}
-
-impl<T> OptionalExt<T> for rusqlite::Result<T> {
-    fn optional(self) -> rusqlite::Result<Option<T>> {
-        match self {
-            Ok(v) => Ok(Some(v)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
     }
 }

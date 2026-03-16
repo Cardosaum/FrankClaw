@@ -403,21 +403,24 @@ mod tests {
     #[test]
     fn extract_url_from_line_finds_https() {
         let line = "INFO: tunnel started at https://abc.trycloudflare.com finished";
-        let url = extract_url_from_line(line, "https://").unwrap();
+        let url = extract_url_from_line(line, "https://")
+            .expect("https URL should be extracted from the log line");
         assert_eq!(url, "https://abc.trycloudflare.com");
     }
 
     #[test]
     fn extract_url_from_line_finds_http() {
         let line = "listening on http://localhost:8080";
-        let url = extract_url_from_line(line, "http://").unwrap();
+        let url = extract_url_from_line(line, "http://")
+            .expect("http URL should be extracted from the log line");
         assert_eq!(url, "http://localhost:8080");
     }
 
     #[test]
     fn extract_url_from_line_with_logfmt_prefix() {
         let line = "t=2024 lvl=info msg=started url=https://abc.ngrok-free.app addr=localhost:8080";
-        let url = extract_url_from_line(line, "url=https://").unwrap();
+        let url = extract_url_from_line(line, "url=https://")
+            .expect("URL should be extracted from logfmt output");
         assert_eq!(url, "https://abc.ngrok-free.app");
     }
 
@@ -430,7 +433,8 @@ mod tests {
     #[test]
     fn extract_url_from_line_url_at_end() {
         let line = "tunnel: https://example.com";
-        let url = extract_url_from_line(line, "https://").unwrap();
+        let url = extract_url_from_line(line, "https://")
+            .expect("URL at the end of the line should still be extracted");
         assert_eq!(url, "https://example.com");
     }
 
@@ -458,7 +462,12 @@ mod tests {
             public_url: Arc::new(RwLock::new(Some("https://example.com".into()))),
             child: Arc::new(Mutex::new(None)),
         };
-        assert_eq!(tunnel.public_url().unwrap(), "https://example.com");
+        assert_eq!(
+            tunnel
+                .public_url()
+                .expect("public URL should be available once set"),
+            "https://example.com"
+        );
     }
 
     #[tokio::test]
@@ -484,7 +493,7 @@ mod tests {
         let cursor = std::io::Cursor::new(data.to_vec());
         let url = extract_url_from_stream(cursor, "https://", Duration::from_secs(5))
             .await
-            .unwrap();
+            .expect("URL should be extracted from the stream");
         assert_eq!(url, "https://tunnel.example.com");
     }
 
@@ -493,6 +502,6 @@ mod tests {
         let data = b"no urls\njust text\n";
         let cursor = std::io::Cursor::new(data.to_vec());
         let result = extract_url_from_stream(cursor, "https://", Duration::from_millis(100)).await;
-        assert!(result.is_err());
+        let _err = result.expect_err("missing URL should time out");
     }
 }

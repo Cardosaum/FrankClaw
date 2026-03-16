@@ -315,14 +315,16 @@ mod tests {
             schedule: "0 9 * * MON-FRI".into(),
             timezone: Some("America/New_York".into()),
         };
-        let json = serde_json::to_string(&trigger).unwrap();
-        let deserialized: TriggerType = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            TriggerType::Cron { schedule, timezone } => {
-                assert_eq!(schedule, "0 9 * * MON-FRI");
-                assert_eq!(timezone.unwrap(), "America/New_York");
-            }
-            _ => panic!("expected Cron trigger"),
+        let json = serde_json::to_string(&trigger).expect("cron trigger should serialize");
+        let deserialized: TriggerType =
+            serde_json::from_str(&json).expect("cron trigger should deserialize");
+        assert!(matches!(deserialized, TriggerType::Cron { .. }));
+        if let TriggerType::Cron { schedule, timezone } = deserialized {
+            assert_eq!(schedule, "0 9 * * MON-FRI");
+            assert_eq!(
+                timezone.expect("cron trigger should preserve timezone"),
+                "America/New_York"
+            );
         }
     }
 
@@ -332,15 +334,17 @@ mod tests {
             channel: Some("telegram".into()),
             pattern: r"(?i)deploy\s+\w+".into(),
         };
-        let json = serde_json::to_string(&trigger).unwrap();
+        let json = serde_json::to_string(&trigger).expect("event trigger should serialize");
         assert!(json.contains("\"type\":\"event\""));
-        let deserialized: TriggerType = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            TriggerType::Event { channel, pattern } => {
-                assert_eq!(channel.unwrap(), "telegram");
-                assert!(pattern.contains("deploy"));
-            }
-            _ => panic!("expected Event trigger"),
+        let deserialized: TriggerType =
+            serde_json::from_str(&json).expect("event trigger should deserialize");
+        assert!(matches!(deserialized, TriggerType::Event { .. }));
+        if let TriggerType::Event { channel, pattern } = deserialized {
+            assert_eq!(
+                channel.expect("event trigger should preserve channel"),
+                "telegram"
+            );
+            assert!(pattern.contains("deploy"));
         }
     }
 
@@ -353,26 +357,26 @@ mod tests {
             event_type: "issue.opened".into(),
             filters,
         };
-        let json = serde_json::to_string(&trigger).unwrap();
-        let deserialized: TriggerType = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            TriggerType::SystemEvent {
-                source,
-                event_type,
-                filters,
-            } => {
-                assert_eq!(source, "github");
-                assert_eq!(event_type, "issue.opened");
-                assert_eq!(filters.get("repo").unwrap(), "frankclaw");
-            }
-            _ => panic!("expected SystemEvent trigger"),
+        let json = serde_json::to_string(&trigger).expect("system event trigger should serialize");
+        let deserialized: TriggerType =
+            serde_json::from_str(&json).expect("system event trigger should deserialize");
+        assert!(matches!(deserialized, TriggerType::SystemEvent { .. }));
+        if let TriggerType::SystemEvent {
+            source,
+            event_type,
+            filters,
+        } = deserialized
+        {
+            assert_eq!(source, "github");
+            assert_eq!(event_type, "issue.opened");
+            assert_eq!(&filters["repo"], "frankclaw");
         }
     }
 
     #[test]
     fn manual_trigger_serialization() {
         let trigger = TriggerType::Manual;
-        let json = serde_json::to_string(&trigger).unwrap();
+        let json = serde_json::to_string(&trigger).expect("manual trigger should serialize");
         assert!(json.contains("\"type\":\"manual\""));
     }
 
@@ -394,7 +398,11 @@ mod tests {
             dedup_window_secs: Some(60),
             ..Default::default()
         };
-        assert_eq!(g.dedup_window().unwrap(), Duration::from_secs(60));
+        assert_eq!(
+            g.dedup_window()
+                .expect("dedup window should exist when configured"),
+            Duration::from_secs(60)
+        );
     }
 
     // --- TriggerState ---
@@ -416,9 +424,10 @@ mod tests {
             max_concurrent: 1,
             ..Default::default()
         };
-        match state.can_fire(&guardrails) {
-            FireCheck::Blocked { reason } => assert!(reason.contains("max concurrent")),
-            _ => panic!("expected blocked"),
+        let can_fire = state.can_fire(&guardrails);
+        assert!(matches!(can_fire, FireCheck::Blocked { .. }));
+        if let FireCheck::Blocked { reason } = can_fire {
+            assert!(reason.contains("max concurrent"));
         }
     }
 
@@ -432,9 +441,10 @@ mod tests {
             cooldown_secs: 300,
             ..Default::default()
         };
-        match state.can_fire(&guardrails) {
-            FireCheck::Blocked { reason } => assert!(reason.contains("cooldown")),
-            _ => panic!("expected blocked"),
+        let can_fire = state.can_fire(&guardrails);
+        assert!(matches!(can_fire, FireCheck::Blocked { .. }));
+        if let FireCheck::Blocked { reason } = can_fire {
+            assert!(reason.contains("cooldown"));
         }
     }
 
@@ -640,19 +650,19 @@ mod tests {
             context_paths: vec!["README.md".into()],
             max_tokens: 1024,
         };
-        let json = serde_json::to_string(&action).unwrap();
-        let deserialized: RoutineAction = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            RoutineAction::Lightweight {
-                prompt,
-                context_paths,
-                max_tokens,
-            } => {
-                assert_eq!(prompt, "check status");
-                assert_eq!(context_paths, vec!["README.md"]);
-                assert_eq!(max_tokens, 1024);
-            }
-            _ => panic!("expected Lightweight"),
+        let json = serde_json::to_string(&action).expect("lightweight action should serialize");
+        let deserialized: RoutineAction =
+            serde_json::from_str(&json).expect("lightweight action should deserialize");
+        assert!(matches!(deserialized, RoutineAction::Lightweight { .. }));
+        if let RoutineAction::Lightweight {
+            prompt,
+            context_paths,
+            max_tokens,
+        } = deserialized
+        {
+            assert_eq!(prompt, "check status");
+            assert_eq!(context_paths, vec!["README.md"]);
+            assert_eq!(max_tokens, 1024);
         }
     }
 
@@ -664,37 +674,37 @@ mod tests {
             max_iterations: 20,
             tool_permissions: vec!["bash".into(), "write_file".into()],
         };
-        let json = serde_json::to_string(&action).unwrap();
-        let deserialized: RoutineAction = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            RoutineAction::FullJob {
-                title,
-                max_iterations,
-                tool_permissions,
-                ..
-            } => {
-                assert_eq!(title, "Deploy");
-                assert_eq!(max_iterations, 20);
-                assert_eq!(tool_permissions.len(), 2);
-            }
-            _ => panic!("expected FullJob"),
+        let json = serde_json::to_string(&action).expect("full job action should serialize");
+        let deserialized: RoutineAction =
+            serde_json::from_str(&json).expect("full job action should deserialize");
+        assert!(matches!(deserialized, RoutineAction::FullJob { .. }));
+        if let RoutineAction::FullJob {
+            title,
+            max_iterations,
+            tool_permissions,
+            ..
+        } = deserialized
+        {
+            assert_eq!(title, "Deploy");
+            assert_eq!(max_iterations, 20);
+            assert_eq!(tool_permissions.len(), 2);
         }
     }
 
     #[test]
     fn lightweight_action_defaults() {
         let json = r#"{"type":"lightweight","prompt":"test"}"#;
-        let action: RoutineAction = serde_json::from_str(json).unwrap();
-        match action {
-            RoutineAction::Lightweight {
-                max_tokens,
-                context_paths,
-                ..
-            } => {
-                assert_eq!(max_tokens, 2048);
-                assert!(context_paths.is_empty());
-            }
-            _ => panic!("expected Lightweight"),
+        let action: RoutineAction =
+            serde_json::from_str(json).expect("lightweight action should deserialize");
+        assert!(matches!(action, RoutineAction::Lightweight { .. }));
+        if let RoutineAction::Lightweight {
+            max_tokens,
+            context_paths,
+            ..
+        } = action
+        {
+            assert_eq!(max_tokens, 2048);
+            assert!(context_paths.is_empty());
         }
     }
 }

@@ -56,11 +56,11 @@ pub fn discover_plugins(dirs: &[(PathBuf, PluginOrigin)]) -> Vec<DiscoveredPlugi
             }
 
             // Prevent path traversal: directory name must not contain separators.
-            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                if name.contains('/') || name.contains('\\') || name.starts_with('.') {
-                    debug!(name = name, "skipping suspicious plugin directory name");
-                    continue;
-                }
+            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
+                && (name.contains('/') || name.contains('\\') || name.starts_with('.'))
+            {
+                debug!(name = name, "skipping suspicious plugin directory name");
+                continue;
             }
 
             match load_plugin_manifest(&manifest_path) {

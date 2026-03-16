@@ -451,7 +451,7 @@ impl AnthropicVisionProvider {
 
 #[async_trait]
 impl UnderstandingProvider for AnthropicVisionProvider {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "anthropic-vision"
     }
 
@@ -566,7 +566,7 @@ impl OllamaVisionProvider {
 
 #[async_trait]
 impl UnderstandingProvider for OllamaVisionProvider {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "ollama-vision"
     }
 
@@ -665,7 +665,7 @@ impl UnderstandingChain {
 
         if matching.is_empty() {
             return Provider {
-                msg: format!("no understanding provider for {:?}", kind),
+                msg: format!("no understanding provider for {kind:?}"),
             }
             .fail();
         }
@@ -745,22 +745,18 @@ impl UnderstandingChain {
         }
 
         // Transcription provider.
-        match config.transcription_provider.as_str() {
-            "openai" => {
-                if let Some(api_key) = resolve_api_key(config.transcription_api_key_ref.as_deref())
-                {
-                    let base_url = config
-                        .transcription_base_url
-                        .as_deref()
-                        .unwrap_or("https://api.openai.com/v1");
-                    let model = config.transcription_model.as_deref().unwrap_or("whisper-1");
-                    match WhisperProvider::new(base_url, api_key, model) {
-                        Ok(p) => providers.push(Box::new(p)),
-                        Err(e) => tracing::warn!(error = %e, "failed to build whisper provider"),
-                    }
-                }
+        if config.transcription_provider == "openai"
+            && let Some(api_key) = resolve_api_key(config.transcription_api_key_ref.as_deref())
+        {
+            let base_url = config
+                .transcription_base_url
+                .as_deref()
+                .unwrap_or("https://api.openai.com/v1");
+            let model = config.transcription_model.as_deref().unwrap_or("whisper-1");
+            match WhisperProvider::new(base_url, api_key, model) {
+                Ok(p) => providers.push(Box::new(p)),
+                Err(e) => tracing::warn!(error = %e, "failed to build whisper provider"),
             }
-            _ => {}
         }
 
         providers
@@ -883,16 +879,16 @@ mod tests {
         struct FakeVision;
         #[async_trait]
         impl UnderstandingProvider for FakeVision {
-            fn id(&self) -> &str {
+            fn id(&self) -> &'static str {
                 "fake-vision"
             }
             fn handles(&self) -> MediaKind {
                 MediaKind::Image
             }
-            async fn process(&self, att: &MediaAttachment) -> Result<UnderstandingOutput> {
+            async fn process(&self, attachment: &MediaAttachment) -> Result<UnderstandingOutput> {
                 Ok(UnderstandingOutput {
                     kind: UnderstandingKind::ImageDescription,
-                    attachment_index: att.index,
+                    attachment_index: attachment.index,
                     text: "should not reach here".into(),
                 })
             }
@@ -915,17 +911,17 @@ mod tests {
         struct FakeVision;
         #[async_trait]
         impl UnderstandingProvider for FakeVision {
-            fn id(&self) -> &str {
+            fn id(&self) -> &'static str {
                 "fake-vision"
             }
             fn handles(&self) -> MediaKind {
                 MediaKind::Image
             }
-            async fn process(&self, att: &MediaAttachment) -> Result<UnderstandingOutput> {
+            async fn process(&self, attachment: &MediaAttachment) -> Result<UnderstandingOutput> {
                 Ok(UnderstandingOutput {
                     kind: UnderstandingKind::ImageDescription,
-                    attachment_index: att.index,
-                    text: format!("described image {}", att.index),
+                    attachment_index: attachment.index,
+                    text: format!("described image {}", attachment.index),
                 })
             }
         }
@@ -943,17 +939,17 @@ mod tests {
         struct FailingProvider;
         #[async_trait]
         impl UnderstandingProvider for FailingProvider {
-            fn id(&self) -> &str {
+            fn id(&self) -> &'static str {
                 "failing"
             }
             fn handles(&self) -> MediaKind {
                 MediaKind::Image
             }
-            async fn process(&self, _att: &MediaAttachment) -> Result<UnderstandingOutput> {
-                Provider {
-                    msg: "intentional test failure",
+            async fn process(&self, _attachment: &MediaAttachment) -> Result<UnderstandingOutput> {
+                Err(Provider {
+                    msg: String::from("intentional test failure"),
                 }
-                .fail()
+                .build())
             }
         }
 
@@ -968,33 +964,33 @@ mod tests {
         struct FailingVision;
         #[async_trait]
         impl UnderstandingProvider for FailingVision {
-            fn id(&self) -> &str {
+            fn id(&self) -> &'static str {
                 "failing-vision"
             }
             fn handles(&self) -> MediaKind {
                 MediaKind::Image
             }
-            async fn process(&self, _att: &MediaAttachment) -> Result<UnderstandingOutput> {
-                Provider {
-                    msg: "provider 1 failed".into(),
+            async fn process(&self, _attachment: &MediaAttachment) -> Result<UnderstandingOutput> {
+                Err(Provider {
+                    msg: String::from("provider 1 failed"),
                 }
-                .fail()
+                .build())
             }
         }
 
         struct SucceedingVision;
         #[async_trait]
         impl UnderstandingProvider for SucceedingVision {
-            fn id(&self) -> &str {
+            fn id(&self) -> &'static str {
                 "succeeding-vision"
             }
             fn handles(&self) -> MediaKind {
                 MediaKind::Image
             }
-            async fn process(&self, att: &MediaAttachment) -> Result<UnderstandingOutput> {
+            async fn process(&self, attachment: &MediaAttachment) -> Result<UnderstandingOutput> {
                 Ok(UnderstandingOutput {
                     kind: UnderstandingKind::ImageDescription,
-                    attachment_index: att.index,
+                    attachment_index: attachment.index,
                     text: "fallback description".into(),
                 })
             }
@@ -1004,8 +1000,12 @@ mod tests {
             UnderstandingChain::new(vec![Box::new(FailingVision), Box::new(SucceedingVision)]);
 
         let result = chain.process(&image_attachment(0)).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().text, "fallback description");
+        assert_eq!(
+            result
+                .expect("fallback provider should succeed after first failure")
+                .text,
+            "fallback description"
+        );
     }
 
     #[tokio::test]
@@ -1013,30 +1013,30 @@ mod tests {
         struct FailingVision;
         #[async_trait]
         impl UnderstandingProvider for FailingVision {
-            fn id(&self) -> &str {
+            fn id(&self) -> &'static str {
                 "failing"
             }
             fn handles(&self) -> MediaKind {
                 MediaKind::Image
             }
-            async fn process(&self, _att: &MediaAttachment) -> Result<UnderstandingOutput> {
-                Provider {
-                    msg: "all fail".into(),
+            async fn process(&self, _attachment: &MediaAttachment) -> Result<UnderstandingOutput> {
+                Err(Provider {
+                    msg: String::from("all fail"),
                 }
-                .fail()
+                .build())
             }
         }
 
         let chain = UnderstandingChain::new(vec![Box::new(FailingVision)]);
         let result = chain.process(&image_attachment(0)).await;
-        assert!(result.is_err());
+        let _err = result.expect_err("chain should return the last provider error");
     }
 
     #[tokio::test]
     async fn chain_errors_when_no_provider_for_kind() {
         let chain = UnderstandingChain::new(vec![]);
         let result = chain.process(&image_attachment(0)).await;
-        assert!(result.is_err());
+        let _err = result.expect_err("chain should fail when no provider matches the media kind");
     }
 
     #[test]

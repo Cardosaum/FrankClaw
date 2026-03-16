@@ -260,7 +260,8 @@ mod tests {
 
     #[test]
     fn loopback_allows_no_auth() {
-        assert!(validate_bind_auth(&BindMode::Loopback, &AuthMode::None).is_ok());
+        validate_bind_auth(&BindMode::Loopback, &AuthMode::None)
+            .expect("loopback binding should allow unauthenticated access");
     }
 
     #[test]
@@ -273,7 +274,8 @@ mod tests {
         let mode = AuthMode::Token {
             token: Some(SecretString::from("test")),
         };
-        assert!(validate_bind_auth(&BindMode::Lan, &mode).is_ok());
+        validate_bind_auth(&BindMode::Lan, &mode)
+            .expect("LAN binding should allow token authentication");
     }
 
     #[test]

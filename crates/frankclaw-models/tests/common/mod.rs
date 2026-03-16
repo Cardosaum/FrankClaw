@@ -1,6 +1,9 @@
 //! Shared test helpers for `frankclaw-models` integration and smoke tests.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "shared helpers are consumed selectively by smoke and integration test binaries"
+)]
 
 use frankclaw_core::model::{CompletionMessage, CompletionRequest};
 use frankclaw_core::types::Role;

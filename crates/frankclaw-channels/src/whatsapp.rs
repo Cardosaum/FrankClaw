@@ -498,13 +498,9 @@ mod tests {
     use secrecy::SecretString;
 
     fn fixture(name: &str) -> serde_json::Value {
-        match name {
-            "media_webhook" => {
-                serde_json::from_str(include_str!("fixture_whatsapp_media_webhook.json"))
-                    .expect("fixture should parse")
-            }
-            _ => panic!("unknown fixture: {name}"),
-        }
+        assert_eq!(name, "media_webhook", "unknown fixture: {name}");
+        serde_json::from_str(include_str!("fixture_whatsapp_media_webhook.json"))
+            .expect("fixture should parse")
     }
 
     #[test]
@@ -762,6 +758,8 @@ mod tests {
 
     #[test]
     fn verify_signature_accepts_valid_prefixed_header() {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+
         let channel = WhatsAppChannel::new(
             SecretString::from("access-token".to_string()),
             "12345".into(),
@@ -774,13 +772,12 @@ mod tests {
         let mut mac = HmacSha256::new_from_slice(b"app-secret").expect("hmac should initialize");
         mac.update(body);
         let bytes = mac.finalize().into_bytes();
-        let signature = format!(
-            "sha256={}",
-            bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        );
+        let mut signature = String::with_capacity("sha256=".len() + bytes.len() * 2);
+        signature.push_str("sha256=");
+        for byte in bytes {
+            signature.push(char::from(HEX[usize::from(byte >> 4)]));
+            signature.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
 
         channel
             .verify_signature(body, Some(&signature))

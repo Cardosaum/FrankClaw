@@ -48,10 +48,13 @@ impl Tool for SessionsListTool {
     async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
         let limit = args
             .get("limit")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(20)
             .clamp(1, 100) as usize;
-        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let offset = args
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
 
         let sessions = ctx.sessions.list(&ctx.agent_id, limit, offset).await?;
         Ok(serde_json::json!({
@@ -108,7 +111,7 @@ impl Tool for SessionsHistoryTool {
 
         let limit = args
             .get("limit")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(50)
             .clamp(1, 200) as usize;
 

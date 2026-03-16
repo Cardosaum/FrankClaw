@@ -39,10 +39,7 @@ impl PluginManager {
     pub fn new(discovered: Vec<DiscoveredPlugin>, state: &HashMap<String, PluginState>) -> Self {
         let mut plugins = HashMap::new();
         for dp in discovered {
-            let enabled = state
-                .get(&dp.manifest.id)
-                .map(|s| s.enabled)
-                .unwrap_or(true);
+            let enabled = state.get(&dp.manifest.id).is_none_or(|s| s.enabled);
             plugins.insert(
                 dp.manifest.id.clone(),
                 PluginRecord {
@@ -134,7 +131,7 @@ mod tests {
     fn new_defaults_enabled() {
         let plugins = vec![make_discovered("a", PluginOrigin::User)];
         let mgr = PluginManager::new(plugins, &HashMap::new());
-        assert!(mgr.get("a").unwrap().enabled);
+        assert!(mgr.get("a").expect("plugin 'a' should exist").enabled);
     }
 
     #[test]
@@ -143,7 +140,7 @@ mod tests {
         let mut state = HashMap::new();
         state.insert("a".to_string(), PluginState { enabled: false });
         let mgr = PluginManager::new(plugins, &state);
-        assert!(!mgr.get("a").unwrap().enabled);
+        assert!(!mgr.get("a").expect("plugin 'a' should exist").enabled);
     }
 
     #[test]
@@ -152,10 +149,10 @@ mod tests {
         let mut mgr = PluginManager::new(plugins, &HashMap::new());
 
         assert!(mgr.disable("a"));
-        assert!(!mgr.get("a").unwrap().enabled);
+        assert!(!mgr.get("a").expect("plugin 'a' should exist").enabled);
 
         assert!(mgr.enable("a"));
-        assert!(mgr.get("a").unwrap().enabled);
+        assert!(mgr.get("a").expect("plugin 'a' should exist").enabled);
 
         assert!(!mgr.enable("nonexistent"));
         assert!(!mgr.disable("nonexistent"));
@@ -192,8 +189,8 @@ mod tests {
             make_discovered("b", PluginOrigin::User),
         ];
         let mgr2 = PluginManager::new(plugins2, &state);
-        assert!(mgr2.get("a").unwrap().enabled);
-        assert!(!mgr2.get("b").unwrap().enabled);
+        assert!(mgr2.get("a").expect("plugin 'a' should exist").enabled);
+        assert!(!mgr2.get("b").expect("plugin 'b' should exist").enabled);
     }
 
     #[test]

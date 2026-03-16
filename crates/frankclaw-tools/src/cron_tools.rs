@@ -124,7 +124,7 @@ impl Tool for CronAddTool {
 
         if prompt.len() > MAX_PROMPT_LEN {
             return Err(InvalidRequest {
-                msg: format!("cron.add prompt exceeds {} char limit", MAX_PROMPT_LEN),
+                msg: format!("cron.add prompt exceeds {MAX_PROMPT_LEN} char limit"),
             }
             .build());
         }
@@ -136,15 +136,14 @@ impl Tool for CronAddTool {
 
         let enabled = args
             .get("enabled")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
 
         let job_id = uuid::Uuid::new_v4().to_string();
-        let session_key = ctx
-            .session_key
-            .as_ref()
-            .map(|sk| sk.as_str().to_string())
-            .unwrap_or_else(|| format!("{}:cron:{}", agent_id, &job_id[..8]));
+        let session_key = ctx.session_key.as_ref().map_or_else(
+            || format!("{agent_id}:cron:{}", &job_id[..8]),
+            |sk| sk.as_str().to_string(),
+        );
 
         cron.add_job(&job_id, schedule, agent_id, &session_key, prompt, enabled)
             .await?;

@@ -44,7 +44,7 @@ impl SafeFetcher {
     /// 2. Verify ALL resolved IPs are safe (public, non-reserved) at each hop.
     /// 3. Follow redirects manually (up to MAX_REDIRECTS).
     /// 4. Fetch body with dual size enforcement (Content-Length + actual bytes).
-    pub async fn fetch(&self, url: &Url) -> Result<FetchedContent> {
+    pub async fn fetch_url(&self, url: &Url) -> Result<FetchedContent> {
         let mut current_url = url.clone();
 
         for redirect_count in 0..=MAX_REDIRECTS {
@@ -215,7 +215,7 @@ impl frankclaw_core::tool_services::Fetcher for SafeFetcher {
             }
             .build()
         })?;
-        let content = self.fetch(&parsed).await?;
+        let content = self.fetch_url(&parsed).await?;
         Ok(frankclaw_core::tool_services::FetchedContent {
             bytes: content.bytes,
             content_type: content.content_type,

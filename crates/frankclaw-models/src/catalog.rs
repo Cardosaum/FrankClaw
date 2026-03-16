@@ -309,7 +309,7 @@ mod tests {
         let model = lookup("gpt-4o").expect("gpt-4o should be in catalog");
         assert_eq!(model.name, "GPT-4o");
         assert_eq!(model.context_window, 128_000);
-        assert_eq!(model.max_output_tokens, 16_384);
+        assert_eq!(model.max_output_tokens, 0x4000);
         assert!(model.compat.supports_vision);
     }
 
@@ -369,12 +369,12 @@ mod tests {
 
     #[test]
     fn reasoning_models_flagged() {
-        let o1 = lookup("o1").unwrap();
+        let o1 = lookup("o1").expect("o1 should be in catalog");
         assert!(o1.reasoning);
-        let o3 = lookup("o3-mini").unwrap();
+        let o3 = lookup("o3-mini").expect("o3-mini should be in catalog");
         assert!(o3.reasoning);
         // Non-reasoning models
-        let gpt4o = lookup("gpt-4o").unwrap();
+        let gpt4o = lookup("gpt-4o").expect("gpt-4o should be in catalog");
         assert!(!gpt4o.reasoning);
     }
 

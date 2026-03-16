@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "health monitor wiring is present but not fully integrated yet"
+)]
 
 //! Periodic channel health monitor.
 //!
@@ -56,14 +59,16 @@ impl ChannelHealth {
         let now = Instant::now();
 
         // Check cooldown.
-        if let Some(last) = self.last_restart_at {
-            if now.duration_since(last) < Duration::from_secs(RESTART_COOLDOWN_SECS) {
-                return false;
-            }
+        if let Some(last) = self.last_restart_at
+            && now.duration_since(last) < Duration::from_secs(RESTART_COOLDOWN_SECS)
+        {
+            return false;
         }
 
         // Prune old history (older than 1 hour).
-        let one_hour_ago = now - Duration::from_secs(3600);
+        let one_hour_ago = now
+            .checked_sub(Duration::from_secs(3600))
+            .expect("one-hour lookback should remain within `Instant` bounds");
         self.restart_history.retain(|&t| t > one_hour_ago);
 
         // Check rate limit.
@@ -117,8 +122,8 @@ pub fn start_health_monitor(state: Arc<GatewayState>) {
     tokio::spawn(async move {
         // Startup grace period.
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(STARTUP_GRACE_SECS)) => {}
-            _ = shutdown.cancelled() => return,
+            () = tokio::time::sleep(Duration::from_secs(STARTUP_GRACE_SECS)) => {}
+            () = shutdown.cancelled() => return,
         }
 
         let mut tracker: HashMap<ChannelId, ChannelHealth> = HashMap::new();
@@ -127,10 +132,10 @@ pub fn start_health_monitor(state: Arc<GatewayState>) {
 
         loop {
             tokio::select! {
-                _ = interval.tick() => {
+                _tick = interval.tick() => {
                     check_all_channels(&state, &mut tracker).await;
                 }
-                _ = shutdown.cancelled() => {
+                () = shutdown.cancelled() => {
                     debug!("health monitor shutting down");
                     return;
                 }
@@ -156,7 +161,7 @@ async fn check_all_channels(
                 status = ?status,
                 "channel health status changed"
             );
-            broadcast_health_event(&state.broadcast, &channel_id, &status);
+            broadcast_health_event(&state.broadcast, channel_id, &status);
         }
 
         // Auto-restart disconnected channels.
@@ -256,7 +261,10 @@ mod tests {
             ch.restart_history.push(now);
         }
         // Even with no cooldown issue, rate limit should kick in.
-        ch.last_restart_at = Some(now - Duration::from_secs(RESTART_COOLDOWN_SECS + 1));
+        ch.last_restart_at = Some(
+            now.checked_sub(Duration::from_secs(RESTART_COOLDOWN_SECS + 1))
+                .expect("recent instant subtraction should succeed"),
+        );
         assert!(!ch.try_restart());
     }
 

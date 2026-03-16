@@ -42,411 +42,416 @@ use std::sync::Arc;
 mod common;
 use common::*;
 
-// ---------------------------------------------------------------------------
-// OpenAI smoke tests
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[tokio::test]
-#[ignore]
-async fn openai_health_check() {
-    let key = openai_key().expect("OPENAI_API_KEY must be set");
-    let base = openai_base_url();
-    let model = openai_model();
-    eprintln!("Using endpoint: {base}, model: {model}");
+    // ---------------------------------------------------------------------------
+    // OpenAI smoke tests
+    // ---------------------------------------------------------------------------
 
-    let provider = OpenAiProvider::new("openai-smoke", &base, key, vec![model])
-        .expect("failed to build provider");
-    assert!(
-        provider.health().await,
-        "OpenAI-compatible health check should pass"
-    );
-}
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn openai_health_check() {
+        let key = openai_key().expect("OPENAI_API_KEY must be set");
+        let base = openai_base_url();
+        let model = openai_model();
+        eprintln!("Using endpoint: {base}, model: {model}");
 
-#[tokio::test]
-#[ignore]
-async fn openai_list_models() {
-    let key = openai_key().expect("OPENAI_API_KEY must be set");
-    let base = openai_base_url();
-    let provider = OpenAiProvider::new("openai-smoke", &base, key, vec![openai_model()])
-        .expect("failed to build provider");
+        let provider = OpenAiProvider::new("openai-smoke", &base, key, vec![model])
+            .expect("failed to build provider");
+        assert!(
+            provider.health().await,
+            "OpenAI-compatible health check should pass"
+        );
+    }
 
-    let models = provider.list_models().await.expect("should list models");
-    assert!(!models.is_empty(), "should return at least one model");
-    eprintln!("Listed {} models", models.len());
-}
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn openai_list_models() {
+        let key = openai_key().expect("OPENAI_API_KEY must be set");
+        let base = openai_base_url();
+        let provider = OpenAiProvider::new("openai-smoke", &base, key, vec![openai_model()])
+            .expect("failed to build provider");
 
-#[tokio::test]
-#[ignore]
-async fn openai_simple_completion() {
-    let key = openai_key().expect("OPENAI_API_KEY must be set");
-    let base = openai_base_url();
-    let model = openai_model();
-    eprintln!("Using endpoint: {base}, model: {model}");
+        let models = provider.list_models().await.expect("should list models");
+        assert!(!models.is_empty(), "should return at least one model");
+        eprintln!("Listed {} models", models.len());
+    }
 
-    let provider = OpenAiProvider::new("openai-smoke", &base, key, vec![model.clone()])
-        .expect("failed to build provider");
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn openai_simple_completion() {
+        let key = openai_key().expect("OPENAI_API_KEY must be set");
+        let base = openai_base_url();
+        let model = openai_model();
+        eprintln!("Using endpoint: {base}, model: {model}");
 
-    let request = simple_request(&model, "Reply with exactly the word 'pong'. Nothing else.");
-    let response = provider
-        .complete(request, None)
-        .await
-        .expect("completion should succeed");
+        let provider = OpenAiProvider::new("openai-smoke", &base, key, vec![model.clone()])
+            .expect("failed to build provider");
 
-    assert!(!response.content.is_empty(), "response should have content");
-    assert!(
-        response.content.to_lowercase().contains("pong"),
-        "response should contain 'pong', got: {}",
-        response.content
-    );
-    assert!(
-        response.usage.input_tokens > 0,
-        "should report input tokens"
-    );
-    assert!(
-        response.usage.output_tokens > 0,
-        "should report output tokens"
-    );
-}
+        let request = simple_request(&model, "Reply with exactly the word 'pong'. Nothing else.");
+        let response = provider
+            .complete(request, None)
+            .await
+            .expect("completion should succeed");
 
-#[tokio::test]
-#[ignore]
-async fn openai_streaming_completion() {
-    let key = openai_key().expect("OPENAI_API_KEY must be set");
-    let base = openai_base_url();
-    let model = openai_model();
-    let provider = OpenAiProvider::new("openai-smoke", &base, key, vec![model.clone()])
-        .expect("failed to build provider");
+        assert!(!response.content.is_empty(), "response should have content");
+        assert!(
+            response.content.to_lowercase().contains("pong"),
+            "response should contain 'pong', got: {}",
+            response.content
+        );
+        assert!(
+            response.usage.input_tokens > 0,
+            "should report input tokens"
+        );
+        assert!(
+            response.usage.output_tokens > 0,
+            "should report output tokens"
+        );
+    }
 
-    let request = simple_request(&model, "Reply with exactly 'hello world'.");
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamDelta>(64);
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn openai_streaming_completion() {
+        let key = openai_key().expect("OPENAI_API_KEY must be set");
+        let base = openai_base_url();
+        let model = openai_model();
+        let provider = OpenAiProvider::new("openai-smoke", &base, key, vec![model.clone()])
+            .expect("failed to build provider");
 
-    let response = provider
-        .complete(request, Some(tx))
-        .await
-        .expect("streaming completion should succeed");
+        let request = simple_request(&model, "Reply with exactly 'hello world'.");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamDelta>(64);
 
-    assert!(!response.content.is_empty());
+        let response = provider
+            .complete(request, Some(tx))
+            .await
+            .expect("streaming completion should succeed");
 
-    // Drain the channel and verify we got text deltas + done
-    let mut got_text = false;
-    let mut got_done = false;
-    while let Ok(delta) = rx.try_recv() {
-        match delta {
-            StreamDelta::Text(_) => got_text = true,
-            StreamDelta::Done { .. } => got_done = true,
-            _ => {}
+        assert!(!response.content.is_empty());
+
+        // Drain the channel and verify we got text deltas + done
+        let mut got_text = false;
+        let mut got_done = false;
+        while let Ok(delta) = rx.try_recv() {
+            match delta {
+                StreamDelta::Text(_) => got_text = true,
+                StreamDelta::Done { .. } => got_done = true,
+                _ => {}
+            }
         }
+        assert!(got_text, "should receive text deltas");
+        assert!(got_done, "should receive done signal");
     }
-    assert!(got_text, "should receive text deltas");
-    assert!(got_done, "should receive done signal");
-}
 
-// ---------------------------------------------------------------------------
-// Anthropic smoke tests
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // Anthropic smoke tests
+    // ---------------------------------------------------------------------------
 
-#[tokio::test]
-#[ignore]
-async fn anthropic_health_check() {
-    let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
-    let provider = AnthropicProvider::new(
-        "anthropic-smoke",
-        key,
-        vec!["claude-haiku-4-5-20251001".into()],
-    )
-    .expect("failed to build provider");
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn anthropic_health_check() {
+        let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
+        let provider = AnthropicProvider::new(
+            "anthropic-smoke",
+            key,
+            vec!["claude-haiku-4-5-20251001".into()],
+        )
+        .expect("failed to build provider");
 
-    assert!(
-        provider.health().await,
-        "Anthropic health check should pass"
-    );
-}
+        assert!(
+            provider.health().await,
+            "Anthropic health check should pass"
+        );
+    }
 
-#[tokio::test]
-#[ignore]
-async fn anthropic_list_models() {
-    let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
-    let provider = AnthropicProvider::new(
-        "anthropic-smoke",
-        key,
-        vec!["claude-haiku-4-5-20251001".into()],
-    )
-    .expect("failed to build provider");
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn anthropic_list_models() {
+        let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
+        let provider = AnthropicProvider::new(
+            "anthropic-smoke",
+            key,
+            vec!["claude-haiku-4-5-20251001".into()],
+        )
+        .expect("failed to build provider");
 
-    let models = provider.list_models().await.expect("should list models");
-    assert!(!models.is_empty(), "should return at least one model");
-}
+        let models = provider.list_models().await.expect("should list models");
+        assert!(!models.is_empty(), "should return at least one model");
+    }
 
-#[tokio::test]
-#[ignore]
-async fn anthropic_simple_completion() {
-    let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
-    let provider = AnthropicProvider::new(
-        "anthropic-smoke",
-        key,
-        vec!["claude-haiku-4-5-20251001".into()],
-    )
-    .expect("failed to build provider");
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn anthropic_simple_completion() {
+        let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
+        let provider = AnthropicProvider::new(
+            "anthropic-smoke",
+            key,
+            vec!["claude-haiku-4-5-20251001".into()],
+        )
+        .expect("failed to build provider");
 
-    let request = simple_request(
-        "claude-haiku-4-5-20251001",
-        "Reply with exactly the word 'pong'. Nothing else.",
-    );
-    let response = provider
-        .complete(request, None)
-        .await
-        .expect("completion should succeed");
+        let request = simple_request(
+            "claude-haiku-4-5-20251001",
+            "Reply with exactly the word 'pong'. Nothing else.",
+        );
+        let response = provider
+            .complete(request, None)
+            .await
+            .expect("completion should succeed");
 
-    assert!(!response.content.is_empty(), "response should have content");
-    assert!(
-        response.content.to_lowercase().contains("pong"),
-        "response should contain 'pong', got: {}",
-        response.content
-    );
-    assert!(
-        response.usage.input_tokens > 0,
-        "should report input tokens"
-    );
-    assert!(
-        response.usage.output_tokens > 0,
-        "should report output tokens"
-    );
-}
+        assert!(!response.content.is_empty(), "response should have content");
+        assert!(
+            response.content.to_lowercase().contains("pong"),
+            "response should contain 'pong', got: {}",
+            response.content
+        );
+        assert!(
+            response.usage.input_tokens > 0,
+            "should report input tokens"
+        );
+        assert!(
+            response.usage.output_tokens > 0,
+            "should report output tokens"
+        );
+    }
 
-#[tokio::test]
-#[ignore]
-async fn anthropic_streaming_completion() {
-    let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
-    let provider = AnthropicProvider::new(
-        "anthropic-smoke",
-        key,
-        vec!["claude-haiku-4-5-20251001".into()],
-    )
-    .expect("failed to build provider");
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn anthropic_streaming_completion() {
+        let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
+        let provider = AnthropicProvider::new(
+            "anthropic-smoke",
+            key,
+            vec!["claude-haiku-4-5-20251001".into()],
+        )
+        .expect("failed to build provider");
 
-    let request = simple_request(
-        "claude-haiku-4-5-20251001",
-        "Reply with exactly 'hello world'.",
-    );
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamDelta>(64);
+        let request = simple_request(
+            "claude-haiku-4-5-20251001",
+            "Reply with exactly 'hello world'.",
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamDelta>(64);
 
-    let response = provider
-        .complete(request, Some(tx))
-        .await
-        .expect("streaming completion should succeed");
+        let response = provider
+            .complete(request, Some(tx))
+            .await
+            .expect("streaming completion should succeed");
 
-    assert!(!response.content.is_empty());
+        assert!(!response.content.is_empty());
 
-    let mut got_text = false;
-    let mut got_done = false;
-    while let Ok(delta) = rx.try_recv() {
-        match delta {
-            StreamDelta::Text(_) => got_text = true,
-            StreamDelta::Done { .. } => got_done = true,
-            _ => {}
+        let mut got_text = false;
+        let mut got_done = false;
+        while let Ok(delta) = rx.try_recv() {
+            match delta {
+                StreamDelta::Text(_) => got_text = true,
+                StreamDelta::Done { .. } => got_done = true,
+                _ => {}
+            }
         }
-    }
-    assert!(got_text, "should receive text deltas");
-    assert!(got_done, "should receive done signal");
-}
-
-#[tokio::test]
-#[ignore]
-async fn anthropic_system_prompt() {
-    let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
-    let provider = AnthropicProvider::new(
-        "anthropic-smoke",
-        key,
-        vec!["claude-haiku-4-5-20251001".into()],
-    )
-    .expect("failed to build provider");
-
-    let request = CompletionRequest {
-        model_id: "claude-haiku-4-5-20251001".into(),
-        messages: vec![CompletionMessage::text(
-            Role::User,
-            "What is the secret word?",
-        )],
-        max_tokens: Some(20),
-        temperature: Some(0.0),
-        system: Some("The secret word is 'banana'. Always reply with only the secret word.".into()),
-        tools: Vec::new(),
-        thinking_budget: None,
-        parallel_tool_calls: None,
-        seed: None,
-        response_format: None,
-        reasoning_effort: None,
-    };
-
-    let response = provider
-        .complete(request, None)
-        .await
-        .expect("completion should succeed");
-
-    assert!(
-        response.content.to_lowercase().contains("banana"),
-        "should follow system prompt, got: {}",
-        response.content
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Ollama smoke tests (requires local Ollama instance)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[ignore]
-async fn ollama_health_check() {
-    if !ollama_available() {
-        eprintln!("SKIP: Ollama not available at 127.0.0.1:11434");
-        return;
+        assert!(got_text, "should receive text deltas");
+        assert!(got_done, "should receive done signal");
     }
 
-    let provider =
-        OllamaProvider::new("ollama-smoke", None::<String>).expect("failed to build provider");
-    assert!(provider.health().await, "Ollama health check should pass");
-}
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn anthropic_system_prompt() {
+        let key = anthropic_key().expect("ANTHROPIC_API_KEY must be set");
+        let provider = AnthropicProvider::new(
+            "anthropic-smoke",
+            key,
+            vec!["claude-haiku-4-5-20251001".into()],
+        )
+        .expect("failed to build provider");
 
-#[tokio::test]
-#[ignore]
-async fn ollama_list_models() {
-    if !ollama_available() {
-        eprintln!("SKIP: Ollama not available at 127.0.0.1:11434");
-        return;
+        let request = CompletionRequest {
+            model_id: "claude-haiku-4-5-20251001".into(),
+            messages: vec![CompletionMessage::text(
+                Role::User,
+                "What is the secret word?",
+            )],
+            max_tokens: Some(20),
+            temperature: Some(0.0),
+            system: Some(
+                "The secret word is 'banana'. Always reply with only the secret word.".into(),
+            ),
+            tools: Vec::new(),
+            thinking_budget: None,
+            parallel_tool_calls: None,
+            seed: None,
+            response_format: None,
+            reasoning_effort: None,
+        };
+
+        let response = provider
+            .complete(request, None)
+            .await
+            .expect("completion should succeed");
+
+        assert!(
+            response.content.to_lowercase().contains("banana"),
+            "should follow system prompt, got: {}",
+            response.content
+        );
     }
 
-    let provider =
-        OllamaProvider::new("ollama-smoke", None::<String>).expect("failed to build provider");
-    let models = provider.list_models().await.expect("should list models");
-    // Ollama may have zero models if none are pulled — that's OK
-    eprintln!("Ollama reports {} model(s)", models.len());
-}
+    // ---------------------------------------------------------------------------
+    // Ollama smoke tests (requires local Ollama instance)
+    // ---------------------------------------------------------------------------
 
-#[tokio::test]
-#[ignore]
-async fn ollama_simple_completion() {
-    if !ollama_available() {
-        eprintln!("SKIP: Ollama not available at 127.0.0.1:11434");
-        return;
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn ollama_health_check() {
+        if !ollama_available() {
+            eprintln!("SKIP: Ollama not available at 127.0.0.1:11434");
+            return;
+        }
+
+        let provider =
+            OllamaProvider::new("ollama-smoke", None::<String>).expect("failed to build provider");
+        assert!(provider.health().await, "Ollama health check should pass");
     }
 
-    let provider =
-        OllamaProvider::new("ollama-smoke", None::<String>).expect("failed to build provider");
-    let models = provider.list_models().await.expect("should list models");
-    if models.is_empty() {
-        eprintln!("SKIP: No Ollama models pulled");
-        return;
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn ollama_list_models() {
+        if !ollama_available() {
+            eprintln!("SKIP: Ollama not available at 127.0.0.1:11434");
+            return;
+        }
+
+        let provider =
+            OllamaProvider::new("ollama-smoke", None::<String>).expect("failed to build provider");
+        let models = provider.list_models().await.expect("should list models");
+        // Ollama may have zero models if none are pulled — that's OK
+        eprintln!("Ollama reports {} model(s)", models.len());
     }
 
-    let model_id = &models[0].id;
-    let request = simple_request(
-        model_id,
-        "Reply with exactly the word 'pong'. Nothing else.",
-    );
-    let response = provider
-        .complete(request, None)
-        .await
-        .expect("completion should succeed");
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn ollama_simple_completion() {
+        if !ollama_available() {
+            eprintln!("SKIP: Ollama not available at 127.0.0.1:11434");
+            return;
+        }
 
-    assert!(!response.content.is_empty(), "response should have content");
-    eprintln!("Ollama response ({}): {}", model_id, response.content);
-}
+        let provider =
+            OllamaProvider::new("ollama-smoke", None::<String>).expect("failed to build provider");
+        let models = provider.list_models().await.expect("should list models");
+        if models.is_empty() {
+            eprintln!("SKIP: No Ollama models pulled");
+            return;
+        }
 
-// ---------------------------------------------------------------------------
-// Failover chain smoke test
-// ---------------------------------------------------------------------------
+        let model_id = &models[0].id;
+        let request = simple_request(
+            model_id,
+            "Reply with exactly the word 'pong'. Nothing else.",
+        );
+        let response = provider
+            .complete(request, None)
+            .await
+            .expect("completion should succeed");
 
-#[tokio::test]
-#[ignore]
-async fn failover_chain_tries_providers_in_order() {
-    let mut providers: Vec<Arc<dyn ModelProvider>> = Vec::new();
-
-    if let Some(key) = openai_key() {
-        providers.push(Arc::new(
-            OpenAiProvider::new("openai", &openai_base_url(), key, vec![openai_model()])
-                .expect("failed to build provider"),
-        ));
-    }
-    if let Some(key) = anthropic_key() {
-        providers.push(Arc::new(
-            AnthropicProvider::new("anthropic", key, vec!["claude-haiku-4-5-20251001".into()])
-                .expect("failed to build provider"),
-        ));
+        assert!(!response.content.is_empty(), "response should have content");
+        eprintln!("Ollama response ({}): {}", model_id, response.content);
     }
 
-    assert!(
-        !providers.is_empty(),
-        "At least one API key must be set for failover test"
-    );
+    // ---------------------------------------------------------------------------
+    // Failover chain smoke test
+    // ---------------------------------------------------------------------------
 
-    let chain = FailoverChain::new(providers, 30);
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn failover_chain_tries_providers_in_order() {
+        let mut providers: Vec<Arc<dyn ModelProvider>> = Vec::new();
 
-    let health = chain.health().await;
-    assert!(
-        health.iter().any(|h| h.healthy),
-        "at least one provider should be healthy"
-    );
-}
+        if let Some(key) = openai_key() {
+            providers.push(Arc::new(
+                OpenAiProvider::new("openai", openai_base_url(), key, vec![openai_model()])
+                    .expect("failed to build provider"),
+            ));
+        }
+        if let Some(key) = anthropic_key() {
+            providers.push(Arc::new(
+                AnthropicProvider::new("anthropic", key, vec!["claude-haiku-4-5-20251001".into()])
+                    .expect("failed to build provider"),
+            ));
+        }
 
-// ---------------------------------------------------------------------------
-// Error handling smoke tests
-// ---------------------------------------------------------------------------
+        assert!(
+            !providers.is_empty(),
+            "At least one API key must be set for failover test"
+        );
 
-#[tokio::test]
-#[ignore]
-async fn openai_invalid_key_returns_auth_error() {
-    let base = openai_base_url();
-    let model = openai_model();
-    let provider = OpenAiProvider::new(
-        "openai-bad-key",
-        &base,
-        SecretString::from("sk-invalid-key-for-testing".to_string()),
-        vec![model.clone()],
-    )
-    .expect("failed to build provider");
+        let chain = FailoverChain::new(providers, 30);
 
-    let request = simple_request(&model, "test");
-    let err = provider
-        .complete(request, None)
-        .await
-        .expect_err("should fail with invalid key");
+        let health = chain.health().await;
+        assert!(
+            health.iter().any(|h| h.healthy),
+            "at least one provider should be healthy"
+        );
+    }
 
-    let msg = err.to_string().to_lowercase();
-    assert!(
-        msg.contains("auth")
-            || msg.contains("401")
-            || msg.contains("invalid")
-            || msg.contains("key")
-            || msg.contains("error")
-            || msg.contains("denied"),
-        "error should indicate auth failure, got: {}",
-        msg
-    );
-}
+    // ---------------------------------------------------------------------------
+    // Error handling smoke tests
+    // ---------------------------------------------------------------------------
 
-#[tokio::test]
-#[ignore]
-async fn anthropic_invalid_key_returns_auth_error() {
-    let provider = AnthropicProvider::new(
-        "anthropic-bad-key",
-        SecretString::from("sk-ant-invalid-key-for-testing".to_string()),
-        vec!["claude-haiku-4-5-20251001".into()],
-    )
-    .expect("failed to build provider");
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn openai_invalid_key_returns_auth_error() {
+        let base = openai_base_url();
+        let model = openai_model();
+        let provider = OpenAiProvider::new(
+            "openai-bad-key",
+            &base,
+            SecretString::from("sk-invalid-key-for-testing".to_string()),
+            vec![model.clone()],
+        )
+        .expect("failed to build provider");
 
-    let request = simple_request("claude-haiku-4-5-20251001", "test");
-    let err = provider
-        .complete(request, None)
-        .await
-        .expect_err("should fail with invalid key");
+        let request = simple_request(&model, "test");
+        let err = provider
+            .complete(request, None)
+            .await
+            .expect_err("should fail with invalid key");
 
-    let msg = err.to_string().to_lowercase();
-    assert!(
-        msg.contains("auth")
-            || msg.contains("401")
-            || msg.contains("invalid")
-            || msg.contains("key"),
-        "error should mention auth failure, got: {}",
-        msg
-    );
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("auth")
+                || msg.contains("401")
+                || msg.contains("invalid")
+                || msg.contains("key")
+                || msg.contains("error")
+                || msg.contains("denied"),
+            "error should indicate auth failure, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "exercises live provider endpoints or local services and must be run explicitly"]
+    async fn anthropic_invalid_key_returns_auth_error() {
+        let provider = AnthropicProvider::new(
+            "anthropic-bad-key",
+            SecretString::from("sk-ant-invalid-key-for-testing".to_string()),
+            vec!["claude-haiku-4-5-20251001".into()],
+        )
+        .expect("failed to build provider");
+
+        let request = simple_request("claude-haiku-4-5-20251001", "test");
+        let err = provider
+            .complete(request, None)
+            .await
+            .expect_err("should fail with invalid key");
+
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("auth")
+                || msg.contains("401")
+                || msg.contains("invalid")
+                || msg.contains("key"),
+            "error should mention auth failure, got: {msg}"
+        );
+    }
 }

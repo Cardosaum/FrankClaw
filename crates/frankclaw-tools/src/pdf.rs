@@ -1,5 +1,7 @@
 //! PDF text extraction tool.
 
+use std::fmt::Write as _;
+
 use async_trait::async_trait;
 
 use frankclaw_core::error::{AgentRuntime, FrankClawError, Internal, InvalidRequest, Result};
@@ -75,7 +77,7 @@ impl Tool for PdfReadTool {
         // Verify the file exists and is a PDF.
         let metadata = tokio::fs::metadata(&resolved)
             .await
-            .map_err(|e| agent_runtime_err(format!("failed to read '{}': {e}", path_str)))?;
+            .map_err(|e| agent_runtime_err(format!("failed to read '{path_str}': {e}")))?;
 
         if metadata.len() > MAX_PDF_BYTES {
             return Err(invalid_request_err(format!(
@@ -91,15 +93,12 @@ impl Tool for PdfReadTool {
             .map(parse_page_ranges)
             .transpose()?;
 
-        let max_pages = page_filter
-            .as_ref()
-            .map(|pages| pages.len())
-            .unwrap_or(DEFAULT_MAX_PAGES);
+        let max_pages = page_filter.as_ref().map_or(DEFAULT_MAX_PAGES, Vec::len);
 
         // Read the PDF file.
         let pdf_bytes = tokio::fs::read(&resolved)
             .await
-            .map_err(|e| agent_runtime_err(format!("failed to read PDF '{}': {e}", path_str)))?;
+            .map_err(|e| agent_runtime_err(format!("failed to read PDF '{path_str}': {e}")))?;
 
         // Extract text (blocking operation, offload to thread pool).
         let text = tokio::task::spawn_blocking(move || {
@@ -134,7 +133,8 @@ impl Tool for PdfReadTool {
         for (page_num, page_text) in &selected_pages {
             let trimmed = page_text.trim();
             if !trimmed.is_empty() {
-                output.push_str(&format!("--- Page {} ---\n{}\n\n", page_num, trimmed));
+                let _ = writeln!(output, "--- Page {page_num} ---");
+                let _ = writeln!(output, "{trimmed}\n");
             }
         }
 
@@ -166,26 +166,22 @@ fn parse_page_ranges(input: &str) -> Result<Vec<usize>> {
             let start: usize = start
                 .trim()
                 .parse()
-                .map_err(|_| invalid_request_err(format!("invalid page range: '{}'", input)))?;
+                .map_err(|_| invalid_request_err(format!("invalid page range: '{input}'")))?;
             let end: usize = end
                 .trim()
                 .parse()
-                .map_err(|_| invalid_request_err(format!("invalid page range: '{}'", input)))?;
+                .map_err(|_| invalid_request_err(format!("invalid page range: '{input}'")))?;
             if start == 0 || end == 0 || start > end || end > 10000 {
-                return Err(invalid_request_err(format!(
-                    "invalid page range: '{}'",
-                    part
-                )));
+                return Err(invalid_request_err(format!("invalid page range: '{part}'")));
             }
             pages.extend(start..=end);
         } else {
             let page: usize = part
                 .parse()
-                .map_err(|_| invalid_request_err(format!("invalid page number: '{}'", part)))?;
+                .map_err(|_| invalid_request_err(format!("invalid page number: '{part}'")))?;
             if page == 0 || page > 10000 {
                 return Err(invalid_request_err(format!(
-                    "invalid page number: '{}'",
-                    part
+                    "invalid page number: '{part}'"
                 )));
             }
             pages.push(page);
@@ -202,36 +198,36 @@ mod tests {
 
     #[test]
     fn parse_single_pages() {
-        let pages = parse_page_ranges("1,3,7").unwrap();
+        let pages = parse_page_ranges("1,3,7").expect("single pages should parse");
         assert_eq!(pages, vec![1, 3, 7]);
     }
 
     #[test]
     fn parse_page_range() {
-        let pages = parse_page_ranges("1-5").unwrap();
+        let pages = parse_page_ranges("1-5").expect("simple range should parse");
         assert_eq!(pages, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn parse_mixed_ranges() {
-        let pages = parse_page_ranges("1-3,7,10-12").unwrap();
+        let pages = parse_page_ranges("1-3,7,10-12").expect("mixed ranges should parse");
         assert_eq!(pages, vec![1, 2, 3, 7, 10, 11, 12]);
     }
 
     #[test]
     fn parse_deduplicates() {
-        let pages = parse_page_ranges("1-3,2-4").unwrap();
+        let pages = parse_page_ranges("1-3,2-4").expect("overlapping ranges should parse");
         assert_eq!(pages, vec![1, 2, 3, 4]);
     }
 
     #[test]
     fn parse_rejects_zero_page() {
-        assert!(parse_page_ranges("0").is_err());
+        parse_page_ranges("0").expect_err("page zero should be rejected");
     }
 
     #[test]
     fn parse_rejects_invalid_range() {
-        assert!(parse_page_ranges("5-3").is_err());
+        parse_page_ranges("5-3").expect_err("descending range should be rejected");
     }
 
     #[test]

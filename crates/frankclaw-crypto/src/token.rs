@@ -84,9 +84,13 @@ mod tests {
     #[test]
     fn tokens_have_no_obvious_patterns() {
         // Generate 100 tokens and verify byte distribution isn't degenerate.
-        let tokens: Vec<Vec<u8>> = (0..100)
-            .map(|_| URL_SAFE_NO_PAD.decode(generate_token()).unwrap())
-            .collect();
+        let tokens: Vec<Vec<u8>> = std::iter::repeat_with(|| {
+            URL_SAFE_NO_PAD
+                .decode(generate_token())
+                .expect("generated token should decode as base64url")
+        })
+        .take(100)
+        .collect();
         // Each byte position should have some variance.
         for pos in 0..32 {
             let values: std::collections::HashSet<u8> = tokens.iter().map(|t| t[pos]).collect();

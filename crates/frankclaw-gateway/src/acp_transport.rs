@@ -48,6 +48,8 @@ pub const INTERNAL_ERROR: i64 = -32603;
 pub const RATE_LIMITED: i64 = -32000;
 pub const SESSION_NOT_FOUND: i64 = -32001;
 
+type JsonRpcParseError = Box<JsonRpcResponse>;
+
 impl JsonRpcResponse {
     pub fn success(id: Option<serde_json::Value>, result: serde_json::Value) -> Self {
         Self {
@@ -73,24 +75,29 @@ impl JsonRpcResponse {
 }
 
 /// Parse a single NDJSON line into a `JsonRpcRequest`.
-pub fn parse_request(line: &str) -> Result<JsonRpcRequest, JsonRpcResponse> {
-    let req: JsonRpcRequest = serde_json::from_str(line)
-        .map_err(|e| JsonRpcResponse::error(None, PARSE_ERROR, format!("parse error: {e}")))?;
+pub fn parse_request(line: &str) -> Result<JsonRpcRequest, JsonRpcParseError> {
+    let req: JsonRpcRequest = serde_json::from_str(line).map_err(|e| {
+        Box::new(JsonRpcResponse::error(
+            None,
+            PARSE_ERROR,
+            format!("parse error: {e}"),
+        ))
+    })?;
 
     if req.jsonrpc != "2.0" {
-        return Err(JsonRpcResponse::error(
-            req.id.clone(),
+        return Err(Box::new(JsonRpcResponse::error(
+            req.id,
             INVALID_REQUEST,
             "jsonrpc must be \"2.0\"",
-        ));
+        )));
     }
 
     if req.method.is_empty() {
-        return Err(JsonRpcResponse::error(
-            req.id.clone(),
+        return Err(Box::new(JsonRpcResponse::error(
+            req.id,
             INVALID_REQUEST,
             "method must not be empty",
-        ));
+        )));
     }
 
     Ok(req)
@@ -114,7 +121,7 @@ pub fn read_lines(reader: impl BufRead) -> impl Iterator<Item = io::Result<Strin
         if line.len() > MAX_LINE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("line exceeds maximum size ({} bytes)", MAX_LINE_BYTES),
+                format!("line exceeds maximum size ({MAX_LINE_BYTES} bytes)"),
             ));
         }
         Ok(line)
@@ -137,20 +144,38 @@ mod tests {
     fn parse_invalid_jsonrpc_version() {
         let json = r#"{"jsonrpc":"1.0","id":1,"method":"test"}"#;
         let err = parse_request(json).expect_err("should fail");
-        assert_eq!(err.error.unwrap().code, INVALID_REQUEST);
+        assert_eq!(
+            err.error
+                .as_ref()
+                .expect("error response should include a JSON-RPC error")
+                .code,
+            INVALID_REQUEST
+        );
     }
 
     #[test]
     fn parse_empty_method() {
         let json = r#"{"jsonrpc":"2.0","id":1,"method":""}"#;
         let err = parse_request(json).expect_err("should fail");
-        assert_eq!(err.error.unwrap().code, INVALID_REQUEST);
+        assert_eq!(
+            err.error
+                .as_ref()
+                .expect("error response should include a JSON-RPC error")
+                .code,
+            INVALID_REQUEST
+        );
     }
 
     #[test]
     fn parse_malformed_json() {
         let err = parse_request("not json").expect_err("should fail");
-        assert_eq!(err.error.unwrap().code, PARSE_ERROR);
+        assert_eq!(
+            err.error
+                .as_ref()
+                .expect("parse failure should include a JSON-RPC error")
+                .code,
+            PARSE_ERROR
+        );
     }
 
     #[test]
@@ -170,7 +195,13 @@ mod tests {
             JsonRpcResponse::error(Some(serde_json::json!(2)), METHOD_NOT_FOUND, "not found");
         assert!(resp.result.is_none());
         assert!(resp.error.is_some());
-        assert_eq!(resp.error.as_ref().unwrap().code, METHOD_NOT_FOUND);
+        assert_eq!(
+            resp.error
+                .as_ref()
+                .expect("error response should include error details")
+                .code,
+            METHOD_NOT_FOUND
+        );
     }
 
     #[test]
@@ -179,7 +210,9 @@ mod tests {
         let reader = io::Cursor::new(big_line);
         let results: Vec<_> = read_lines(io::BufReader::new(reader)).collect();
         assert_eq!(results.len(), 1);
-        assert!(results[0].is_err());
+        let _err = results[0]
+            .as_ref()
+            .expect_err("oversized line should be rejected");
     }
 
     #[test]

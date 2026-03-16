@@ -294,17 +294,20 @@ mod tests {
     #[test]
     fn happy_path_transitions() {
         let mut ctx = JobContext::new("job-1", "Test", "");
-        ctx.transition_to(JobState::InProgress, None).unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
         assert_eq!(ctx.state, JobState::InProgress);
         assert!(ctx.started_at.is_some());
 
         ctx.transition_to(JobState::Completed, Some("done".into()))
-            .unwrap();
+            .expect("job should transition to completed");
         assert_eq!(ctx.state, JobState::Completed);
         assert!(ctx.completed_at.is_some());
 
-        ctx.transition_to(JobState::Submitted, None).unwrap();
-        ctx.transition_to(JobState::Accepted, None).unwrap();
+        ctx.transition_to(JobState::Submitted, None)
+            .expect("completed job should transition to submitted");
+        ctx.transition_to(JobState::Accepted, None)
+            .expect("submitted job should transition to accepted");
         assert_eq!(ctx.state, JobState::Accepted);
         assert!(ctx.state.is_terminal());
         assert_eq!(ctx.transition_count(), 4);
@@ -314,18 +317,21 @@ mod tests {
     fn invalid_transition_rejected() {
         let mut ctx = JobContext::new("job-1", "Test", "");
         let err = ctx.transition_to(JobState::Completed, None);
-        assert!(err.is_err());
-        assert!(err.unwrap_err().contains("cannot transition"));
+        let err = err.expect_err("pending job should not transition directly to completed");
+        assert!(err.contains("cannot transition"));
     }
 
     #[test]
     fn stuck_and_recovery() {
         let mut ctx = JobContext::new("job-1", "Test", "");
-        ctx.transition_to(JobState::InProgress, None).unwrap();
-        ctx.mark_stuck("no progress for 5 minutes").unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
+        ctx.mark_stuck("no progress for 5 minutes")
+            .expect("in-progress job should transition to stuck");
         assert_eq!(ctx.state, JobState::Stuck);
 
-        ctx.attempt_recovery().unwrap();
+        ctx.attempt_recovery()
+            .expect("stuck job should attempt recovery");
         assert_eq!(ctx.state, JobState::InProgress);
         assert_eq!(ctx.repair_attempts, 1);
     }
@@ -333,10 +339,11 @@ mod tests {
     #[test]
     fn recovery_fails_when_not_stuck() {
         let mut ctx = JobContext::new("job-1", "Test", "");
-        ctx.transition_to(JobState::InProgress, None).unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
         let err = ctx.attempt_recovery();
-        assert!(err.is_err());
-        assert!(err.unwrap_err().contains("not stuck"));
+        let err = err.expect_err("recovery should fail when the job is not stuck");
+        assert!(err.contains("not stuck"));
     }
 
     #[test]
@@ -344,21 +351,27 @@ mod tests {
         let mut ctx = JobContext::new("job-1", "Test", "");
         ctx.max_repair_attempts = 2;
 
-        ctx.transition_to(JobState::InProgress, None).unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
 
         // First recovery
-        ctx.mark_stuck("stuck-1").unwrap();
-        ctx.attempt_recovery().unwrap();
+        ctx.mark_stuck("stuck-1")
+            .expect("in-progress job should transition to stuck");
+        ctx.attempt_recovery()
+            .expect("first recovery attempt should succeed");
 
         // Second recovery
-        ctx.mark_stuck("stuck-2").unwrap();
-        ctx.attempt_recovery().unwrap();
+        ctx.mark_stuck("stuck-2")
+            .expect("recovered job should be markable as stuck again");
+        ctx.attempt_recovery()
+            .expect("second recovery attempt should succeed");
 
         // Third attempt should fail
-        ctx.mark_stuck("stuck-3").unwrap();
+        ctx.mark_stuck("stuck-3")
+            .expect("job should become stuck before the final failed recovery");
         let err = ctx.attempt_recovery();
-        assert!(err.is_err());
-        assert!(err.unwrap_err().contains("exceeded max repair attempts"));
+        let err = err.expect_err("recovery should fail after exceeding max attempts");
+        assert!(err.contains("exceeded max repair attempts"));
     }
 
     #[test]
@@ -401,12 +414,15 @@ mod tests {
     fn transition_history_capped() {
         let mut ctx = JobContext::new("job-1", "Test", "");
         // Generate many transitions by toggling InProgress ↔ Stuck
-        ctx.transition_to(JobState::InProgress, None).unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
         ctx.max_repair_attempts = 500;
 
         for i in 0..250 {
-            ctx.mark_stuck(format!("stuck-{i}")).unwrap();
-            ctx.attempt_recovery().unwrap();
+            ctx.mark_stuck(format!("stuck-{i}"))
+                .expect("job should become stuck during transition history test");
+            ctx.attempt_recovery()
+                .expect("recovery should succeed during transition history test");
         }
 
         assert!(ctx.transitions.len() <= MAX_TRANSITIONS);
@@ -437,8 +453,10 @@ mod tests {
     #[test]
     fn repair_stuck_job_success() {
         let mut ctx = JobContext::new("job-1", "Test", "");
-        ctx.transition_to(JobState::InProgress, None).unwrap();
-        ctx.mark_stuck("timeout").unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
+        ctx.mark_stuck("timeout")
+            .expect("in-progress job should transition to stuck");
 
         let result = repair_stuck_job(&mut ctx);
         assert!(matches!(result, RepairResult::Success { .. }));
@@ -449,10 +467,14 @@ mod tests {
     fn repair_stuck_job_manual_required() {
         let mut ctx = JobContext::new("job-1", "Test", "");
         ctx.max_repair_attempts = 1;
-        ctx.transition_to(JobState::InProgress, None).unwrap();
-        ctx.mark_stuck("stuck-1").unwrap();
-        ctx.attempt_recovery().unwrap();
-        ctx.mark_stuck("stuck-2").unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
+        ctx.mark_stuck("stuck-1")
+            .expect("job should become stuck on first attempt");
+        ctx.attempt_recovery()
+            .expect("first recovery should succeed");
+        ctx.mark_stuck("stuck-2")
+            .expect("job should become stuck again");
 
         let result = repair_stuck_job(&mut ctx);
         assert!(matches!(result, RepairResult::ManualRequired { .. }));
@@ -461,7 +483,8 @@ mod tests {
     #[test]
     fn repair_not_stuck_job_fails() {
         let mut ctx = JobContext::new("job-1", "Test", "");
-        ctx.transition_to(JobState::InProgress, None).unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
 
         let result = repair_stuck_job(&mut ctx);
         assert!(matches!(result, RepairResult::Failed { .. }));
@@ -472,13 +495,15 @@ mod tests {
         for initial in [JobState::Pending, JobState::InProgress, JobState::Stuck] {
             let mut ctx = JobContext::new("job-1", "Test", "");
             if initial != JobState::Pending {
-                ctx.transition_to(JobState::InProgress, None).unwrap();
+                ctx.transition_to(JobState::InProgress, None)
+                    .expect("job should transition to in-progress");
             }
             if initial == JobState::Stuck {
-                ctx.mark_stuck("test").unwrap();
+                ctx.mark_stuck("test")
+                    .expect("in-progress job should transition to stuck");
             }
             ctx.transition_to(JobState::Cancelled, Some("user cancelled".into()))
-                .unwrap();
+                .expect("job should transition to cancelled");
             assert_eq!(ctx.state, JobState::Cancelled);
             assert!(ctx.completed_at.is_some());
         }
@@ -487,10 +512,12 @@ mod tests {
     #[test]
     fn completed_can_fail() {
         let mut ctx = JobContext::new("job-1", "Test", "");
-        ctx.transition_to(JobState::InProgress, None).unwrap();
-        ctx.transition_to(JobState::Completed, None).unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
+        ctx.transition_to(JobState::Completed, None)
+            .expect("job should transition to completed");
         ctx.transition_to(JobState::Failed, Some("post-completion failure".into()))
-            .unwrap();
+            .expect("completed job should transition to failed");
         assert_eq!(ctx.state, JobState::Failed);
     }
 
@@ -505,11 +532,13 @@ mod tests {
     #[test]
     fn serialization_roundtrip() {
         let mut ctx = JobContext::new("job-1", "Test Job", "A test");
-        ctx.transition_to(JobState::InProgress, None).unwrap();
+        ctx.transition_to(JobState::InProgress, None)
+            .expect("job should transition to in-progress");
         ctx.add_tokens(100);
 
-        let json = serde_json::to_string(&ctx).unwrap();
-        let deserialized: JobContext = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&ctx).expect("job context should serialize");
+        let deserialized: JobContext =
+            serde_json::from_str(&json).expect("job context should deserialize");
 
         assert_eq!(deserialized.job_id, "job-1");
         assert_eq!(deserialized.state, JobState::InProgress);
