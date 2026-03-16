@@ -225,11 +225,16 @@ impl Tool for BashTool {
         }
     }
 
-    async fn invoke(&self, args: serde_json::Value, _ctx: ToolContext) -> Result<serde_json::Value> {
+    async fn invoke(
+        &self,
+        args: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<serde_json::Value> {
         let args: BashArgs = serde_json::from_value(args).map_err(|e| {
             InvalidRequest {
                 msg: format!("invalid bash args: {e}"),
-            }.build()
+            }
+            .build()
         })?;
 
         // Security check.
@@ -239,7 +244,8 @@ impl Tool for BashTool {
                     "bash command not allowed by policy: '{}'",
                     args.command.chars().take(100).collect::<String>()
                 ),
-            }.fail();
+            }
+            .fail();
         }
 
         // Validate and sanitize working directory.
@@ -248,7 +254,8 @@ impl Tool for BashTool {
             if !path.is_dir() {
                 return InvalidRequest {
                     msg: format!("working directory does not exist: {dir}"),
-                }.fail();
+                }
+                .fail();
             }
             Some(path)
         } else {
@@ -261,11 +268,15 @@ impl Tool for BashTool {
             .min(MAX_TIMEOUT_SECS);
         let timeout = Duration::from_secs(timeout_secs);
 
-        let result = execute_command(&args.command, workdir.as_ref(), timeout, &self.sandbox).await?;
+        let result =
+            execute_command(&args.command, workdir.as_ref(), timeout, &self.sandbox).await?;
 
-        serde_json::to_value(&result).map_err(|e| Internal {
-            msg: format!("failed to serialize bash result: {e}"),
-        }.build())
+        serde_json::to_value(&result).map_err(|e| {
+            Internal {
+                msg: format!("failed to serialize bash result: {e}"),
+            }
+            .build()
+        })
     }
 }
 
@@ -310,9 +321,12 @@ async fn execute_command(
         cmd.current_dir(dir);
     }
 
-    let child = cmd.spawn().map_err(|e| AgentRuntime {
-        msg: format!("failed to spawn shell: {e}"),
-    }.build())?;
+    let child = cmd.spawn().map_err(|e| {
+        AgentRuntime {
+            msg: format!("failed to spawn shell: {e}"),
+        }
+        .build()
+    })?;
 
     // Wait with timeout.
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
@@ -320,7 +334,8 @@ async fn execute_command(
         Ok(Err(e)) => {
             return AgentRuntime {
                 msg: format!("command execution error: {e}"),
-            }.fail();
+            }
+            .fail();
         }
         Err(_) => {
             warn!(command = %command.chars().take(80).collect::<String>(), "bash command timed out");
@@ -359,11 +374,7 @@ fn truncate_output(output: &str) -> (String, bool) {
 
     // Keep the last MAX_OUTPUT_CHARS characters with a truncation marker.
     let skip = output.len() - MAX_OUTPUT_CHARS + 50; // 50 chars for the marker
-    let truncated = format!(
-        "[...truncated {} chars...]\n{}",
-        skip,
-        &output[skip..]
-    );
+    let truncated = format!("[...truncated {} chars...]\n{}", skip, &output[skip..]);
     (truncated, true)
 }
 
@@ -449,9 +460,14 @@ mod tests {
 
     #[tokio::test]
     async fn execute_echo() {
-        let result = execute_command("echo hello", None, Duration::from_secs(10), &SandboxMode::None)
-            .await
-            .unwrap();
+        let result = execute_command(
+            "echo hello",
+            None,
+            Duration::from_secs(10),
+            &SandboxMode::None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout.trim(), "hello");
         assert!(result.stderr.is_empty());
@@ -468,9 +484,14 @@ mod tests {
 
     #[tokio::test]
     async fn execute_with_stderr() {
-        let result = execute_command("echo error >&2", None, Duration::from_secs(10), &SandboxMode::None)
-            .await
-            .unwrap();
+        let result = execute_command(
+            "echo error >&2",
+            None,
+            Duration::from_secs(10),
+            &SandboxMode::None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stderr.trim(), "error");
     }
@@ -486,9 +507,14 @@ mod tests {
 
     #[tokio::test]
     async fn execute_with_workdir() {
-        let result = execute_command("pwd", Some(&PathBuf::from("/tmp")), Duration::from_secs(10), &SandboxMode::None)
-            .await
-            .unwrap();
+        let result = execute_command(
+            "pwd",
+            Some(&PathBuf::from("/tmp")),
+            Duration::from_secs(10),
+            &SandboxMode::None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.exit_code, Some(0));
         // On some systems /tmp may be a symlink.
         let output = result.stdout.trim();
@@ -550,9 +576,14 @@ mod tests {
         if !SandboxMode::is_available() {
             return;
         }
-        let result = execute_command("echo sandboxed", None, Duration::from_secs(30), &SandboxMode::AiJail)
-            .await
-            .unwrap();
+        let result = execute_command(
+            "echo sandboxed",
+            None,
+            Duration::from_secs(30),
+            &SandboxMode::AiJail,
+        )
+        .await
+        .unwrap();
         // If we're already inside a bwrap sandbox, nesting fails — skip gracefully.
         if result.exit_code == Some(1) && result.stderr.contains("bwrap") {
             eprintln!("skipping: already inside a bwrap sandbox, cannot nest");
@@ -563,26 +594,73 @@ mod tests {
     }
 
     fn test_context() -> ToolContext {
-        use frankclaw_core::types::AgentId;
         use frankclaw_core::session::SessionStore;
+        use frankclaw_core::types::AgentId;
 
         struct NoopStore;
         #[async_trait]
         impl SessionStore for NoopStore {
-            async fn get(&self, _key: &frankclaw_core::types::SessionKey) -> Result<Option<frankclaw_core::session::SessionEntry>> { Ok(None) }
-            async fn upsert(&self, _entry: &frankclaw_core::session::SessionEntry) -> Result<()> { Ok(()) }
-            async fn delete(&self, _key: &frankclaw_core::types::SessionKey) -> Result<()> { Ok(()) }
-            async fn list(&self, _agent_id: &frankclaw_core::types::AgentId, _limit: usize, _offset: usize) -> Result<Vec<frankclaw_core::session::SessionEntry>> { Ok(vec![]) }
-            async fn append_transcript(&self, _key: &frankclaw_core::types::SessionKey, _entry: &frankclaw_core::session::TranscriptEntry) -> Result<()> { Ok(()) }
-            async fn get_transcript(&self, _key: &frankclaw_core::types::SessionKey, _limit: usize, _before: Option<u64>) -> Result<Vec<frankclaw_core::session::TranscriptEntry>> { Ok(vec![]) }
-            async fn clear_transcript(&self, _key: &frankclaw_core::types::SessionKey) -> Result<()> { Ok(()) }
-            async fn maintenance(&self, _config: &frankclaw_core::session::PruningConfig) -> Result<u64> { Ok(0) }
+            async fn get(
+                &self,
+                _key: &frankclaw_core::types::SessionKey,
+            ) -> Result<Option<frankclaw_core::session::SessionEntry>> {
+                Ok(None)
+            }
+            async fn upsert(&self, _entry: &frankclaw_core::session::SessionEntry) -> Result<()> {
+                Ok(())
+            }
+            async fn delete(&self, _key: &frankclaw_core::types::SessionKey) -> Result<()> {
+                Ok(())
+            }
+            async fn list(
+                &self,
+                _agent_id: &frankclaw_core::types::AgentId,
+                _limit: usize,
+                _offset: usize,
+            ) -> Result<Vec<frankclaw_core::session::SessionEntry>> {
+                Ok(vec![])
+            }
+            async fn append_transcript(
+                &self,
+                _key: &frankclaw_core::types::SessionKey,
+                _entry: &frankclaw_core::session::TranscriptEntry,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn get_transcript(
+                &self,
+                _key: &frankclaw_core::types::SessionKey,
+                _limit: usize,
+                _before: Option<u64>,
+            ) -> Result<Vec<frankclaw_core::session::TranscriptEntry>> {
+                Ok(vec![])
+            }
+            async fn clear_transcript(
+                &self,
+                _key: &frankclaw_core::types::SessionKey,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn maintenance(
+                &self,
+                _config: &frankclaw_core::session::PruningConfig,
+            ) -> Result<u64> {
+                Ok(0)
+            }
         }
 
         ToolContext {
             agent_id: AgentId::new("test"),
             session_key: None,
             sessions: std::sync::Arc::new(NoopStore),
+            canvas: None,
+            fetcher: None,
+            channels: None,
+            cron: None,
+            memory_search: None,
+            audio_transcriber: None,
+            config: None,
+            workspace: None,
         }
     }
 }

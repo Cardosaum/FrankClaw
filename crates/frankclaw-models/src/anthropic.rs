@@ -6,7 +6,10 @@ use std::collections::BTreeMap;
 use tracing::debug;
 
 use frankclaw_core::error::{FrankClawError, Internal, Provider, Result};
-use frankclaw_core::model::{ModelProvider, CompletionRequest, StreamDelta, CompletionResponse, ModelDef, ModelApi, InputModality, ModelCost, ModelCompat, ToolCallResponse, Usage, FinishReason};
+use frankclaw_core::model::{
+    CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi, ModelCompat,
+    ModelCost, ModelDef, ModelProvider, StreamDelta, ToolCallResponse, Usage,
+};
 use frankclaw_core::types::Role;
 
 use crate::sse::SseDecoder;
@@ -23,17 +26,16 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    pub fn new(
-        id: impl Into<String>,
-        api_key: SecretString,
-        models: Vec<String>,
-    ) -> Result<Self> {
+    pub fn new(id: impl Into<String>, api_key: SecretString, models: Vec<String>) -> Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .map_err(|e| Internal {
-                msg: format!("failed to build HTTP client: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Internal {
+                    msg: format!("failed to build HTTP client: {e}"),
+                }
+                .build()
+            })?;
 
         Ok(Self {
             id: id.into(),
@@ -73,9 +75,12 @@ impl ModelProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Provider {
-                msg: format!("request failed: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Provider {
+                    msg: format!("request failed: {e}"),
+                }
+                .build()
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -88,11 +93,16 @@ impl ModelProvider for AnthropicProvider {
             let mut state = AnthropicStreamState::default();
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| Provider {
-                    msg: format!("failed to read streaming response: {e}"),
-                }.build())?;
+                let chunk = chunk.map_err(|e| {
+                    Provider {
+                        msg: format!("failed to read streaming response: {e}"),
+                    }
+                    .build()
+                })?;
                 for event in decoder.push(chunk.as_ref()) {
-                    for delta in apply_stream_event(&mut state, event.event.as_deref(), &event.data)? {
+                    for delta in
+                        apply_stream_event(&mut state, event.event.as_deref(), &event.data)?
+                    {
                         let _ = stream_tx.send(delta).await;
                     }
                     if state.done {
@@ -104,21 +114,27 @@ impl ModelProvider for AnthropicProvider {
                 }
             }
             if !state.done
-                && let Some(event) = decoder.finish() {
-                    for delta in apply_stream_event(&mut state, event.event.as_deref(), &event.data)? {
-                        let _ = stream_tx.send(delta).await;
-                    }
+                && let Some(event) = decoder.finish()
+            {
+                for delta in apply_stream_event(&mut state, event.event.as_deref(), &event.data)? {
+                    let _ = stream_tx.send(delta).await;
                 }
+            }
             let response = state.finish()?;
-            let _ = stream_tx.send(StreamDelta::Done {
-                usage: Some(response.usage.clone()),
-            }).await;
+            let _ = stream_tx
+                .send(StreamDelta::Done {
+                    usage: Some(response.usage.clone()),
+                })
+                .await;
             return Ok(response);
         }
 
-        let data: serde_json::Value = response.json().await.map_err(|e| Provider {
-            msg: format!("invalid response: {e}"),
-        }.build())?;
+        let data: serde_json::Value = response.json().await.map_err(|e| {
+            Provider {
+                msg: format!("invalid response: {e}"),
+            }
+            .build()
+        })?;
         parse_completion_response(&data)
     }
 
@@ -181,7 +197,7 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
                     content_blocks.push(serde_json::json!({
                         "type": "tool_use",
                         "id": tc.id,
-                        "name": tc.name,
+                        "name": &tc.name,
                         "input": input,
                     }));
                 }
@@ -247,12 +263,13 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
         body["temperature"] = serde_json::json!(temp);
     }
     if !request.tools.is_empty() {
+        // Anthropic tool names must match ^[a-zA-Z0-9_-]{1,128} — dots are not allowed.
         let tools: Vec<serde_json::Value> = request
             .tools
             .iter()
             .map(|t| {
                 serde_json::json!({
-                    "name": t.name,
+                    "name": &t.name,
                     "description": t.description,
                     "input_schema": t.parameters,
                 })
@@ -276,7 +293,10 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
     body
 }
 
-#[expect(clippy::unnecessary_wraps, reason = "Result return kept for consistency with other provider parse functions")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Result return kept for consistency with other provider parse functions"
+)]
 fn parse_completion_response(data: &serde_json::Value) -> Result<CompletionResponse> {
     let mut content = String::new();
     let mut tool_calls = Vec::new();
@@ -288,14 +308,15 @@ fn parse_completion_response(data: &serde_json::Value) -> Result<CompletionRespo
                     // Anthropic thinking blocks contain internal reasoning.
                     // Preserve them in content for transcript storage.
                     if let Some(thinking) = block["thinking"].as_str()
-                        && !thinking.is_empty() {
-                            if !content.is_empty() {
-                                content.push_str("\n\n");
-                            }
-                            content.push_str("<thinking>\n");
-                            content.push_str(thinking);
-                            content.push_str("\n</thinking>\n\n");
+                        && !thinking.is_empty()
+                    {
+                        if !content.is_empty() {
+                            content.push_str("\n\n");
                         }
+                        content.push_str("<thinking>\n");
+                        content.push_str(thinking);
+                        content.push_str("\n</thinking>\n\n");
+                    }
                 }
                 Some("text") => {
                     if let Some(text) = block["text"].as_str() {
@@ -303,9 +324,7 @@ fn parse_completion_response(data: &serde_json::Value) -> Result<CompletionRespo
                     }
                 }
                 Some("tool_use") => {
-                    if let (Some(id), Some(name)) =
-                        (block["id"].as_str(), block["name"].as_str())
-                    {
+                    if let (Some(id), Some(name)) = (block["id"].as_str(), block["name"].as_str()) {
                         tool_calls.push(ToolCallResponse {
                             id: id.to_string(),
                             name: name.to_string(),
@@ -362,7 +381,8 @@ impl AnthropicStreamState {
             if tool_call.id.trim().is_empty() || tool_call.name.trim().is_empty() {
                 return Provider {
                     msg: "streamed anthropic tool call missing id or name",
-                }.fail();
+                }
+                .fail();
             }
             tool_calls.push(ToolCallResponse {
                 id: tool_call.id,
@@ -384,9 +404,12 @@ fn apply_stream_event(
     event_type: Option<&str>,
     data: &str,
 ) -> Result<Vec<StreamDelta>> {
-    let payload: serde_json::Value = serde_json::from_str(data).map_err(|err| Provider {
-        msg: format!("invalid streaming response chunk: {err}"),
-    }.build())?;
+    let payload: serde_json::Value = serde_json::from_str(data).map_err(|err| {
+        Provider {
+            msg: format!("invalid streaming response chunk: {err}"),
+        }
+        .build()
+    })?;
     let mut deltas = Vec::new();
 
     match event_type.unwrap_or_default() {
@@ -397,9 +420,10 @@ fn apply_stream_event(
             state.usage.cache_read_tokens = payload["message"]["usage"]["cache_read_input_tokens"]
                 .as_u64()
                 .map(|v| v as u32);
-            state.usage.cache_write_tokens = payload["message"]["usage"]["cache_creation_input_tokens"]
-                .as_u64()
-                .map(|v| v as u32);
+            state.usage.cache_write_tokens =
+                payload["message"]["usage"]["cache_creation_input_tokens"]
+                    .as_u64()
+                    .map(|v| v as u32);
         }
         "content_block_start" => {
             if payload["content_block"]["type"].as_str() == Some("tool_use")
@@ -407,20 +431,21 @@ fn apply_stream_event(
                     payload["index"].as_u64(),
                     payload["content_block"]["id"].as_str(),
                     payload["content_block"]["name"].as_str(),
-                ) {
-                    state
-                        .tool_calls
-                        .entry(index as usize)
-                        .or_insert_with(|| StreamingToolCall {
+                )
+            {
+                state
+                    .tool_calls
+                    .entry(index as usize)
+                    .or_insert_with(|| StreamingToolCall {
                         id: id.to_string(),
                         name: name.to_string(),
                         ..Default::default()
                     });
-                    deltas.push(StreamDelta::ToolCallStart {
-                        id: id.to_string(),
-                        name: name.to_string(),
-                    });
-                }
+                deltas.push(StreamDelta::ToolCallStart {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                });
+            }
         }
         "content_block_delta" => match payload["delta"]["type"].as_str() {
             Some("text_delta") => {
@@ -438,25 +463,27 @@ fn apply_stream_event(
             Some("input_json_delta") => {
                 let partial = payload["delta"]["partial_json"].as_str().unwrap_or("");
                 if let Some(index) = payload["index"].as_u64().map(|value| value as usize)
-                    && let Some(tool_call) = state.tool_calls.get_mut(&index) {
-                        tool_call.arguments.push_str(partial);
-                        deltas.push(StreamDelta::ToolCallDelta {
-                            id: tool_call.id.clone(),
-                            arguments: partial.to_string(),
-                        });
-                    }
+                    && let Some(tool_call) = state.tool_calls.get_mut(&index)
+                {
+                    tool_call.arguments.push_str(partial);
+                    deltas.push(StreamDelta::ToolCallDelta {
+                        id: tool_call.id.clone(),
+                        arguments: partial.to_string(),
+                    });
+                }
             }
             _ => {}
         },
         "content_block_stop" => {
             if let Some(index) = payload["index"].as_u64().map(|value| value as usize)
                 && let Some(tool_call) = state.tool_calls.get_mut(&index)
-                    && !tool_call.ended {
-                        tool_call.ended = true;
-                        deltas.push(StreamDelta::ToolCallEnd {
-                            id: tool_call.id.clone(),
-                        });
-                    }
+                && !tool_call.ended
+            {
+                tool_call.ended = true;
+                deltas.push(StreamDelta::ToolCallEnd {
+                    id: tool_call.id.clone(),
+                });
+            }
         }
         "message_delta" => {
             state.finish_reason = parse_finish_reason(payload["delta"]["stop_reason"].as_str());
@@ -468,11 +495,14 @@ fn apply_stream_event(
             state.done = true;
         }
         "error" => {
-            let message = payload["error"]["message"].as_str().unwrap_or("anthropic stream error");
+            let message = payload["error"]["message"]
+                .as_str()
+                .unwrap_or("anthropic stream error");
             deltas.push(StreamDelta::Error(message.to_string()));
             return Provider {
                 msg: message.to_string(),
-            }.fail();
+            }
+            .fail();
         }
         _ => {}
     }
@@ -504,41 +534,44 @@ fn parse_finish_reason(reason: Option<&str>) -> FinishReason {
 
 /// Classify HTTP errors from model providers into actionable error messages.
 /// Detects context overflow, billing issues, rate limits, and auth failures.
-pub fn classify_provider_error(
-    status: reqwest::StatusCode,
-    body: &str,
-) -> FrankClawError {
+pub fn classify_provider_error(status: reqwest::StatusCode, body: &str) -> FrankClawError {
     let body_lower = body.to_lowercase();
 
     // Context overflow detection — varies across providers
     if is_context_overflow(&body_lower) {
         return Provider {
             msg: format!("context length exceeded (HTTP {status}): {body}"),
-        }.build();
+        }
+        .build();
     }
 
     match status.as_u16() {
         401 => Provider {
             msg: format!("authentication failed (invalid API key): {body}"),
-        }.build(),
+        }
+        .build(),
         402 => {
             // 402 can mean billing issue OR rate limit spend cap
             if body_lower.contains("rate_limit") || body_lower.contains("spend") {
                 Provider {
                     msg: format!("rate limit spend cap reached (retryable): {body}"),
-                }.build()
+                }
+                .build()
             } else {
                 Provider {
                     msg: format!("billing error (out of credits, non-retryable): {body}"),
-                }.build()
+                }
+                .build()
             }
         }
         429 => Provider {
             msg: format!("rate limited (HTTP 429): {body}"),
-        }.build(),
+        }
+        .build(),
         _ => Provider {
             msg: format!("HTTP {status}: {body}"),
-        }.build(),
+        }
+        .build(),
     }
 }
 
@@ -686,12 +719,8 @@ mod tests {
                 arguments: "{\"q\":\"cl".into(),
             }]
         );
-        let deltas = apply_stream_event(
-            &mut state,
-            Some("content_block_stop"),
-            r#"{"index":0}"#,
-        )
-        .expect("tool stop should parse");
+        let deltas = apply_stream_event(&mut state, Some("content_block_stop"), r#"{"index":0}"#)
+            .expect("tool stop should parse");
         assert_eq!(
             deltas,
             vec![StreamDelta::ToolCallEnd {
@@ -826,7 +855,9 @@ mod tests {
         let body = build_request_body(&request);
 
         // System should be a content block array, not a plain string
-        let system = body["system"].as_array().expect("system should be an array");
+        let system = body["system"]
+            .as_array()
+            .expect("system should be an array");
         assert_eq!(system.len(), 1);
         assert_eq!(system[0]["type"], "text");
         assert_eq!(system[0]["text"], "You are a helpful assistant.");

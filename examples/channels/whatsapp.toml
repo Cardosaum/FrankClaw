@@ -1,0 +1,10 @@
+[channels.whatsapp]
+enabled = true
+require_mention_for_groups = true
+groups = ["*"]
+
+[[channels.whatsapp.accounts]]
+access_token_env = "WHATSAPP_ACCESS_TOKEN"
+phone_number_id_env = "WHATSAPP_PHONE_NUMBER_ID"
+verify_token_env = "WHATSAPP_VERIFY_TOKEN"
+app_secret_env = "WHATSAPP_APP_SECRET"

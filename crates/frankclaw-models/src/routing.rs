@@ -108,23 +108,65 @@ impl Default for ScorerWeights {
 /// Default domain-specific keywords for complexity scoring.
 pub const DEFAULT_DOMAIN_KEYWORDS: &[&str] = &[
     // Infrastructure
-    "kubernetes", "k8s", "docker", "terraform", "nginx", "apache",
-    "linux", "unix", "bash", "shell",
+    "kubernetes",
+    "k8s",
+    "docker",
+    "terraform",
+    "nginx",
+    "apache",
+    "linux",
+    "unix",
+    "bash",
+    "shell",
     // Languages & frameworks
-    "solidity", "rust", "typescript", "react", "nextjs", "vue", "angular", "svelte",
+    "solidity",
+    "rust",
+    "typescript",
+    "react",
+    "nextjs",
+    "vue",
+    "angular",
+    "svelte",
     // Databases
-    "postgresql", "postgres", "mysql", "mongodb", "redis",
+    "postgresql",
+    "postgres",
+    "mysql",
+    "mongodb",
+    "redis",
     // APIs & protocols
-    "graphql", "grpc", "protobuf", "websocket", "oauth", "jwt",
-    "cors", "csrf", "xss", "sql.?injection", "api", "rest",
+    "graphql",
+    "grpc",
+    "protobuf",
+    "websocket",
+    "oauth",
+    "jwt",
+    "cors",
+    "csrf",
+    "xss",
+    "sql.?injection",
+    "api",
+    "rest",
     // Cloud & deployment
-    "aws", "gcp", "azure", "vercel", "netlify", "cloudflare",
-    "ci/cd", "devops",
+    "aws",
+    "gcp",
+    "azure",
+    "vercel",
+    "netlify",
+    "cloudflare",
+    "ci/cd",
+    "devops",
     // Version control
-    "git", "github", "gitlab",
+    "git",
+    "github",
+    "gitlab",
     // Blockchain
-    "blockchain", "web3", "defi", "nft", "smart.?contract",
-    "ethereum", "evm",
+    "blockchain",
+    "web3",
+    "defi",
+    "nft",
+    "smart.?contract",
+    "ethereum",
+    "evm",
 ];
 
 /// Configuration for the complexity scorer.
@@ -314,7 +356,10 @@ pub fn score_complexity_with_config(prompt: &str, config: &ScorerConfig) -> Scor
     score_complexity_internal(prompt, &config.weights, &domain_regex)
 }
 
-#[expect(clippy::too_many_lines, reason = "13-dimension scorer; splitting would scatter related scoring logic")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "13-dimension scorer; splitting would scatter related scoring logic"
+)]
 fn score_complexity_internal(
     prompt: &str,
     weights: &ScorerWeights,
@@ -636,7 +681,11 @@ mod tests {
             "Explain why React uses a virtual DOM and compare it to Svelte's approach. \
              Consider the trade-offs for performance and developer experience.",
         );
-        assert!(result.total >= 20, "Expected score >= 20, got {}", result.total);
+        assert!(
+            result.total >= 20,
+            "Expected score >= 20, got {}",
+            result.total
+        );
     }
 
     #[test]
@@ -645,7 +694,11 @@ mod tests {
             "Analyze this Solidity contract for reentrancy vulnerabilities, \
              check for authentication bypass, and provide a security audit report.",
         );
-        assert!(result.total >= 16, "Expected score >= 16, got {}", result.total);
+        assert!(
+            result.total >= 16,
+            "Expected score >= 16, got {}",
+            result.total
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -653,16 +706,43 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[rstest]
-    #[case("Why is this better? Explain the trade-offs and compare", "reasoning_words", 100)]
-    #[case("First, read the file. Then analyze. After that, write a report.", "multi_step", 100)]
-    #[case("Fix the bug in the async function, refactor the module", "code_indicators", 50)]
-    #[case("Store the password and encrypt the auth token", "safety_sensitivity", 100)]
-    #[case("Deploy the kubernetes cluster on aws with terraform", "domain_specific", 100)]
-    #[case("Write a blog post about design patterns, then summarize", "creativity", 100)]
+    #[case(
+        "Why is this better? Explain the trade-offs and compare",
+        "reasoning_words",
+        100
+    )]
+    #[case(
+        "First, read the file. Then analyze. After that, write a report.",
+        "multi_step",
+        100
+    )]
+    #[case(
+        "Fix the bug in the async function, refactor the module",
+        "code_indicators",
+        50
+    )]
+    #[case(
+        "Store the password and encrypt the auth token",
+        "safety_sensitivity",
+        100
+    )]
+    #[case(
+        "Deploy the kubernetes cluster on aws with terraform",
+        "domain_specific",
+        100
+    )]
+    #[case(
+        "Write a blog post about design patterns, then summarize",
+        "creativity",
+        100
+    )]
     fn score_dimension(#[case] prompt: &str, #[case] dimension: &str, #[case] min_score: u32) {
         let result = score_complexity(prompt);
         let score = result.components.get(dimension).copied().unwrap_or(0);
-        assert!(score >= min_score, "Expected {dimension} >= {min_score}, got {score}");
+        assert!(
+            score >= min_score,
+            "Expected {dimension} >= {min_score}, got {score}"
+        );
     }
 
     #[test]
@@ -672,16 +752,28 @@ mod tests {
              After that, write a detailed report.",
         );
         let multi_step = result.components.get("multi_step").copied().unwrap_or(0);
-        assert!(multi_step >= 100, "Expected multi_step >= 100, got {multi_step}");
+        assert!(
+            multi_step >= 100,
+            "Expected multi_step >= 100, got {multi_step}"
+        );
         assert!(result.hints.iter().any(|h| h.contains("multi_step")));
     }
 
     #[test]
     fn score_question_complexity_dimension() {
         let result = score_complexity("Why does this fail? How can I fix it? What if I try X?");
-        let qc = result.components.get("question_complexity").copied().unwrap_or(0);
+        let qc = result
+            .components
+            .get("question_complexity")
+            .copied()
+            .unwrap_or(0);
         assert!(qc >= 60, "Expected question_complexity >= 60, got {qc}");
-        assert!(result.hints.iter().any(|h| h.contains("Multiple questions")));
+        assert!(
+            result
+                .hints
+                .iter()
+                .any(|h| h.contains("Multiple questions"))
+        );
     }
 
     #[test]
@@ -690,7 +782,11 @@ mod tests {
             "This is complex, because it has commas, and conjunctions, \
              however it also has semicolons; moreover, it keeps going, and going",
         );
-        let sc = result.components.get("sentence_complexity").copied().unwrap_or(0);
+        let sc = result
+            .components
+            .get("sentence_complexity")
+            .copied()
+            .unwrap_or(0);
         assert!(sc >= 60, "Expected sentence_complexity >= 60, got {sc}");
     }
 
@@ -698,14 +794,22 @@ mod tests {
     fn score_token_estimate_for_long_prompt() {
         let long_prompt = "a ".repeat(300); // 600 chars
         let result = score_complexity(&long_prompt);
-        let token = result.components.get("token_estimate").copied().unwrap_or(0);
+        let token = result
+            .components
+            .get("token_estimate")
+            .copied()
+            .unwrap_or(0);
         assert!(token >= 80, "Expected token_estimate >= 80, got {token}");
     }
 
     #[test]
     fn score_token_estimate_for_short_prompt() {
         let result = score_complexity("hi");
-        let token = result.components.get("token_estimate").copied().unwrap_or(0);
+        let token = result
+            .components
+            .get("token_estimate")
+            .copied()
+            .unwrap_or(0);
         assert_eq!(token, 0, "Expected token_estimate == 0, got {token}");
     }
 
@@ -738,7 +842,12 @@ mod tests {
     fn score_explicit_tier_hint(#[case] prompt: &str, #[case] expected: Tier) {
         let result = score_complexity(prompt);
         assert_eq!(result.tier, expected);
-        assert!(result.hints.iter().any(|h| h.contains("Explicit tier hint")));
+        assert!(
+            result
+                .hints
+                .iter()
+                .any(|h| h.contains("Explicit tier hint"))
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -748,20 +857,42 @@ mod tests {
     #[test]
     fn score_custom_domain_keywords_override_defaults() {
         let default_result = score_complexity("How do I deploy kubernetes?");
-        let default_domain = default_result.components.get("domain_specific").copied().unwrap_or(0);
-        assert!(default_domain > 0, "Default keywords should match 'kubernetes'");
+        let default_domain = default_result
+            .components
+            .get("domain_specific")
+            .copied()
+            .unwrap_or(0);
+        assert!(
+            default_domain > 0,
+            "Default keywords should match 'kubernetes'"
+        );
 
         let config = ScorerConfig {
             weights: ScorerWeights::default(),
             domain_keywords: Some(vec!["mycompany".to_string(), "myproduct".to_string()]),
         };
         let custom_result = score_complexity_with_config("How do I deploy kubernetes?", &config);
-        let custom_domain = custom_result.components.get("domain_specific").copied().unwrap_or(0);
-        assert_eq!(custom_domain, 0, "Custom keywords shouldn't match 'kubernetes'");
+        let custom_domain = custom_result
+            .components
+            .get("domain_specific")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            custom_domain, 0,
+            "Custom keywords shouldn't match 'kubernetes'"
+        );
 
-        let custom_result2 = score_complexity_with_config("Tell me about myproduct features", &config);
-        let custom_domain2 = custom_result2.components.get("domain_specific").copied().unwrap_or(0);
-        assert!(custom_domain2 > 0, "Custom keywords should match 'myproduct'");
+        let custom_result2 =
+            score_complexity_with_config("Tell me about myproduct features", &config);
+        let custom_domain2 = custom_result2
+            .components
+            .get("domain_specific")
+            .copied()
+            .unwrap_or(0);
+        assert!(
+            custom_domain2 > 0,
+            "Custom keywords should match 'myproduct'"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -788,7 +919,11 @@ mod tests {
     fn score_very_long_prompt_is_at_least_standard() {
         let long = "Tell me about ".to_string() + &"things ".repeat(200);
         let result = score_complexity(&long);
-        assert!(result.total >= 16, "Very long prompt should score at least Standard, got {}", result.total);
+        assert!(
+            result.total >= 16,
+            "Very long prompt should score at least Standard, got {}",
+            result.total
+        );
     }
 
     #[test]
@@ -797,13 +932,25 @@ mod tests {
             "First, explain why the function fails. Then write a fix and deploy it.",
         );
         let expected_keys = [
-            "reasoning_words", "token_estimate", "code_indicators", "multi_step",
-            "domain_specific", "ambiguity", "creativity", "precision",
-            "context_dependency", "tool_likelihood", "safety_sensitivity",
-            "question_complexity", "sentence_complexity",
+            "reasoning_words",
+            "token_estimate",
+            "code_indicators",
+            "multi_step",
+            "domain_specific",
+            "ambiguity",
+            "creativity",
+            "precision",
+            "context_dependency",
+            "tool_likelihood",
+            "safety_sensitivity",
+            "question_complexity",
+            "sentence_complexity",
         ];
         for key in &expected_keys {
-            assert!(result.components.contains_key(*key), "Missing component: {key}");
+            assert!(
+                result.components.contains_key(*key),
+                "Missing component: {key}"
+            );
         }
     }
 
@@ -816,7 +963,11 @@ mod tests {
              Calculate exactly how many steps are needed? Why? How? \
              Deploy to production mainnet. Review the authentication token password.";
         let result = score_complexity(prompt);
-        assert!(result.total <= 100, "Score should be clamped to 100, got {}", result.total);
+        assert!(
+            result.total <= 100,
+            "Score should be clamped to 100, got {}",
+            result.total
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -843,7 +994,9 @@ mod tests {
             .expect("time lookup override exists");
 
         assert!(
-            !lookup_override.regex.is_match("What time complexity is merge sort?"),
+            !lookup_override
+                .regex
+                .is_match("What time complexity is merge sort?"),
             "Time override should not match 'What time complexity is merge sort?'"
         );
         assert!(lookup_override.regex.is_match("What time is it?"));
@@ -873,7 +1026,12 @@ mod tests {
         };
         let result = score_complexity_with_config("deploy kubernetes to mainnet", &config);
         assert!(
-            result.components.get("domain_specific").copied().unwrap_or(0) > 0,
+            result
+                .components
+                .get("domain_specific")
+                .copied()
+                .unwrap_or(0)
+                > 0,
             "Empty custom keywords should fall back to defaults"
         );
     }

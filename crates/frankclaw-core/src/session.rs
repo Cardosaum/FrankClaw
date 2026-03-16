@@ -21,7 +21,6 @@ pub enum SessionScoping {
     Global,
 }
 
-
 impl SessionScoping {
     pub fn resolve_inbound_account_scope(
         &self,
@@ -137,7 +136,12 @@ pub trait SessionStore: Send + Sync + 'static {
     async fn delete(&self, key: &SessionKey) -> Result<()>;
 
     /// List sessions for an agent.
-    async fn list(&self, agent_id: &AgentId, limit: usize, offset: usize) -> Result<Vec<SessionEntry>>;
+    async fn list(
+        &self,
+        agent_id: &AgentId,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<SessionEntry>>;
 
     /// Append a transcript entry.
     async fn append_transcript(&self, key: &SessionKey, entry: &TranscriptEntry) -> Result<()>;
@@ -163,12 +167,8 @@ mod tests {
 
     #[test]
     fn per_channel_peer_scoping_includes_account() {
-        let scope = SessionScoping::PerChannelPeer.resolve_inbound_account_scope(
-            "default",
-            "user-123",
-            None,
-            false,
-        );
+        let scope = SessionScoping::PerChannelPeer
+            .resolve_inbound_account_scope("default", "user-123", None, false);
         assert_eq!(scope, "default:user-123");
     }
 

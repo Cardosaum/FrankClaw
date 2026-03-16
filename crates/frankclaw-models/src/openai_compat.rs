@@ -1,30 +1,16 @@
 use std::collections::BTreeMap;
 
 use frankclaw_core::error::{Provider, Result};
-use frankclaw_core::model::{CompletionRequest, ResponseFormat, CompletionResponse, ToolCallResponse, Usage, FinishReason, StreamDelta};
+use frankclaw_core::model::{
+    CompletionRequest, CompletionResponse, FinishReason, ResponseFormat, StreamDelta,
+    ToolCallResponse, Usage,
+};
 use frankclaw_core::types::Role;
-
-/// Sanitize a tool name for OpenAI compatibility (dots -> underscores).
-/// OpenAI requires tool names to match `^[a-zA-Z0-9_-]+$`.
-fn sanitize_tool_name(name: &str) -> String {
-    name.replace('.', "_")
-}
-
-/// Restore a sanitized tool name back to FrankClaw's internal format (underscores → dots)
-/// for names that were originally dot-separated (e.g., `browser_open` → `browser.open`).
-fn restore_tool_name(name: &str) -> String {
-    // Known prefixes that use dot notation internally.
-    const PREFIXES: &[&str] = &["browser_", "session_"];
-    for prefix in PREFIXES {
-        if name.starts_with(prefix) {
-            return name.replacen('_', ".", 1);
-        }
-    }
-    name.to_string()
-}
-
 /// Build an OpenAI-compatible chat completions request body.
-#[expect(clippy::too_many_lines, reason = "request body assembly with many optional fields")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "request body assembly with many optional fields"
+)]
 pub fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = {
         let mut msgs = Vec::new();
@@ -45,7 +31,7 @@ pub fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
                             "id": tc.id,
                             "type": "function",
                             "function": {
-                                "name": sanitize_tool_name(&tc.name),
+                                "name": &tc.name,
                                 "arguments": tc.arguments,
                             }
                         })
@@ -113,7 +99,7 @@ pub fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
                 serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": sanitize_tool_name(&t.name),
+                        "name": &t.name,
                         "description": t.description,
                         "parameters": t.parameters,
                     }
@@ -143,11 +129,12 @@ pub fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
 
 /// Parse a non-streaming OpenAI-compatible chat completions response.
 pub fn parse_completion_response(data: &serde_json::Value) -> Result<CompletionResponse> {
-    let choice = data["choices"]
-        .get(0)
-        .ok_or_else(|| Provider {
+    let choice = data["choices"].get(0).ok_or_else(|| {
+        Provider {
             msg: "no choices in response",
-        }.build())?;
+        }
+        .build()
+    })?;
 
     let content = choice["message"]["content"]
         .as_str()
@@ -161,7 +148,7 @@ pub fn parse_completion_response(data: &serde_json::Value) -> Result<CompletionR
                 .filter_map(|tc| {
                     Some(ToolCallResponse {
                         id: tc["id"].as_str()?.to_string(),
-                        name: restore_tool_name(tc["function"]["name"].as_str()?),
+                        name: tc["function"]["name"].as_str()?.to_string(),
                         arguments: tc["function"]["arguments"]
                             .as_str()
                             .unwrap_or("{}")
@@ -222,7 +209,8 @@ impl StreamState {
             if tool_call.id.trim().is_empty() || tool_call.name.trim().is_empty() {
                 return Provider {
                     msg: "streamed tool call missing id or name",
-                }.fail();
+                }
+                .fail();
             }
             tool_calls.push(ToolCallResponse {
                 id: tool_call.id.clone(),
@@ -240,19 +228,18 @@ impl StreamState {
 }
 
 /// Process a single SSE data payload and return any stream deltas.
-pub fn apply_stream_event(
-    state: &mut StreamState,
-    data: &str,
-) -> Result<Vec<StreamDelta>> {
+pub fn apply_stream_event(state: &mut StreamState, data: &str) -> Result<Vec<StreamDelta>> {
     if data.trim() == "[DONE]" {
         state.done = true;
         return Ok(Vec::new());
     }
 
-    let payload: serde_json::Value =
-        serde_json::from_str(data).map_err(|err| Provider {
+    let payload: serde_json::Value = serde_json::from_str(data).map_err(|err| {
+        Provider {
             msg: format!("invalid streaming response chunk: {err}"),
-        }.build())?;
+        }
+        .build()
+    })?;
     let mut deltas = Vec::new();
 
     if payload["choices"]
@@ -264,7 +251,10 @@ pub fn apply_stream_event(
     }
 
     for choice in payload["choices"].as_array().into_iter().flatten() {
-        if let Some(text) = choice["delta"]["content"].as_str().filter(|t| !t.is_empty()) {
+        if let Some(text) = choice["delta"]["content"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+        {
             state.content.push_str(text);
             deltas.push(StreamDelta::Text(text.to_string()));
         }
@@ -277,7 +267,7 @@ pub fn apply_stream_event(
                     entry.id = id.to_string();
                 }
                 if let Some(name) = tool_call["function"]["name"].as_str() {
-                    entry.name = restore_tool_name(name);
+                    entry.name = name.to_string();
                 }
                 if !entry.started && !entry.id.is_empty() && !entry.name.is_empty() {
                     entry.started = true;
@@ -505,8 +495,14 @@ mod tests {
             .as_array()
             .expect("content should be array");
         assert_eq!(content.len(), 3); // 1 text + 2 images
-        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,img1data");
-        assert_eq!(content[2]["image_url"]["url"], "data:image/jpeg;base64,img2data");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,img1data"
+        );
+        assert_eq!(
+            content[2]["image_url"]["url"],
+            "data:image/jpeg;base64,img2data"
+        );
     }
 
     #[test]

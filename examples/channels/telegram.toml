@@ -1,0 +1,7 @@
+[channels.telegram]
+enabled = true
+require_mention_for_groups = true
+groups = ["*"]
+
+[[channels.telegram.accounts]]
+bot_token_env = "TELEGRAM_BOT_TOKEN"

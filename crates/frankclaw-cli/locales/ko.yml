@@ -281,3 +281,38 @@ warn.no_channels: 설정된 채널이 없습니다
 warn.no_providers: 설정된 모델 프로바이더가 없습니다
 warn.state_missing: "상태 디렉터리 '%{path}'가 아직 존재하지 않습니다"
 warn.whatsapp_no_secret: WhatsApp 채널에 app_secret가 설정되지 않았습니다; 인바운드 웹훅 서명이 검증되지 않습니다
+audit.secrets.ref_shadowed: "채널 '%{channel}'에 '%{inline_key}'와 '%{env_key}'가 모두 있습니다 — 인라인 값이 환경 변수 참조를 덮어씁니다"
+audit.secrets.ref_shadowed_fix: "인라인 필드 '%{inline_key}'를 제거하고 환경 변수 참조만 유지하세요"
+audit.secrets.plaintext_env: "파일 '%{file}'에 %{key}의 평문 시크릿이 포함되어 있습니다"
+audit.secrets.plaintext_env_fix: "'%{file}'의 시크릿을 시크릿 매니저 또는 암호화된 볼트로 이동하세요"
+audit.secrets.legacy_file: "레거시 자격 증명 파일이 발견되었습니다: %{file}"
+audit.secrets.legacy_file_fix: 레거시 파일을 삭제하고 대신 환경 변수 참조를 사용하세요
+login.copilot.starting: GitHub Copilot 인증을 시작합니다...
+login.copilot.open_url: "브라우저에서 이 URL을 열어주세요: %{url}"
+login.copilot.enter_code: "이 코드를 입력하세요: %{code}"
+login.copilot.waiting: 인증 대기 중...
+login.copilot.success: "GitHub Copilot 토큰이 저장되었습니다: %{path}"
+login.copilot.next_steps: "설정에 추가하세요: { \"id\": \"copilot\", \"api\": \"github-copilot\", \"models\": [\"gpt-4o\"] }"
+login.unsupported: "지원하지 않는 로그인 프로바이더 '%{provider}'. 지원 목록: github-copilot"
+plugin.list_title: 발견된 플러그인
+plugin.none_found: 플러그인을 찾을 수 없습니다.
+plugin.enabled: 활성화됨
+plugin.disabled: 비활성화됨
+plugin.enabled_msg: "플러그인 '%{id}' 활성화되었습니다."
+plugin.disabled_msg: "플러그인 '%{id}' 비활성화되었습니다."
+plugin.not_found: "플러그인 '%{id}'을(를) 찾을 수 없습니다."
+plugin.info_id: ID
+plugin.info_name: 이름
+plugin.info_version: 버전
+plugin.info_description: 설명
+plugin.info_path: 경로
+plugin.info_status: 상태
+plugin.info_channels: 채널
+plugin.info_tools: 도구
+tui.status_idle: 대기
+tui.status_streaming: 스트리밍
+tui.status_error: 오류
+tui.input_placeholder: 메시지를 입력하세요...
+acp.starting: ACP 서버 시작 중 (JSON-RPC 2.0 over NDJSON)...
+acp.ready: ACP 서버 준비 완료. 표준 입력에서 읽는 중.
+acp.error: "ACP 오류: %{error}"

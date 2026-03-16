@@ -184,7 +184,7 @@ pub fn is_safe_ip(addr: &IpAddr) -> bool {
                 && !ipv4.is_unspecified() // 0.0.0.0
                 && !is_cgnat_v4(*ipv4)     // 100.64.0.0/10
                 && !is_documentation_v4(*ipv4)  // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
-                && !is_benchmarking_v4(*ipv4)   // 198.18.0.0/15
+                && !is_benchmarking_v4(*ipv4) // 198.18.0.0/15
         }
         IpAddr::V6(ipv6) => {
             !ipv6.is_loopback()       // ::1
@@ -207,7 +207,7 @@ fn is_documentation_v4(ip: std::net::Ipv4Addr) -> bool {
     let octets = ip.octets();
     (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)       // 192.0.2.0/24
         || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100) // 198.51.100.0/24
-        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)  // 203.0.113.0/24
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113) // 203.0.113.0/24
 }
 
 /// Benchmarking range: 198.18.0.0/15
@@ -301,7 +301,10 @@ mod tests {
 
     #[test]
     fn classify_mime_unknown() {
-        assert_eq!(classify_mime("application/octet-stream"), MediaKind::Unknown);
+        assert_eq!(
+            classify_mime("application/octet-stream"),
+            MediaKind::Unknown
+        );
     }
 
     #[test]

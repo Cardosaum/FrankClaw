@@ -131,7 +131,7 @@ impl Default for MediaId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rstest::{rstest, fixture};
+    use rstest::{fixture, rstest};
 
     #[fixture]
     fn default_agent() -> AgentId {

@@ -281,3 +281,38 @@ warn.no_channels: no channels configured
 warn.no_providers: no model providers configured
 warn.state_missing: "state directory '%{path}' does not exist yet"
 warn.whatsapp_no_secret: whatsapp channel has no app_secret configured; inbound webhook signatures will not be verified
+audit.secrets.ref_shadowed: "Channel '%{channel}' has both '%{inline_key}' and '%{env_key}' — the inline value shadows the env ref"
+audit.secrets.ref_shadowed_fix: "Remove the inline '%{inline_key}' field and keep only the env ref"
+audit.secrets.plaintext_env: "File '%{file}' contains plaintext secret for %{key}"
+audit.secrets.plaintext_env_fix: "Move secrets out of '%{file}' into a secrets manager or encrypted vault"
+audit.secrets.legacy_file: "Legacy credential file found: %{file}"
+audit.secrets.legacy_file_fix: Delete the legacy file and use environment variable references instead
+login.copilot.starting: Starting GitHub Copilot authentication...
+login.copilot.open_url: "Open this URL in your browser: %{url}"
+login.copilot.enter_code: "Enter this code: %{code}"
+login.copilot.waiting: Waiting for authorization...
+login.copilot.success: "GitHub Copilot token saved to: %{path}"
+login.copilot.next_steps: "Add to your config: { \"id\": \"copilot\", \"api\": \"github-copilot\", \"models\": [\"gpt-4o\"] }"
+login.unsupported: "Unsupported login provider '%{provider}'. Supported: github-copilot"
+plugin.list_title: Discovered Plugins
+plugin.none_found: No plugins found.
+plugin.enabled: enabled
+plugin.disabled: disabled
+plugin.enabled_msg: "Plugin '%{id}' enabled."
+plugin.disabled_msg: "Plugin '%{id}' disabled."
+plugin.not_found: "Plugin '%{id}' not found."
+plugin.info_id: ID
+plugin.info_name: Name
+plugin.info_version: Version
+plugin.info_description: Description
+plugin.info_path: Path
+plugin.info_status: Status
+plugin.info_channels: Channels
+plugin.info_tools: Tools
+tui.status_idle: IDLE
+tui.status_streaming: STREAMING
+tui.status_error: ERROR
+tui.input_placeholder: Type a message...
+acp.starting: Starting ACP server (JSON-RPC 2.0 over NDJSON)...
+acp.ready: ACP server ready. Reading from stdin.
+acp.error: "ACP error: %{error}"

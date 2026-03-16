@@ -9,8 +9,8 @@ mod outbound_text;
 pub mod signal;
 pub mod slack;
 pub mod telegram;
-pub mod whatsapp;
 pub mod web;
+pub mod whatsapp;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use frankclaw_core::channel::ChannelPlugin;
 use frankclaw_core::config::{ChannelConfig, FrankClawConfig};
-use frankclaw_core::error::{Result, Internal, ConfigValidation};
+use frankclaw_core::error::{ConfigValidation, Internal, InvalidRequest, Result};
 use frankclaw_core::types::ChannelId;
 
 /// Default timeout for channel HTTP clients (seconds).
@@ -32,9 +32,12 @@ pub fn build_channel_http_client() -> Result<Client> {
     Client::builder()
         .timeout(std::time::Duration::from_secs(CHANNEL_HTTP_TIMEOUT_SECS))
         .build()
-        .map_err(|e| Internal {
-            msg: format!("failed to build channel HTTP client: {e}"),
-        }.build())
+        .map_err(|e| {
+            Internal {
+                msg: format!("failed to build channel HTTP client: {e}"),
+            }
+            .build()
+        })
 }
 
 pub struct ChannelSet {
@@ -49,7 +52,11 @@ impl ChannelSet {
         web: Option<Arc<web::WebChannel>>,
         whatsapp: Option<Arc<whatsapp::WhatsAppChannel>>,
     ) -> Self {
-        Self { channels, web, whatsapp }
+        Self {
+            channels,
+            web,
+            whatsapp,
+        }
     }
 
     pub fn channels(&self) -> &HashMap<ChannelId, Arc<dyn ChannelPlugin>> {
@@ -66,6 +73,68 @@ impl ChannelSet {
 
     pub fn whatsapp(&self) -> Option<Arc<whatsapp::WhatsAppChannel>> {
         self.whatsapp.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl frankclaw_core::tool_services::MessageSender for ChannelSet {
+    async fn send_text(
+        &self,
+        channel: &str,
+        account_id: &str,
+        to: &str,
+        text: &str,
+        thread_id: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> frankclaw_core::error::Result<String> {
+        use frankclaw_core::channel::{OutboundMessage, SendResult};
+
+        let channel_id = ChannelId::new(channel);
+        let plugin = self.get(&channel_id).ok_or_else(|| {
+            InvalidRequest {
+                msg: format!("channel '{}' not found or not enabled", channel),
+            }
+            .build()
+        })?;
+
+        let msg = OutboundMessage {
+            channel: channel_id,
+            account_id: account_id.to_string(),
+            to: to.to_string(),
+            thread_id: thread_id.map(String::from),
+            text: text.to_string(),
+            attachments: Vec::new(),
+            reply_to: reply_to.map(String::from),
+        };
+
+        match plugin.send(msg).await? {
+            SendResult::Sent {
+                platform_message_id,
+            } => Ok(platform_message_id),
+            other => Ok(format!("{:?}", other)),
+        }
+    }
+
+    async fn send_reaction(
+        &self,
+        channel: &str,
+        account_id: &str,
+        to: &str,
+        thread_id: Option<&str>,
+        platform_message_id: &str,
+        emoji: &str,
+    ) -> frankclaw_core::error::Result<()> {
+        let channel_id = ChannelId::new(channel);
+        let plugin = self.get(&channel_id).ok_or_else(|| {
+            InvalidRequest {
+                msg: format!("channel '{}' not found or not enabled", channel),
+            }
+            .build()
+        })?;
+
+        plugin
+            .send_reaction(account_id, to, thread_id, platform_message_id, emoji)
+            .await
     }
 }
 
@@ -107,7 +176,10 @@ enum LoadedChannel {
     WhatsApp(Arc<whatsapp::WhatsAppChannel>),
 }
 
-#[expect(clippy::too_many_lines, reason = "channel construction dispatch; splitting would scatter related config parsing")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "channel construction dispatch; splitting would scatter related config parsing"
+)]
 fn build_channel(channel_id: &ChannelId, channel_config: &ChannelConfig) -> Result<LoadedChannel> {
     match channel_id.as_str() {
         "web" => Ok(LoadedChannel::Web(Arc::new(web::WebChannel::new()))),
@@ -318,11 +390,15 @@ fn build_channel(channel_id: &ChannelId, channel_config: &ChannelConfig) -> Resu
     }
 }
 
-fn first_account<'cfg>(channel_id: &ChannelId, channel_config: &'cfg ChannelConfig) -> Result<&'cfg Value> {
+fn first_account<'cfg>(
+    channel_id: &ChannelId,
+    channel_config: &'cfg ChannelConfig,
+) -> Result<&'cfg Value> {
     channel_config.accounts.first().ok_or_else(|| {
         ConfigValidation {
             msg: format!("{channel_id} channel requires at least one account"),
-        }.build()
+        }
+        .build()
     })
 }
 
@@ -367,7 +443,8 @@ fn resolve_channel_value(
 
     ConfigValidation {
         msg: format!("channel '{channel}' requires a non-empty {label}"),
-    }.fail()
+    }
+    .fail()
 }
 
 fn resolve_optional_channel_value(
@@ -412,18 +489,27 @@ fn resolve_env_value(env_name: &str, channel: &str, label: &str) -> Result<Strin
     let env_name = env_name.trim();
     if env_name.is_empty() {
         return ConfigValidation {
-            msg: format!("channel '{channel}' references an empty environment variable for {label}"),
-        }.fail();
+            msg: format!(
+                "channel '{channel}' references an empty environment variable for {label}"
+            ),
+        }
+        .fail();
     }
 
-    let value = std::env::var(env_name).map_err(|_| ConfigValidation {
-        msg: format!("channel '{channel}' references missing environment variable '{env_name}'"),
-    }.build())?;
+    let value = std::env::var(env_name).map_err(|_| {
+        ConfigValidation {
+            msg: format!(
+                "channel '{channel}' references missing environment variable '{env_name}'"
+            ),
+        }
+        .build()
+    })?;
 
     if value.trim().is_empty() {
         return ConfigValidation {
             msg: format!("channel '{channel}' environment variable '{env_name}' is empty"),
-        }.fail();
+        }
+        .fail();
     }
 
     Ok(value)

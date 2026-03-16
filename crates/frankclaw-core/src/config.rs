@@ -11,7 +11,6 @@ use crate::types::{AgentId, ChannelId, SessionKey};
 /// Top-level FrankClaw configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct FrankClawConfig {
     pub gateway: GatewayConfig,
     pub agents: AgentsConfig,
@@ -23,8 +22,32 @@ pub struct FrankClawConfig {
     pub logging: LoggingConfig,
     pub media: MediaConfig,
     pub security: SecurityConfig,
+    pub memory: MemoryConfig,
+    pub understanding: MediaUnderstandingConfig,
+    /// Named browser profiles for CDP connections.
+    #[serde(default)]
+    pub browser_profiles: Vec<BrowserProfileConfig>,
 }
 
+impl Default for FrankClawConfig {
+    fn default() -> Self {
+        Self {
+            gateway: GatewayConfig::default(),
+            agents: AgentsConfig::default(),
+            channels: HashMap::new(),
+            models: ModelsConfig::default(),
+            session: SessionConfig::default(),
+            cron: CronConfig::default(),
+            hooks: HooksConfig::default(),
+            logging: LoggingConfig::default(),
+            media: MediaConfig::default(),
+            security: SecurityConfig::default(),
+            memory: MemoryConfig::default(),
+            understanding: MediaUnderstandingConfig::default(),
+            browser_profiles: Vec::new(),
+        }
+    }
+}
 
 impl FrankClawConfig {
     pub fn load_from_path(path: &Path) -> Result<Self> {
@@ -34,9 +57,19 @@ impl FrankClawConfig {
             }
             .build()
         })?;
-        serde_json::from_str(&content).map_err(|err| {
+        toml::from_str(&content).map_err(|err| {
             ConfigIo {
                 msg: format!("failed to parse config '{}': {err}", path.display()),
+            }
+            .build()
+        })
+    }
+
+    /// Serialize this config to a pretty-printed TOML string.
+    pub fn to_toml_string(&self) -> Result<String> {
+        toml::to_string_pretty(self).map_err(|err| {
+            ConfigIo {
+                msg: format!("failed to serialize config: {err}"),
             }
             .build()
         })
@@ -77,21 +110,32 @@ impl FrankClawConfig {
                 .fail();
             }
             match provider.api.as_str() {
-                "openai" | "anthropic" | "ollama" => {}
+                "openai" | "anthropic" | "ollama" | "google" | "gemini" | "openrouter" | "groq"
+                | "together" | "deepseek" | "github-copilot" => {}
                 other => {
                     return ConfigValidation {
                         msg: format!(
-                            "unsupported model provider api '{other}'; expected openai, anthropic, or ollama"
+                            "unsupported model provider api '{other}'; expected openai, anthropic, ollama, google, gemini, openrouter, groq, together, deepseek, or github-copilot"
                         ),
                     }
                     .fail();
                 }
             }
-            if matches!(provider.api.as_str(), "openai" | "anthropic")
-                && provider
-                    .api_key_ref
-                    .as_deref()
-                    .is_none_or(|value| value.trim().is_empty())
+            if matches!(
+                provider.api.as_str(),
+                "openai"
+                    | "anthropic"
+                    | "google"
+                    | "gemini"
+                    | "openrouter"
+                    | "groq"
+                    | "together"
+                    | "deepseek"
+                    | "github-copilot"
+            ) && provider
+                .api_key_ref
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
             {
                 return ConfigValidation {
                     msg: format!(
@@ -104,12 +148,13 @@ impl FrankClawConfig {
         }
 
         if let Some(default_model) = &self.models.default_model
-            && default_model.trim().is_empty() {
-                return ConfigValidation {
-                    msg: "models.default_model cannot be empty",
-                }
-                .fail();
+            && default_model.trim().is_empty()
+        {
+            return ConfigValidation {
+                msg: "models.default_model cannot be empty",
             }
+            .fail();
+        }
 
         if self.gateway.max_connections == 0 {
             return ConfigValidation {
@@ -126,14 +171,13 @@ impl FrankClawConfig {
         }
 
         if let BindMode::Address(address) = &self.gateway.bind
-            && address.parse::<std::net::IpAddr>().is_err() {
-                return ConfigValidation {
-                    msg: format!(
-                        "gateway.bind address '{address}' is not a valid IP address"
-                    ),
-                }
-                .fail();
+            && address.parse::<std::net::IpAddr>().is_err()
+        {
+            return ConfigValidation {
+                msg: format!("gateway.bind address '{address}' is not a valid IP address"),
             }
+            .fail();
+        }
 
         for (channel_id, channel) in &self.channels {
             channel.security_policy()?;
@@ -164,6 +208,9 @@ pub struct GatewayConfig {
     pub max_ws_message_bytes: usize,
     /// Maximum concurrent WebSocket connections.
     pub max_connections: usize,
+    /// Channel health check interval in seconds. 0 disables monitoring.
+    /// Default: 300 (5 minutes).
+    pub health_check_interval_secs: Option<u64>,
 }
 
 impl Default for GatewayConfig {
@@ -176,6 +223,7 @@ impl Default for GatewayConfig {
             tls: None,
             max_ws_message_bytes: 4 * 1024 * 1024, // 4 MB
             max_connections: 64,
+            health_check_interval_secs: None,
         }
     }
 }
@@ -211,10 +259,7 @@ pub struct AgentsConfig {
 impl Default for AgentsConfig {
     fn default() -> Self {
         let mut agents = HashMap::new();
-        agents.insert(
-            AgentId::default_agent(),
-            AgentDef::default(),
-        );
+        agents.insert(AgentId::default_agent(), AgentDef::default());
         Self {
             default_agent: AgentId::default_agent(),
             agents,
@@ -391,7 +436,10 @@ impl ChannelConfig {
         }
 
         if let Some(raw) = self.extra.get("max_message_bytes") {
-            #[expect(clippy::cast_possible_truncation, reason = "config values are small positive integers; truncation is not a concern")]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "config values are small positive integers; truncation is not a concern"
+            )]
             let value = raw.as_u64().ok_or_else(|| {
                 ConfigValidation {
                     msg: "max_message_bytes must be a positive integer",
@@ -538,7 +586,6 @@ pub struct ModelsConfig {
     pub default_model: Option<String>,
 }
 
-
 /// Configuration for a model provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -562,7 +609,6 @@ pub struct SessionConfig {
     pub reset: SessionResetPolicy,
     pub pruning: PruningConfig,
 }
-
 
 /// Cron defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -627,21 +673,25 @@ impl HooksConfig {
             }
             if mapping.text_field.trim().is_empty() {
                 return ConfigValidation {
-                    msg: format!("webhook mapping '{}' text_field cannot be empty", mapping.id),
+                    msg: format!(
+                        "webhook mapping '{}' text_field cannot be empty",
+                        mapping.id
+                    ),
                 }
                 .fail();
             }
             if let (Some(agent_id), Some(session_key)) = (&mapping.agent_id, &mapping.session_key)
                 && let Some((session_agent, _, _)) = session_key.parse()
-                    && &session_agent != agent_id {
-                        return ConfigValidation {
-                            msg: format!(
-                                "webhook mapping '{}' session '{}' does not belong to agent '{}'",
-                                mapping.id, session_key, agent_id
-                            ),
-                        }
-                        .fail();
-                    }
+                && &session_agent != agent_id
+            {
+                return ConfigValidation {
+                    msg: format!(
+                        "webhook mapping '{}' session '{}' does not belong to agent '{}'",
+                        mapping.id, session_key, agent_id
+                    ),
+                }
+                .fail();
+            }
             mappings.push(mapping);
         }
         Ok(mappings)
@@ -655,6 +705,26 @@ pub struct WebhookMapping {
     pub agent_id: Option<AgentId>,
     pub session_key: Option<SessionKey>,
     pub text_field: String,
+    /// Dot-notation JSON path for text extraction (e.g., "data.message.text").
+    /// When set, used instead of `text_field` for extraction.
+    #[serde(default)]
+    pub json_path: Option<String>,
+    /// Prefix template for extracted text. `{text}` is replaced with the extracted value.
+    #[serde(default)]
+    pub template: Option<String>,
+    /// Route replies to a specific channel.
+    #[serde(default)]
+    pub channel_id: Option<ChannelId>,
+    /// Max concurrent webhook executions for this mapping.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Fixed-window rate limit (requests per minute).
+    #[serde(default)]
+    pub rate_limit_per_minute: Option<u32>,
+}
+
+fn default_max_concurrent() -> usize {
+    8
 }
 
 impl Default for WebhookMapping {
@@ -664,6 +734,11 @@ impl Default for WebhookMapping {
             agent_id: None,
             session_key: None,
             text_field: "message".into(),
+            json_path: None,
+            template: None,
+            channel_id: None,
+            max_concurrent: 8,
+            rate_limit_per_minute: None,
         }
     }
 }
@@ -743,6 +818,95 @@ impl Default for SecurityConfig {
             max_webhook_body_bytes: 1024 * 1024, // 1 MB
         }
     }
+}
+
+/// Media understanding configuration (vision + transcription).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaUnderstandingConfig {
+    /// Enable automatic media understanding for non-vision models.
+    pub enabled: bool,
+    /// Vision provider: "openai", "anthropic", "ollama", or "none".
+    pub vision_provider: String,
+    /// Model for vision analysis (e.g., "gpt-4o", "claude-sonnet-4-20250514", "llava").
+    pub vision_model: Option<String>,
+    /// Base URL for the vision provider API.
+    pub vision_base_url: Option<String>,
+    /// API key env var for vision provider.
+    pub vision_api_key_ref: Option<String>,
+    /// Transcription provider: "openai" or "none".
+    pub transcription_provider: String,
+    /// Model for audio transcription (e.g., "whisper-1").
+    pub transcription_model: Option<String>,
+    /// Base URL for the transcription provider API.
+    pub transcription_base_url: Option<String>,
+    /// API key env var for transcription provider.
+    pub transcription_api_key_ref: Option<String>,
+    /// Automatically transcribe voice messages from channels.
+    pub auto_transcribe_voice: bool,
+}
+
+impl Default for MediaUnderstandingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            vision_provider: "none".into(),
+            vision_model: None,
+            vision_base_url: None,
+            vision_api_key_ref: None,
+            transcription_provider: "none".into(),
+            transcription_model: None,
+            transcription_base_url: None,
+            transcription_api_key_ref: None,
+            auto_transcribe_voice: false,
+        }
+    }
+}
+
+/// Memory/RAG configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    /// Embedding provider: "openai", "ollama", or "none".
+    pub embedding_provider: String,
+    /// Embedding model name (e.g., "text-embedding-3-small").
+    pub embedding_model: Option<String>,
+    /// Base URL for the embedding provider API.
+    pub embedding_base_url: Option<String>,
+    /// API key env var for embedding provider.
+    pub embedding_api_key_ref: Option<String>,
+    /// Chunk size target in characters (~384 tokens).
+    pub chunk_size: usize,
+    /// Directory to sync for memory content.
+    pub memory_dir: Option<PathBuf>,
+    /// Enable embedding cache.
+    pub cache_embeddings: bool,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            embedding_provider: "none".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            embedding_api_key_ref: None,
+            chunk_size: 1500,
+            memory_dir: None,
+            cache_embeddings: true,
+        }
+    }
+}
+
+/// Named browser profile for CDP connections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserProfileConfig {
+    pub name: String,
+    pub cdp_port: Option<u16>,
+    pub cdp_url: Option<String>,
+    #[serde(default)]
+    pub color: String,
 }
 
 #[cfg(test)]
@@ -973,35 +1137,35 @@ mod tests {
     #[test]
     fn load_or_default_returns_default_when_file_is_missing() {
         let path = std::env::temp_dir().join(format!(
-            "frankclaw-missing-config-{}.json",
+            "frankclaw-missing-config-{}.toml",
             uuid::Uuid::new_v4()
         ));
 
-        let loaded = FrankClawConfig::load_or_default(&path).expect("missing config should default");
+        let loaded =
+            FrankClawConfig::load_or_default(&path).expect("missing config should default");
 
         assert_eq!(loaded.gateway.port, FrankClawConfig::default().gateway.port);
     }
 
     #[test]
-    fn load_from_path_reads_json_config() {
+    fn load_from_path_reads_toml_config() {
         let path = std::env::temp_dir().join(format!(
-            "frankclaw-config-load-{}.json",
+            "frankclaw-config-load-{}.toml",
             uuid::Uuid::new_v4()
         ));
-        std::fs::write(
-            &path,
-            serde_json::json!({
-                "gateway": {
-                    "port": 19999
-                }
-            })
-            .to_string(),
-        )
-        .expect("config should write");
+        std::fs::write(&path, "[gateway]\nport = 19999\n").expect("config should write");
 
         let loaded = FrankClawConfig::load_from_path(&path).expect("config should load");
 
         assert_eq!(loaded.gateway.port, 19999);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn to_toml_string_roundtrips() {
+        let config = FrankClawConfig::default();
+        let toml_str = config.to_toml_string().expect("should serialize");
+        let loaded: FrankClawConfig = toml::from_str(&toml_str).expect("should parse back");
+        assert_eq!(loaded.gateway.port, config.gateway.port);
     }
 }

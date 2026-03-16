@@ -4,7 +4,7 @@ use reqwest::Client;
 use tracing::warn;
 use url::Url;
 
-use frankclaw_core::error::{Internal, MediaFetchBlocked, MediaTooLarge, Result};
+use frankclaw_core::error::{Internal, InvalidRequest, MediaFetchBlocked, MediaTooLarge, Result};
 use frankclaw_core::media::is_safe_ip;
 
 /// Maximum number of redirects to follow before aborting.
@@ -28,9 +28,12 @@ impl SafeFetcher {
             .timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| Internal {
-                msg: format!("failed to build HTTP client: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Internal {
+                    msg: format!("failed to build HTTP client: {e}"),
+                }
+                .build()
+            })?;
 
         Ok(Self { client, max_bytes })
     }
@@ -52,29 +55,37 @@ impl SafeFetcher {
                 .get(current_url.as_str())
                 .send()
                 .await
-                .map_err(|e| MediaFetchBlocked {
-                    reason: format!("fetch failed: {e}"),
-                }.build())?;
+                .map_err(|e| {
+                    MediaFetchBlocked {
+                        reason: format!("fetch failed: {e}"),
+                    }
+                    .build()
+                })?;
 
             // Handle redirects: validate the target URL before following.
             if response.status().is_redirection() {
                 if redirect_count >= MAX_REDIRECTS {
                     return MediaFetchBlocked {
                         reason: format!("too many redirects ({MAX_REDIRECTS})"),
-                    }.fail();
+                    }
+                    .fail();
                 }
                 let location = response
                     .headers()
                     .get("location")
                     .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| MediaFetchBlocked {
-                        reason: "redirect without Location header",
-                    }.build())?;
+                    .ok_or_else(|| {
+                        MediaFetchBlocked {
+                            reason: "redirect without Location header",
+                        }
+                        .build()
+                    })?;
                 // Resolve relative URLs against the current URL.
                 current_url = current_url.join(location).map_err(|e| {
                     MediaFetchBlocked {
                         reason: format!("invalid redirect URL: {e}"),
-                    }.build()
+                    }
+                    .build()
                 })?;
                 continue;
             }
@@ -82,16 +93,19 @@ impl SafeFetcher {
             if !response.status().is_success() {
                 return MediaFetchBlocked {
                     reason: format!("HTTP {}", response.status()),
-                }.fail();
+                }
+                .fail();
             }
 
             // Check Content-Length header before downloading body.
             if let Some(content_length) = response.content_length()
-                && content_length > self.max_bytes {
-                    return MediaTooLarge {
-                        max_bytes: self.max_bytes,
-                    }.fail();
+                && content_length > self.max_bytes
+            {
+                return MediaTooLarge {
+                    max_bytes: self.max_bytes,
                 }
+                .fail();
+            }
 
             let content_type = response
                 .headers()
@@ -103,14 +117,16 @@ impl SafeFetcher {
             let bytes = response.bytes().await.map_err(|e| {
                 MediaFetchBlocked {
                     reason: format!("body read failed: {e}"),
-                }.build()
+                }
+                .build()
             })?;
 
             // Enforce actual size limit (Content-Length can lie).
             if bytes.len() as u64 > self.max_bytes {
                 return MediaTooLarge {
                     max_bytes: self.max_bytes,
-                }.fail();
+                }
+                .fail();
             }
 
             return Ok(FetchedContent {
@@ -121,7 +137,8 @@ impl SafeFetcher {
 
         MediaFetchBlocked {
             reason: format!("too many redirects ({MAX_REDIRECTS})"),
-        }.fail()
+        }
+        .fail()
     }
 }
 
@@ -133,29 +150,35 @@ async fn validate_url_ssrf(url: &Url) -> Result<()> {
         scheme => {
             return MediaFetchBlocked {
                 reason: format!("unsupported scheme: {scheme}"),
-            }.fail();
+            }
+            .fail();
         }
     }
 
-    let host = url
-        .host_str()
-        .ok_or_else(|| MediaFetchBlocked {
+    let host = url.host_str().ok_or_else(|| {
+        MediaFetchBlocked {
             reason: "no host in URL",
-        }.build())?;
+        }
+        .build()
+    })?;
 
     let port = url.port_or_known_default().unwrap_or(443);
     let addrs: Vec<IpAddr> = tokio::net::lookup_host(format!("{host}:{port}"))
         .await
-        .map_err(|e| MediaFetchBlocked {
-            reason: format!("DNS resolution failed: {e}"),
-        }.build())?
+        .map_err(|e| {
+            MediaFetchBlocked {
+                reason: format!("DNS resolution failed: {e}"),
+            }
+            .build()
+        })?
         .map(|addr| addr.ip())
         .collect();
 
     if addrs.is_empty() {
         return MediaFetchBlocked {
             reason: "DNS resolved to no addresses",
-        }.fail();
+        }
+        .fail();
     }
 
     // Check ALL resolved IPs, not just the first.
@@ -166,7 +189,8 @@ async fn validate_url_ssrf(url: &Url) -> Result<()> {
             warn!(%url, %addr, "SSRF blocked: URL resolved to private IP");
             return MediaFetchBlocked {
                 reason: format!("URL resolves to blocked IP range: {addr}"),
-            }.fail();
+            }
+            .fail();
         }
     }
 
@@ -177,4 +201,25 @@ async fn validate_url_ssrf(url: &Url) -> Result<()> {
 pub struct FetchedContent {
     pub bytes: Vec<u8>,
     pub content_type: String,
+}
+
+#[async_trait::async_trait]
+impl frankclaw_core::tool_services::Fetcher for SafeFetcher {
+    async fn fetch(
+        &self,
+        url: &str,
+    ) -> frankclaw_core::error::Result<frankclaw_core::tool_services::FetchedContent> {
+        let parsed = Url::parse(url).map_err(|e| {
+            InvalidRequest {
+                msg: format!("invalid URL: {e}"),
+            }
+            .build()
+        })?;
+        let content = self.fetch(&parsed).await?;
+        Ok(frankclaw_core::tool_services::FetchedContent {
+            bytes: content.bytes,
+            content_type: content.content_type,
+            final_url: parsed.to_string(),
+        })
+    }
 }

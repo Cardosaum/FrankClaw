@@ -1,6 +1,6 @@
 use argon2::{
-    password_hash::{PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
+    password_hash::{PasswordHasher, PasswordVerifier, SaltString},
 };
 use rand::rngs::OsRng;
 use secrecy::ExposeSecret;
@@ -29,8 +29,8 @@ impl PasswordHash {
 /// Uses OS random for salt generation.
 pub fn hash_password(password: &secrecy::SecretString) -> Result<PasswordHash, CryptoError> {
     let salt = SaltString::generate(&mut OsRng);
-    let params = argon2::Params::new(64 * 1024, 3, 4, None)
-        .map_err(|_| CryptoError::HashingFailed)?;
+    let params =
+        argon2::Params::new(64 * 1024, 3, 4, None).map_err(|_| CryptoError::HashingFailed)?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
 
     let hash = argon2

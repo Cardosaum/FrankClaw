@@ -29,9 +29,12 @@ pub struct PairingStore {
 impl PairingStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ConfigIo {
-                msg: format!("failed to create pairing directory: {e}"),
-            }.build())?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ConfigIo {
+                    msg: format!("failed to create pairing directory: {e}"),
+                }
+                .build()
+            })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -40,12 +43,18 @@ impl PairingStore {
         }
 
         let state = if path.exists() {
-            let content = std::fs::read_to_string(path).map_err(|e| ConfigIo {
-                msg: format!("failed to read pairing file: {e}"),
-            }.build())?;
-            serde_json::from_str(&content).map_err(|e| ConfigIo {
-                msg: format!("failed to parse pairing file: {e}"),
-            }.build())?
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                ConfigIo {
+                    msg: format!("failed to read pairing file: {e}"),
+                }
+                .build()
+            })?;
+            serde_json::from_str(&content).map_err(|e| {
+                ConfigIo {
+                    msg: format!("failed to parse pairing file: {e}"),
+                }
+                .build()
+            })?
         } else {
             PairingState::default()
         };
@@ -64,7 +73,10 @@ impl PairingStore {
             .is_some_and(|approved| approved.contains(sender_id))
     }
 
-    #[expect(clippy::unwrap_in_result, reason = "mutex poisoning is unrecoverable; propagating the error would not help callers")]
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "mutex poisoning is unrecoverable; propagating the error would not help callers"
+    )]
     pub fn ensure_pending(
         &self,
         channel: &str,
@@ -107,7 +119,10 @@ impl PairingStore {
             .collect()
     }
 
-    #[expect(clippy::unwrap_in_result, reason = "mutex poisoning is unrecoverable; propagating the error would not help callers")]
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "mutex poisoning is unrecoverable; propagating the error would not help callers"
+    )]
     pub fn approve(
         &self,
         channel: Option<&str>,
@@ -121,12 +136,14 @@ impl PairingStore {
             .position(|pending| {
                 pending.code == code
                     && channel.is_none_or(|value| value == pending.channel)
-                    && account_id
-                        .is_none_or(|value| value == pending.account_id)
+                    && account_id.is_none_or(|value| value == pending.account_id)
             })
-            .ok_or_else(|| ConfigValidation {
-                msg: format!("no pending pairing found for code '{code}'"),
-            }.build())?;
+            .ok_or_else(|| {
+                ConfigValidation {
+                    msg: format!("no pending pairing found for code '{code}'"),
+                }
+                .build()
+            })?;
 
         let pending = state.pending.remove(index);
         state
@@ -153,12 +170,18 @@ fn generate_code() -> String {
 }
 
 fn save_state(path: &Path, state: &PairingState) -> Result<()> {
-    let content = serde_json::to_string_pretty(state).map_err(|e| ConfigIo {
-        msg: format!("failed to serialize pairing state: {e}"),
-    }.build())?;
-    std::fs::write(path, content).map_err(|e| ConfigIo {
-        msg: format!("failed to write pairing file: {e}"),
-    }.build())?;
+    let content = serde_json::to_string_pretty(state).map_err(|e| {
+        ConfigIo {
+            msg: format!("failed to serialize pairing state: {e}"),
+        }
+        .build()
+    })?;
+    std::fs::write(path, content).map_err(|e| {
+        ConfigIo {
+            msg: format!("failed to write pairing file: {e}"),
+        }
+        .build()
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -173,10 +196,8 @@ mod tests {
 
     #[test]
     fn ensure_pending_and_approve_roundtrip() {
-        let temp = std::env::temp_dir().join(format!(
-            "frankclaw-pairing-{}.json",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("frankclaw-pairing-{}.json", uuid::Uuid::new_v4()));
         let store = PairingStore::open(&temp).expect("store should open");
 
         let pending = store

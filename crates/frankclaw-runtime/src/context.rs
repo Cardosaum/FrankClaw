@@ -60,7 +60,9 @@ pub fn available_input_budget(model: &ModelDef, system_prompt: Option<&str>) -> 
     let system_tokens = system_prompt.map_or(0, estimate_tokens);
     let overhead = SYSTEM_OVERHEAD_TOKENS + system_tokens;
 
-    let raw_budget = total.saturating_sub(reserved_output).saturating_sub(overhead);
+    let raw_budget = total
+        .saturating_sub(reserved_output)
+        .saturating_sub(overhead);
     // Apply safety margin
     (f64::from(raw_budget) / SAFETY_MARGIN) as u32
 }
@@ -118,14 +120,12 @@ pub fn optimize_context(
     }
 
     // Insert a summary marker at the beginning so the model knows context was pruned.
-    let summary = crate::prompts::render(crate::prompts::CONTEXT_COMPACTION, &[
-        ("pruned_count", &pruned_count.to_string()),
-    ]);
-
-    kept.insert(
-        0,
-        CompletionMessage::text(Role::User, summary),
+    let summary = crate::prompts::render(
+        crate::prompts::CONTEXT_COMPACTION,
+        &[("pruned_count", &pruned_count.to_string())],
     );
+
+    kept.insert(0, CompletionMessage::text(Role::User, summary));
 
     let estimated_tokens = estimate_messages_tokens(&kept);
 
@@ -150,10 +150,8 @@ pub fn repair_tool_pairing(messages: &mut Vec<CompletionMessage>) {
         if messages[i].role == Role::Tool {
             let has_preceding_tool_call = i > 0
                 && messages[i - 1].role == Role::Assistant
-                && (
-                    !messages[i - 1].tool_calls.is_empty()
-                    || messages[i - 1].content.contains("[tool_call:")
-                );
+                && (!messages[i - 1].tool_calls.is_empty()
+                    || messages[i - 1].content.contains("[tool_call:"));
             // Also allow consecutive Tool messages after one that had a valid predecessor.
             let follows_valid_tool = i > 0 && messages[i - 1].role == Role::Tool;
             if !has_preceding_tool_call && !follows_valid_tool {
@@ -166,8 +164,7 @@ pub fn repair_tool_pairing(messages: &mut Vec<CompletionMessage>) {
 
     // Remove trailing Assistant messages that have tool_calls but no following results.
     while messages.last().is_some_and(|m| {
-        m.role == Role::Assistant
-            && (!m.tool_calls.is_empty() || m.content.contains("[tool_call:"))
+        m.role == Role::Assistant && (!m.tool_calls.is_empty() || m.content.contains("[tool_call:"))
     }) {
         messages.pop();
     }
@@ -250,8 +247,7 @@ mod tests {
     fn available_budget_accounts_for_system_prompt() {
         let model = test_model(100_000);
         let no_system = available_input_budget(&model, None);
-        let with_system =
-            available_input_budget(&model, Some(&"x".repeat(10_000)));
+        let with_system = available_input_budget(&model, Some(&"x".repeat(10_000)));
         assert!(with_system < no_system);
     }
 
@@ -277,7 +273,11 @@ mod tests {
         let messages: Vec<_> = (0..50)
             .map(|i| {
                 msg(
-                    if i % 2 == 0 { Role::User } else { Role::Assistant },
+                    if i % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
                     &format!("message number {} with some padding text to use tokens", i),
                 )
             })
@@ -287,9 +287,11 @@ mod tests {
         assert!(result.pruned_count > 0);
         assert!(result.compacted);
         // Should have a summary marker as first message
-        assert!(result.messages[0]
-            .content
-            .contains("Previous conversation summary"));
+        assert!(
+            result.messages[0]
+                .content
+                .contains("Previous conversation summary")
+        );
         // Should still have some recent messages
         assert!(result.messages.len() > MIN_KEEP_MESSAGES);
     }
@@ -301,13 +303,16 @@ mod tests {
             msg(Role::User, "old message 1"),
             msg(Role::Assistant, "old response 1"),
             msg(Role::User, "old message 2"),
+            msg(Role::Assistant, "[tool_call:search {\"q\": \"test\"}]"),
+            msg(Role::Tool, "{\"result\": \"found\"}"),
+            msg(
+                Role::User,
+                "recent message with enough tokens to force pruning and this needs to be quite long to actually trigger the context window limit",
+            ),
             msg(
                 Role::Assistant,
-                "[tool_call:search {\"q\": \"test\"}]",
+                "recent response also needs to be fairly long to contribute to the token count significantly",
             ),
-            msg(Role::Tool, "{\"result\": \"found\"}"),
-            msg(Role::User, "recent message with enough tokens to force pruning and this needs to be quite long to actually trigger the context window limit"),
-            msg(Role::Assistant, "recent response also needs to be fairly long to contribute to the token count significantly"),
         ];
 
         let result = optimize_context(messages, &model, None);
@@ -376,7 +381,10 @@ mod tests {
     fn repair_tool_pairing_keeps_valid_tool_pairs() {
         let mut messages = vec![
             msg(Role::User, "search for cats"),
-            msg(Role::Assistant, "searching [tool_call:search {\"q\": \"cats\"}]"),
+            msg(
+                Role::Assistant,
+                "searching [tool_call:search {\"q\": \"cats\"}]",
+            ),
             msg(Role::Tool, "{\"results\": [\"cat1\", \"cat2\"]}"),
             msg(Role::User, "thanks"),
         ];
@@ -490,7 +498,11 @@ mod tests {
         let messages: Vec<_> = (0..20)
             .map(|i| {
                 msg(
-                    if i % 2 == 0 { Role::User } else { Role::Assistant },
+                    if i % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
                     &"x".repeat(100),
                 )
             })

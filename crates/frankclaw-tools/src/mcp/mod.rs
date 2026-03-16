@@ -12,8 +12,8 @@
 pub mod protocol;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -26,7 +26,7 @@ use frankclaw_core::error::{AgentRuntime, Internal, Result};
 use frankclaw_core::model::{ToolDef, ToolRiskLevel};
 
 use crate::{Tool, ToolContext};
-use protocol::{McpTool, McpRequest, McpResponse, ListToolsResult, CallToolResult, ContentBlock};
+use protocol::{CallToolResult, ContentBlock, ListToolsResult, McpRequest, McpResponse, McpTool};
 
 /// Configuration for an MCP server.
 #[derive(Debug, Clone)]
@@ -64,7 +64,10 @@ pub struct McpClient {
     tools_cache: RwLock<Option<Vec<McpTool>>>,
 }
 
-#[expect(clippy::large_enum_variant, reason = "both variants are heap-heavy; boxing would add indirection without meaningful savings")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "both variants are heap-heavy; boxing would add indirection without meaningful savings"
+)]
 enum McpTransportInner {
     Http {
         url: String,
@@ -84,9 +87,12 @@ impl McpClient {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|e| Internal {
-                msg: format!("failed to build HTTP client: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Internal {
+                    msg: format!("failed to build HTTP client: {e}"),
+                }
+                .build()
+            })?;
         Ok(Self {
             name,
             transport: McpTransportInner::Http {
@@ -101,7 +107,10 @@ impl McpClient {
     }
 
     /// Create a new stdio-based MCP client by spawning a process.
-    #[expect(clippy::unused_async, reason = "async kept for API consistency with from_config which may need async in future transports")]
+    #[expect(
+        clippy::unused_async,
+        reason = "async kept for API consistency with from_config which may need async in future transports"
+    )]
     pub async fn new_stdio(
         name: String,
         command: &str,
@@ -116,17 +125,26 @@ impl McpClient {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| Internal {
-                msg: format!("failed to spawn MCP server '{command}': {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Internal {
+                    msg: format!("failed to spawn MCP server '{command}': {e}"),
+                }
+                .build()
+            })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| Internal {
-            msg: "failed to capture MCP server stdin",
-        }.build())?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            Internal {
+                msg: "failed to capture MCP server stdin",
+            }
+            .build()
+        })?;
 
-        let stdout = child.stdout.take().ok_or_else(|| Internal {
-            msg: "failed to capture MCP server stdout",
-        }.build())?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            Internal {
+                msg: "failed to capture MCP server stdout",
+            }
+            .build()
+        })?;
 
         // Drain stderr in background to prevent blocking.
         if let Some(stderr) = child.stderr.take() {
@@ -170,7 +188,10 @@ impl McpClient {
     }
 
     /// Send a JSON-RPC request and receive the response.
-    #[expect(clippy::too_many_lines, reason = "two transport branches with error handling for each")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "two transport branches with error handling for each"
+    )]
     async fn send(&self, request: &McpRequest) -> Result<McpResponse> {
         match &self.transport {
             McpTransportInner::Http {
@@ -178,16 +199,15 @@ impl McpClient {
                 headers,
                 client,
             } => {
-                let mut builder = client
-                    .post(url)
-                    .header("Content-Type", "application/json");
+                let mut builder = client.post(url).header("Content-Type", "application/json");
                 for (k, v) in headers {
                     builder = builder.header(k, v);
                 }
                 let body = serde_json::to_string(request).map_err(|e| {
                     Internal {
                         msg: format!("failed to serialize MCP request: {e}"),
-                    }.build()
+                    }
+                    .build()
                 })?;
 
                 trace!(method = %request.method, "MCP HTTP request");
@@ -195,31 +215,44 @@ impl McpClient {
                 let resp = builder.body(body).send().await.map_err(|e| {
                     Internal {
                         msg: format!("MCP HTTP request failed: {e}"),
-                    }.build()
+                    }
+                    .build()
                 })?;
 
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
-                    let body = if body.len() > 200 { &body[..200] } else { &body };
+                    let body = if body.len() > 200 {
+                        &body[..200]
+                    } else {
+                        &body
+                    };
                     return Internal {
                         msg: format!("MCP server returned {status}: {body}"),
-                    }.fail();
+                    }
+                    .fail();
                 }
 
-                let text = resp.text().await.map_err(|e| Internal {
-                    msg: format!("failed to read MCP response: {e}"),
-                }.build())?;
+                let text = resp.text().await.map_err(|e| {
+                    Internal {
+                        msg: format!("failed to read MCP response: {e}"),
+                    }
+                    .build()
+                })?;
 
-                serde_json::from_str(&text).map_err(|e| Internal {
-                    msg: format!("failed to parse MCP response: {e}"),
-                }.build())
+                serde_json::from_str(&text).map_err(|e| {
+                    Internal {
+                        msg: format!("failed to parse MCP response: {e}"),
+                    }
+                    .build()
+                })
             }
             McpTransportInner::Stdio { stdin, stdout, .. } => {
                 let body = serde_json::to_string(request).map_err(|e| {
                     Internal {
                         msg: format!("failed to serialize MCP request: {e}"),
-                    }.build()
+                    }
+                    .build()
                 })?;
 
                 trace!(method = %request.method, "MCP stdio request");
@@ -227,18 +260,18 @@ impl McpClient {
                 // Notifications (no id) are fire-and-forget.
                 if request.id.is_none() {
                     let mut stdin_guard = stdin.lock().await;
-                    stdin_guard
-                        .write_all(body.as_bytes())
-                        .await
-                        .map_err(|e| Internal {
+                    stdin_guard.write_all(body.as_bytes()).await.map_err(|e| {
+                        Internal {
                             msg: format!("MCP stdin write failed: {e}"),
-                        }.build())?;
-                    stdin_guard
-                        .write_all(b"\n")
-                        .await
-                        .map_err(|e| Internal {
+                        }
+                        .build()
+                    })?;
+                    stdin_guard.write_all(b"\n").await.map_err(|e| {
+                        Internal {
                             msg: format!("MCP stdin write failed: {e}"),
-                        }.build())?;
+                        }
+                        .build()
+                    })?;
                     let _ = stdin_guard.flush().await;
                     // Return a dummy response for notifications.
                     return Ok(McpResponse {
@@ -250,18 +283,18 @@ impl McpClient {
                 }
 
                 let mut stdin_guard = stdin.lock().await;
-                stdin_guard
-                    .write_all(body.as_bytes())
-                    .await
-                    .map_err(|e| Internal {
+                stdin_guard.write_all(body.as_bytes()).await.map_err(|e| {
+                    Internal {
                         msg: format!("MCP stdin write failed: {e}"),
-                    }.build())?;
-                stdin_guard
-                    .write_all(b"\n")
-                    .await
-                    .map_err(|e| Internal {
+                    }
+                    .build()
+                })?;
+                stdin_guard.write_all(b"\n").await.map_err(|e| {
+                    Internal {
                         msg: format!("MCP stdin write failed: {e}"),
-                    }.build())?;
+                    }
+                    .build()
+                })?;
                 let _ = stdin_guard.flush().await;
                 drop(stdin_guard);
 
@@ -277,18 +310,22 @@ impl McpClient {
                 match read_result {
                     Ok(Ok(0)) => Internal {
                         msg: "MCP server closed stdout",
-                    }.fail(),
-                    Ok(Ok(_)) => {
-                        serde_json::from_str(line.trim()).map_err(|e| Internal {
-                            msg: format!("failed to parse MCP response: {e}"),
-                        }.build())
                     }
+                    .fail(),
+                    Ok(Ok(_)) => serde_json::from_str(line.trim()).map_err(|e| {
+                        Internal {
+                            msg: format!("failed to parse MCP response: {e}"),
+                        }
+                        .build()
+                    }),
                     Ok(Err(e)) => Internal {
                         msg: format!("MCP stdout read failed: {e}"),
-                    }.fail(),
+                    }
+                    .fail(),
                     Err(_) => Internal {
                         msg: "MCP server response timed out (30s)",
-                    }.fail(),
+                    }
+                    .fail(),
                 }
             }
         }
@@ -315,7 +352,8 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Internal {
                 msg: format!("MCP initialization failed: {err}"),
-            }.fail();
+            }
+            .fail();
         }
 
         debug!(server = %self.name, "MCP server initialized");
@@ -345,15 +383,20 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Internal {
                 msg: format!("MCP tools/list failed: {err}"),
-            }.fail();
+            }
+            .fail();
         }
 
-        let result: ListToolsResult =
-            serde_json::from_value(resp.result.unwrap_or_else(|| serde_json::json!({"tools": []}))).map_err(
-                |e| Internal {
-                    msg: format!("failed to parse tools/list result: {e}"),
-                }.build(),
-            )?;
+        let result: ListToolsResult = serde_json::from_value(
+            resp.result
+                .unwrap_or_else(|| serde_json::json!({"tools": []})),
+        )
+        .map_err(|e| {
+            Internal {
+                msg: format!("failed to parse tools/list result: {e}"),
+            }
+            .build()
+        })?;
 
         debug!(server = %self.name, count = result.tools.len(), "MCP tools discovered");
 
@@ -364,11 +407,7 @@ impl McpClient {
     }
 
     /// Invoke a tool on the MCP server.
-    pub async fn call_tool(
-        &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<String> {
+    pub async fn call_tool(&self, tool_name: &str, arguments: serde_json::Value) -> Result<String> {
         self.ensure_initialized().await?;
 
         // Strip top-level null values from arguments (LLMs emit these for
@@ -376,20 +415,27 @@ impl McpClient {
         let arguments = strip_top_level_nulls(arguments);
 
         let id = self.next_id();
-        let resp = self.send(&McpRequest::call_tool(id, tool_name, arguments)).await?;
+        let resp = self
+            .send(&McpRequest::call_tool(id, tool_name, arguments))
+            .await?;
 
         if let Some(err) = resp.error {
             return Internal {
                 msg: format!("MCP tools/call '{tool_name}' failed: {err}"),
-            }.fail();
+            }
+            .fail();
         }
 
-        let result: CallToolResult =
-            serde_json::from_value(resp.result.unwrap_or_else(|| serde_json::json!({"content": []}))).map_err(
-                |e| Internal {
-                    msg: format!("failed to parse tools/call result: {e}"),
-                }.build(),
-            )?;
+        let result: CallToolResult = serde_json::from_value(
+            resp.result
+                .unwrap_or_else(|| serde_json::json!({"content": []})),
+        )
+        .map_err(|e| {
+            Internal {
+                msg: format!("failed to parse tools/call result: {e}"),
+            }
+            .build()
+        })?;
 
         // Extract text content from blocks.
         let text: String = result
@@ -406,7 +452,8 @@ impl McpClient {
         if result.is_error {
             return AgentRuntime {
                 msg: format!("MCP tool '{tool_name}' returned error: {text}"),
-            }.fail();
+            }
+            .fail();
         }
 
         Ok(text)
@@ -415,9 +462,10 @@ impl McpClient {
     /// Shut down the client (kills stdio process if applicable).
     pub async fn shutdown(&self) {
         if let McpTransportInner::Stdio { child, .. } = &self.transport
-            && let Some(mut child) = child.lock().await.take() {
-                let _ = child.kill().await;
-            }
+            && let Some(mut child) = child.lock().await.take()
+        {
+            let _ = child.kill().await;
+        }
     }
 
     /// Server name.
@@ -431,9 +479,10 @@ impl Drop for McpClient {
         if let McpTransportInner::Stdio { child, .. } = &self.transport {
             // Best-effort kill on drop (non-async).
             if let Ok(mut guard) = child.try_lock()
-                && let Some(ref mut child) = *guard {
-                    let _ = child.start_kill();
-                }
+                && let Some(ref mut child) = *guard
+            {
+                let _ = child.start_kill();
+            }
         }
     }
 }
@@ -479,7 +528,11 @@ impl Tool for McpToolWrapper {
         }
     }
 
-    async fn invoke(&self, args: serde_json::Value, _ctx: ToolContext) -> Result<serde_json::Value> {
+    async fn invoke(
+        &self,
+        args: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<serde_json::Value> {
         let result = self.client.call_tool(&self.tool.name, args).await?;
         Ok(serde_json::json!({ "output": result }))
     }
@@ -492,10 +545,8 @@ impl Tool for McpToolWrapper {
 fn strip_top_level_nulls(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
-            let filtered: serde_json::Map<String, serde_json::Value> = map
-                .into_iter()
-                .filter(|(_, v)| !v.is_null())
-                .collect();
+            let filtered: serde_json::Map<String, serde_json::Value> =
+                map.into_iter().filter(|(_, v)| !v.is_null()).collect();
             serde_json::Value::Object(filtered)
         }
         other => other,
@@ -587,11 +638,14 @@ mod tests {
             input_schema: serde_json::json!({"type": "object"}),
             annotations: None,
         };
-        let client = Arc::new(McpClient::new_http(
-            "test".into(),
-            "http://localhost:1234".into(),
-            HashMap::new(),
-        ).expect("client should build"));
+        let client = Arc::new(
+            McpClient::new_http(
+                "test".into(),
+                "http://localhost:1234".into(),
+                HashMap::new(),
+            )
+            .expect("client should build"),
+        );
         let wrapper = McpToolWrapper::new("myserver".into(), client, tool);
         let def = wrapper.definition();
         assert_eq!(def.name, "myserver_read_file");
@@ -611,11 +665,14 @@ mod tests {
                 read_only_hint: true,
             }),
         };
-        let client = Arc::new(McpClient::new_http(
-            "test".into(),
-            "http://localhost:1234".into(),
-            HashMap::new(),
-        ).expect("client should build"));
+        let client = Arc::new(
+            McpClient::new_http(
+                "test".into(),
+                "http://localhost:1234".into(),
+                HashMap::new(),
+            )
+            .expect("client should build"),
+        );
         let wrapper = McpToolWrapper::new("srv".into(), client, tool);
         assert_eq!(wrapper.definition().risk_level, ToolRiskLevel::ReadOnly);
     }
@@ -631,11 +688,14 @@ mod tests {
                 read_only_hint: false,
             }),
         };
-        let client = Arc::new(McpClient::new_http(
-            "test".into(),
-            "http://localhost:1234".into(),
-            HashMap::new(),
-        ).expect("client should build"));
+        let client = Arc::new(
+            McpClient::new_http(
+                "test".into(),
+                "http://localhost:1234".into(),
+                HashMap::new(),
+            )
+            .expect("client should build"),
+        );
         let wrapper = McpToolWrapper::new("srv".into(), client, tool);
         assert_eq!(wrapper.definition().risk_level, ToolRiskLevel::Destructive);
     }
@@ -646,7 +706,8 @@ mod tests {
             "test".into(),
             "http://localhost:1234".into(),
             HashMap::new(),
-        ).expect("client should build");
+        )
+        .expect("client should build");
         assert_eq!(client.next_id(), 1);
         assert_eq!(client.next_id(), 2);
         assert_eq!(client.next_id(), 3);

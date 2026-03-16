@@ -3,8 +3,11 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use tracing::{info, warn};
 
-use frankclaw_core::channel::{OutboundMessage, SendResult, ChannelPlugin, InboundMessage, InboundAttachment, ChannelCapabilities, HealthStatus, EditMessageTarget, DeleteMessageTarget, OutboundAttachment};
-use frankclaw_core::error::{Result, Channel, RateLimited};
+use frankclaw_core::channel::{
+    ChannelCapabilities, ChannelPlugin, DeleteMessageTarget, EditMessageTarget, HealthStatus,
+    InboundAttachment, InboundMessage, OutboundAttachment, OutboundMessage, SendResult,
+};
+use frankclaw_core::error::{Channel, RateLimited, Result};
 use frankclaw_core::types::ChannelId;
 
 use crate::media_text::text_or_attachment_placeholder;
@@ -12,7 +15,7 @@ use crate::outbound_media::{
     AttachmentKind, attachment_bytes, attachment_filename, attachment_kind,
     require_single_attachment,
 };
-use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
+use crate::outbound_text::{OutboundTextFlavor, normalize_outbound_text};
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
@@ -93,17 +96,17 @@ impl TelegramChannel {
         let resp = if effective_msg.attachments.is_empty() {
             let mut body = build_send_body(&effective_msg);
             if !state.include_parse_mode
-                && let Some(obj) = body.as_object_mut() {
-                    obj.remove("parse_mode");
-                }
+                && let Some(obj) = body.as_object_mut()
+            {
+                obj.remove("parse_mode");
+            }
             self.client
                 .post(self.api_url("sendMessage"))
                 .json(&body)
                 .send()
                 .await
         } else {
-            let request =
-                build_media_send_request(&effective_msg, state.include_parse_mode)?;
+            let request = build_media_send_request(&effective_msg, state.include_parse_mode)?;
             self.client
                 .post(self.api_url(request.method))
                 .multipart(request.form)
@@ -112,7 +115,10 @@ impl TelegramChannel {
         }
         .map_err(|e| self.channel_err(format!("send failed: {e}")))?;
 
-        let data: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
 
         if data["ok"].as_bool() == Some(true) {
             let msg_id = data["result"]["message_id"]
@@ -205,7 +211,10 @@ impl TelegramChannel {
             .await
             .map_err(|e| self.channel_err(format!("poll failed: {e}")))?;
 
-        let data: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
 
         if let Some(updates) = data["result"].as_array() {
             for update in updates {
@@ -215,12 +224,15 @@ impl TelegramChannel {
                         .store(id + 1, std::sync::atomic::Ordering::Relaxed);
                 }
 
-                let msg = update.get("message").or_else(|| update.get("edited_message"));
+                let msg = update
+                    .get("message")
+                    .or_else(|| update.get("edited_message"));
                 if let Some(msg) = msg
                     && let Some(inbound) = self.parse_message(msg)
-                        && inbound_tx.send(inbound).await.is_err() {
-                            return Ok(()); // Receiver dropped, shutting down.
-                        }
+                    && inbound_tx.send(inbound).await.is_err()
+                {
+                    return Ok(()); // Receiver dropped, shutting down.
+                }
             }
         }
 
@@ -237,17 +249,12 @@ impl TelegramChannel {
             &attachments,
         );
         let topic_id = msg["message_thread_id"].as_i64();
-        let is_group = matches!(
-            msg["chat"]["type"].as_str(),
-            Some("group" | "supergroup")
-        );
+        let is_group = matches!(msg["chat"]["type"].as_str(), Some("group" | "supergroup"));
         let message_id = msg["message_id"].as_i64()?.to_string();
 
-        let timestamp = msg["date"]
-            .as_i64().map_or_else(chrono::Utc::now, |ts| {
-                chrono::DateTime::from_timestamp(ts, 0)
-                    .unwrap_or_else(chrono::Utc::now)
-            });
+        let timestamp = msg["date"].as_i64().map_or_else(chrono::Utc::now, |ts| {
+            chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(chrono::Utc::now)
+        });
 
         Some(InboundMessage {
             channel: self.id(),
@@ -256,9 +263,7 @@ impl TelegramChannel {
             sender_name,
             thread_id: Some(encode_thread_id(chat_id, topic_id)),
             is_group,
-            is_mention: text
-                .as_deref()
-                .is_some_and(|t| t.contains('@')),
+            is_mention: text.as_deref().is_some_and(|t| t.contains('@')),
             text,
             attachments,
             platform_message_id: Some(message_id),
@@ -362,10 +367,7 @@ impl ChannelPlugin for TelegramChannel {
         "Telegram"
     }
 
-    async fn start(
-        &self,
-        inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>,
-    ) -> Result<()> {
+    async fn start(&self, inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>) -> Result<()> {
         info!("telegram channel starting (long polling)");
         loop {
             match self.poll_updates(&inbound_tx).await {
@@ -419,7 +421,10 @@ impl ChannelPlugin for TelegramChannel {
             .await
             .map_err(|e| self.channel_err(format!("edit failed: {e}")))?;
 
-        let data: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
 
         if data["ok"].as_bool() == Some(true) {
             return Ok(());
@@ -437,9 +442,14 @@ impl ChannelPlugin for TelegramChannel {
         Err(self.channel_err(description.to_string()))
     }
 
-    async fn stream_start(&self, msg: &OutboundMessage) -> Result<frankclaw_core::channel::StreamHandle> {
+    async fn stream_start(
+        &self,
+        msg: &OutboundMessage,
+    ) -> Result<frankclaw_core::channel::StreamHandle> {
         match self.send(msg.clone()).await? {
-            SendResult::Sent { platform_message_id } => Ok(frankclaw_core::channel::StreamHandle {
+            SendResult::Sent {
+                platform_message_id,
+            } => Ok(frankclaw_core::channel::StreamHandle {
                 channel: self.id(),
                 account_id: msg.account_id.clone(),
                 to: msg.to.clone(),
@@ -448,7 +458,8 @@ impl ChannelPlugin for TelegramChannel {
             }),
             SendResult::RateLimited { retry_after_secs } => RateLimited {
                 retry_after_secs: retry_after_secs.unwrap_or(1),
-            }.fail(),
+            }
+            .fail(),
             SendResult::Failed { reason } => Err(self.channel_err(reason)),
         }
     }
@@ -488,15 +499,20 @@ impl ChannelPlugin for TelegramChannel {
             .await
             .map_err(|e| self.channel_err(format!("delete failed: {e}")))?;
 
-        let data: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
 
         if data["ok"].as_bool() == Some(true) {
             Ok(())
         } else {
-            Err(self.channel_err(data["description"]
+            Err(self.channel_err(
+                data["description"]
                     .as_str()
                     .unwrap_or("unknown telegram delete error")
-                    .to_string()))
+                    .to_string(),
+            ))
         }
     }
 }
@@ -562,10 +578,13 @@ fn build_media_send_request(
     let part = reqwest::multipart::Part::bytes(bytes)
         .file_name(filename)
         .mime_str(&attachment.mime_type)
-        .map_err(|e| Channel {
-            channel: channel.clone(),
-            msg: format!("invalid attachment mime type: {e}"),
-        }.build())?;
+        .map_err(|e| {
+            Channel {
+                channel: channel.clone(),
+                msg: format!("invalid attachment mime type: {e}"),
+            }
+            .build()
+        })?;
 
     let mut form = reqwest::multipart::Form::new()
         .text("chat_id", chat_id)
@@ -606,19 +625,25 @@ fn build_media_group_request(
         let part = reqwest::multipart::Part::bytes(attachment_bytes(&channel, attachment)?)
             .file_name(attachment_filename(attachment))
             .mime_str(&attachment.mime_type)
-            .map_err(|e| Channel {
-                channel: channel.clone(),
-                msg: format!("invalid attachment mime type: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Channel {
+                    channel: channel.clone(),
+                    msg: format!("invalid attachment mime type: {e}"),
+                }
+                .build()
+            })?;
         form = form.part(field_name.clone(), part);
     }
 
     form = form.text(
         "media",
-        serde_json::to_string(&media).map_err(|e| Channel {
-            channel: channel.clone(),
-            msg: format!("failed to serialize telegram media group: {e}"),
-        }.build())?,
+        serde_json::to_string(&media).map_err(|e| {
+            Channel {
+                channel: channel.clone(),
+                msg: format!("failed to serialize telegram media group: {e}"),
+            }
+            .build()
+        })?,
     );
     if let Some(topic_id) = topic_id {
         form = form.text("message_thread_id", topic_id.to_string());
@@ -647,7 +672,8 @@ fn build_media_group_items(
         return Channel {
             channel: channel.clone(),
             msg: "telegram media groups require between 2 and 10 attachments",
-        }.fail();
+        }
+        .fail();
     }
 
     let mut media = Vec::with_capacity(attachments.len());
@@ -710,13 +736,13 @@ fn telegram_media_item_type(kind: AttachmentKind) -> &'static str {
 fn build_edit_body(target: &EditMessageTarget, new_text: &str) -> Result<serde_json::Value> {
     let (chat_id, _) = parse_target_thread(target.thread_id.as_deref(), &target.to);
     let text = normalize_outbound_text(new_text, OutboundTextFlavor::Plain);
-    let message_id = target
-        .platform_message_id
-        .parse::<i64>()
-        .map_err(|_| Channel {
+    let message_id = target.platform_message_id.parse::<i64>().map_err(|_| {
+        Channel {
             channel: ChannelId::new("telegram"),
             msg: "telegram edit requires a numeric platform message id",
-        }.build())?;
+        }
+        .build()
+    })?;
 
     Ok(serde_json::json!({
         "chat_id": chat_id,
@@ -728,13 +754,13 @@ fn build_edit_body(target: &EditMessageTarget, new_text: &str) -> Result<serde_j
 
 fn build_delete_body(target: &DeleteMessageTarget) -> Result<serde_json::Value> {
     let (chat_id, _) = parse_target_thread(target.thread_id.as_deref(), &target.to);
-    let message_id = target
-        .platform_message_id
-        .parse::<i64>()
-        .map_err(|_| Channel {
+    let message_id = target.platform_message_id.parse::<i64>().map_err(|_| {
+        Channel {
             channel: ChannelId::new("telegram"),
             msg: "telegram delete requires a numeric platform message id",
-        }.build())?;
+        }
+        .build()
+    })?;
 
     Ok(serde_json::json!({
         "chat_id": chat_id,
@@ -745,10 +771,7 @@ fn build_delete_body(target: &DeleteMessageTarget) -> Result<serde_json::Value> 
 fn parse_target_thread(thread_id: Option<&str>, fallback_to: &str) -> (String, Option<i64>) {
     let raw = thread_id.unwrap_or(fallback_to);
     if let Some((chat_id, topic_id)) = raw.split_once(":topic:") {
-        return (
-            chat_id.to_string(),
-            topic_id.parse::<i64>().ok(),
-        );
+        return (chat_id.to_string(), topic_id.parse::<i64>().ok());
     }
 
     (raw.to_string(), None)
@@ -760,17 +783,18 @@ mod tests {
 
     fn fixture(name: &str) -> serde_json::Value {
         match name {
-            "message_with_photo" => serde_json::from_str(include_str!(
-                "fixture_telegram_message_with_photo.json"
-            ))
-            .expect("fixture should parse"),
+            "message_with_photo" => {
+                serde_json::from_str(include_str!("fixture_telegram_message_with_photo.json"))
+                    .expect("fixture should parse")
+            }
             _ => panic!("unknown fixture: {name}"),
         }
     }
 
     #[test]
     fn parse_message_uses_topic_thread_id_when_present() {
-        let channel = TelegramChannel::new(SecretString::from("token".to_string())).expect("channel should build");
+        let channel = TelegramChannel::new(SecretString::from("token".to_string()))
+            .expect("channel should build");
         let inbound = channel
             .parse_message(&serde_json::json!({
                 "message_id": 99,
@@ -1023,9 +1047,10 @@ mod tests {
         )
         .expect_err("mixed document/audio group should fail");
 
-        assert!(err
-            .to_string()
-            .contains("all photos/videos, all audio, or all documents"));
+        assert!(
+            err.to_string()
+                .contains("all photos/videos, all audio, or all documents")
+        );
     }
 
     #[test]
@@ -1065,14 +1090,12 @@ mod tests {
 
     #[test]
     fn build_delete_body_uses_thread_target_chat_id() {
-        let body = build_delete_body(
-            &DeleteMessageTarget {
-                account_id: "default".into(),
-                to: "42".into(),
-                thread_id: Some("-100123:topic:7".into()),
-                platform_message_id: "99".into(),
-            },
-        )
+        let body = build_delete_body(&DeleteMessageTarget {
+            account_id: "default".into(),
+            to: "42".into(),
+            thread_id: Some("-100123:topic:7".into()),
+            platform_message_id: "99".into(),
+        })
         .expect("delete body should build");
 
         assert_eq!(body["chat_id"], serde_json::json!("-100123"));
@@ -1081,7 +1104,8 @@ mod tests {
 
     #[test]
     fn parse_message_uses_caption_and_collects_media_attachments() {
-        let channel = TelegramChannel::new(SecretString::from("token".to_string())).expect("channel should build");
+        let channel = TelegramChannel::new(SecretString::from("token".to_string()))
+            .expect("channel should build");
         let inbound = channel
             .parse_message(&serde_json::json!({
                 "message_id": 100,
@@ -1110,7 +1134,8 @@ mod tests {
 
     #[test]
     fn parse_message_falls_back_to_media_placeholder_without_text() {
-        let channel = TelegramChannel::new(SecretString::from("token".to_string())).expect("channel should build");
+        let channel = TelegramChannel::new(SecretString::from("token".to_string()))
+            .expect("channel should build");
         let inbound = channel
             .parse_message(&serde_json::json!({
                 "message_id": 101,
@@ -1136,7 +1161,8 @@ mod tests {
 
     #[test]
     fn parse_message_matches_contract_fixture_shape() {
-        let channel = TelegramChannel::new(SecretString::from("token".to_string())).expect("channel should build");
+        let channel = TelegramChannel::new(SecretString::from("token".to_string()))
+            .expect("channel should build");
         let inbound = channel
             .parse_message(&fixture("message_with_photo"))
             .expect("fixture should parse");
@@ -1171,7 +1197,9 @@ mod tests {
 
     #[test]
     fn error_classification_helpers_match_telegram_error_strings() {
-        assert!(is_parse_error("Bad Request: can't parse entities: some detail"));
+        assert!(is_parse_error(
+            "Bad Request: can't parse entities: some detail"
+        ));
         assert!(!is_parse_error("Bad Request: chat not found"));
 
         assert!(is_message_not_modified(

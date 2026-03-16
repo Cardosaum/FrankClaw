@@ -1,0 +1,7 @@
+[channels.discord]
+enabled = true
+require_mention_for_groups = true
+groups = ["*"]
+
+[[channels.discord.accounts]]
+bot_token_env = "DISCORD_BOT_TOKEN"

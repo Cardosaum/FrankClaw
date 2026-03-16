@@ -42,20 +42,24 @@ impl JobState {
         matches!(
             (self, target),
             // From Pending
-            (Self::Pending | Self::Stuck, Self::InProgress) |
-(Self::Pending | Self::InProgress | Self::Stuck, Self::Cancelled) |
-(Self::InProgress, Self::Completed | Self::Failed | Self::Stuck) |
-(Self::Completed, Self::Submitted | Self::Failed) |
-(Self::Submitted, Self::Accepted | Self::Failed) | (Self::Stuck, Self::Failed)
+            (Self::Pending | Self::Stuck, Self::InProgress)
+                | (
+                    Self::Pending | Self::InProgress | Self::Stuck,
+                    Self::Cancelled
+                )
+                | (
+                    Self::InProgress,
+                    Self::Completed | Self::Failed | Self::Stuck
+                )
+                | (Self::Completed, Self::Submitted | Self::Failed)
+                | (Self::Submitted, Self::Accepted | Self::Failed)
+                | (Self::Stuck, Self::Failed)
         )
     }
 
     /// Whether this state is terminal (no further transitions allowed except cancel).
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Accepted | Self::Failed | Self::Cancelled
-        )
+        matches!(self, Self::Accepted | Self::Failed | Self::Cancelled)
     }
 }
 
@@ -110,7 +114,11 @@ pub struct JobContext {
 
 impl JobContext {
     /// Create a new job context in the Pending state.
-    pub fn new(job_id: impl Into<String>, title: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn new(
+        job_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         Self {
             job_id: job_id.into(),
             state: JobState::Pending,
@@ -162,10 +170,7 @@ impl JobContext {
             JobState::InProgress if self.started_at.is_none() => {
                 self.started_at = Some(Utc::now());
             }
-            JobState::Completed
-            | JobState::Accepted
-            | JobState::Failed
-            | JobState::Cancelled => {
+            JobState::Completed | JobState::Accepted | JobState::Failed | JobState::Cancelled => {
                 self.completed_at = Some(Utc::now());
             }
             _ => {}
@@ -464,11 +469,7 @@ mod tests {
 
     #[test]
     fn cancellation_from_various_states() {
-        for initial in [
-            JobState::Pending,
-            JobState::InProgress,
-            JobState::Stuck,
-        ] {
+        for initial in [JobState::Pending, JobState::InProgress, JobState::Stuck] {
             let mut ctx = JobContext::new("job-1", "Test", "");
             if initial != JobState::Pending {
                 ctx.transition_to(JobState::InProgress, None).unwrap();

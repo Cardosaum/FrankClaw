@@ -10,12 +10,7 @@ const DEFAULT_MAX_LINKS: usize = 3;
 
 /// Check if a character is valid in a URL (simplified — covers common cases).
 fn is_url_char(c: char) -> bool {
-    !c.is_whitespace()
-        && c != '<'
-        && c != '>'
-        && c != '"'
-        && c != '\''
-        && c != '`'
+    !c.is_whitespace() && c != '<' && c != '>' && c != '"' && c != '\'' && c != '`'
 }
 
 /// Strip markdown link syntax `[text](url)` from a message, replacing with spaces.
@@ -35,7 +30,9 @@ fn strip_markdown_links(message: &str) -> String {
                     let rest: String = chars[paren_start..].iter().collect();
                     if rest.starts_with("http://") || rest.starts_with("https://") {
                         // Find closing paren
-                        if let Some(close_paren) = chars[paren_start..].iter().position(|&c| c == ')') {
+                        if let Some(close_paren) =
+                            chars[paren_start..].iter().position(|&c| c == ')')
+                        {
                             // Skip the entire markdown link
                             i = paren_start + close_paren + 1;
                             result.push(' ');
@@ -58,9 +55,7 @@ fn extract_url_at(text: &str) -> Option<&str> {
         return None;
     }
 
-    let end = text
-        .find(|c: char| !is_url_char(c))
-        .unwrap_or(text.len());
+    let end = text.find(|c: char| !is_url_char(c)).unwrap_or(text.len());
 
     if end <= "https://".len() {
         return None;

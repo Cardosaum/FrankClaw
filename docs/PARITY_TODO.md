@@ -3,9 +3,10 @@
 This file tracks the remaining distance between FrankClaw and the broader OpenClaw feature surface.
 It should stay current as features land, are deferred, or are explicitly dropped.
 
-**Last verified**: 2026-03-12 — systematic directory-by-directory audit of OpenClaw `src/` (~192k LOC
-across ~2,864 non-test TypeScript files) against FrankClaw (~30k LOC across 13 Rust crates).
+**Last verified**: 2026-03-16 — systematic directory-by-directory audit of OpenClaw `src/` (~192k LOC
+across ~2,864 non-test TypeScript files) against FrankClaw (~37k LOC across 13 Rust crates).
 IronClaw feature adoption complete (12 features across 4 phases).
+OpenClaw parity phase complete (14 features: web UI enrichment + backend features).
 
 ## Current Position
 
@@ -27,16 +28,17 @@ It now has a working hardened core with:
 - job state machine with self-repair
 - interactive REPL (`frankclaw chat`)
 - DM pairing and stricter channel defaults
-- local console UI
-- cron reuse
-- signed webhooks
+- rich 8-tab web console with dark mode, tool approval, usage analytics, logs viewer
+- cron reuse with gateway RPC wiring
+- signed webhooks with JSON path extraction, templates, rate limiting
 - bounded tool execution
 - local Canvas host
 - operator onboarding and install helpers
 
-FrankClaw covers the **core message-to-model flow** well but is missing many
-of OpenClaw's advanced subsystems. The gap is primarily in runtime intelligence,
-extensibility, and multimodal capabilities — not the transport/plumbing layer.
+FrankClaw now covers the **core message-to-model flow** comprehensively with a rich
+web console, memory/RAG, multi-provider media understanding, webhook transforms,
+and full hook wiring. The remaining gap is primarily long-tail channel breadth and
+voice — not architecture, runtime intelligence, or the transport layer.
 
 ## Implemented Core and Surfaces
 
@@ -55,6 +57,25 @@ extensibility, and multimodal capabilities — not the transport/plumbing layer.
 - [x] Selector-based browser actions (`click`, `type`, `wait`, `press`)
 - [x] Browser session visibility and close control (`sessions`, `close`)
 - [x] Provider SSE streaming for OpenAI/Anthropic/Ollama
+- [x] Rich web console with 8 tabs (Connect, Chat, Canvas, System, Usage, Agents, Cron, Logs)
+- [x] Dark/light mode toggle with system preference detection and FOUC prevention
+- [x] WebSocket auto-reconnect with ping keepalive (survives proxy/tunnel idle timeouts)
+- [x] Tool approval inline UI with Allow Once/Always/Deny controls
+- [x] Image paste upload in chat
+- [x] Usage analytics with CSV export
+- [x] Agent management (read-only config view)
+- [x] Logs viewer with level filters, text search, auto-scroll, ring buffer
+- [x] Focus mode (full viewport chat)
+- [x] Resizable markdown sidebar for tool output
+- [x] Cron job management (list, add, remove, run now) via gateway RPC
+- [x] Webhook JSON path extraction, templates, per-mapping rate limiting and concurrency
+- [x] Memory/RAG with SQLite FTS5, embedding providers, file sync
+- [x] Hook lifecycle wiring in runtime (message.received/sent, tool.before/after)
+- [x] Multi-provider media understanding with fallback chain (OpenAI, Anthropic, Ollama vision + Whisper)
+- [x] OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`) for drop-in client support
+- [x] Model-aware failover routing (skips providers that don't serve the requested model)
+- [x] Canvas SVG/HTML/Markdown rendering in web console
+- [x] GitHub Copilot model provider
 
 ## Implemented Channels
 
@@ -90,10 +111,11 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 
 ### Multimodal & Content Understanding
 
-- [x] **Media Understanding** — Vision description via OpenAI-compatible vision API, audio
-  transcription via Whisper API, media kind classification, attachment processing pipeline
-  with size limits and graceful error handling. (`frankclaw-media/src/understanding.rs`,
-  `frankclaw-core/src/media.rs`)
+- [x] **Media Understanding** — Multi-provider vision (OpenAI, Anthropic, Ollama) and audio
+  transcription (Whisper), fallback chain, media kind classification, attachment processing
+  pipeline with size limits and graceful error handling, `audio_transcribe` tool, configurable
+  via `MediaUnderstandingConfig`. (`frankclaw-media/src/understanding.rs`,
+  `frankclaw-tools/src/audio.rs`, `frankclaw-core/src/media.rs`)
 
 - [x] **Link Understanding** — SSRF-safe URL extraction from messages with deduplication,
   markdown link stripping, and private IP/hostname blocking. (`frankclaw-core/src/links.rs`)
@@ -102,16 +124,20 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 
 ### Extensibility & Hooks
 
-- [x] **Hooks System** — Event-driven hook registry with 5 event types (command, session, agent,
-  gateway, message), async fire-and-forget execution, general and specific event matching,
-  30s timeout per handler, typed event constructors. (`frankclaw-core/src/hooks.rs`)
+- [x] **Hooks System** — Event-driven hook registry with 6 event types (command, session, agent,
+  gateway, message, tool), async fire-and-forget execution, general and specific event matching,
+  30s timeout per handler, typed event constructors. Wired into runtime: message.received/sent,
+  tool.before/after. (`frankclaw-core/src/hooks.rs`, `frankclaw-runtime/src/lib.rs`)
 
 - [x] **Gmail Integration** — **SKIPPED**: complex Google Pub/Sub integration for a niche channel.
 
 - [x] **Skills System** — Workspace-loaded skill manifests with validation, capability-based
   tool access control, and prompt injection. (`frankclaw-plugin-sdk/src/lib.rs`)
 
-- [x] **ACP (Agent Client Protocol)** — **SKIPPED**: niche interop standard with no real-world adoption.
+- [x] **ACP (Agent Client Protocol)** — JSON-RPC 2.0 over NDJSON (stdin/stdout) with session
+  management (DashMap, 24h TTL, LRU eviction), rate limiting, streaming prompt responses.
+  Methods: initialize, newSession, loadSession, prompt, listTools, callTool.
+  (`frankclaw-gateway/src/acp.rs`, `acp_transport.rs`; CLI `frankclaw acp`)
 
 ### Runtime & Execution
 
@@ -132,9 +158,10 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
   backoff on failure, automatic recovery on cooldown expiry, and provider-level key management.
   (`frankclaw-core/src/api_keys.rs`)
 
-- [x] **Vector Memory Backend** — **DEFERRED**: traits are defined in `frankclaw-memory`.
-  A concrete backend (LanceDB) should be added when there's a real use case to drive
-  design decisions, not speculatively.
+- [x] **Memory/RAG System** — SQLite FTS5 + cosine vector search with hybrid scoring,
+  embedding providers (OpenAI, Ollama) with SHA-256 caching, paragraph-based chunking
+  with line tracking, file syncer with content hash change detection.
+  (`frankclaw-memory/src/store.rs`, `embedding.rs`, `chunking.rs`, `sync.rs`)
 
 ### Channel Features
 
@@ -196,6 +223,10 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 - [x] Safer action model for clicks/forms/navigation
 - [x] Tool approvals for higher-risk tool families
 - [x] More first-party tools beyond session inspection
+- [x] LLM tool suite: web_fetch, web_search, sessions_list, sessions_history,
+  file_read, file_write, file_edit, message_send, cron_list, cron_add,
+  cron_remove, config_get, agents_list, memory_get, memory_search,
+  image_describe, audio_transcribe, pdf_read (18 tools)
 - [x] Better tool tracing and operator visibility
 
 ### Test Coverage
@@ -251,7 +282,7 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 
 9. ~~Hooks system~~ ✅
 10. ~~Skills system~~ ✅ (already implemented in plugin-sdk)
-11. ~~ACP protocol~~ — **SKIPPED**: niche interop standard with no real-world adoption yet
+11. ~~ACP protocol~~ ✅ — JSON-RPC 2.0 over NDJSON (`frankclaw acp`)
 12. ~~Bash tools with sandboxing~~ ✅
 
 ### Tier 4 — Operator Experience
@@ -272,8 +303,14 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 - ~~Gmail integration~~ — complex Google Pub/Sub integration for a niche channel
 - ~~Device pairing~~ — Bonjour/mDNS/Tailscale discovery is over-engineered for a self-hosted tool
 - ~~Auto-update~~ — users can use their package manager or pull from git
-- ~~Markdown IR~~ — channel-specific rendering can be added per-channel as needed
+- ~~Markdown IR~~ ✅ — `MarkdownIR` with pulldown-cmark parser and ANSI SGR rendering (`frankclaw-runtime/src/markdown.rs`)
 - ~~i18n~~ — ✅ Implemented: 9 locales via `FRANKCLAW_LANG` (en, pt-BR, pt-PT, es, fr, de, it, ja, ko)
+- ~~Browser profiles~~ ✅ — Named CDP profiles with port allocation (18800-18899), color cycling (`frankclaw-tools/src/browser_profiles.rs`)
+- ~~Batch embedding providers~~ ✅ — Gemini (768D) and Voyage AI (1024D) providers with 100-text batching (`frankclaw-memory/src/embedding.rs`)
+- ~~Plugin management~~ ✅ — Manifest parsing, filesystem discovery, enable/disable lifecycle (`frankclaw-plugin-sdk/src/manifest.rs`, `discovery.rs`, `lifecycle.rs`; CLI `frankclaw plugin`)
+- ~~TUI~~ ✅ — Full-screen ratatui TUI with chat log, input area, status bar, streaming, slash commands (`frankclaw-cli/src/tui.rs`; launched via `frankclaw chat --tui`)
+- ~~Wizard improvements~~ — **Not needed**: current `frankclaw setup` covers the critical path (provider, channel, auth)
+- ~~Secrets audit credential matrix~~ — **Not needed**: FrankClaw uses single config + env vars, not OpenClaw's multi-file auth profile system
 
 ### IronClaw-Derived Features (Adopted)
 
@@ -317,5 +354,3 @@ Skipped IronClaw features (don't fit architecture or lower priority):
 - Companion node/app surfaces
 - Voice
 - Distro-specific installers
-- Secrets audit CLI
-- Full TUI (FrankClaw has basic console; OpenClaw has full interactive client with session tabs, token display, syntax highlighting)

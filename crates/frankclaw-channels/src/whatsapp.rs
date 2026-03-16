@@ -5,8 +5,11 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 use tracing::info;
 
-use frankclaw_core::channel::{OutboundAttachment, ChannelPlugin, ChannelCapabilities, InboundMessage, HealthStatus, OutboundMessage, SendResult, InboundAttachment};
-use frankclaw_core::error::{Result, AuthRequired, AuthFailed, Internal};
+use frankclaw_core::channel::{
+    ChannelCapabilities, ChannelPlugin, HealthStatus, InboundAttachment, InboundMessage,
+    OutboundAttachment, OutboundMessage, SendResult,
+};
+use frankclaw_core::error::{AuthFailed, AuthRequired, Internal, Result};
 use frankclaw_core::types::ChannelId;
 
 use crate::media_text::{normalize_mime_type, text_or_attachment_placeholder};
@@ -14,7 +17,7 @@ use crate::outbound_media::{
     AttachmentKind, attachment_bytes, attachment_filename, attachment_kind,
     require_single_attachment,
 };
-use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
+use crate::outbound_text::{OutboundTextFlavor, normalize_outbound_text};
 
 const WHATSAPP_GRAPH_BASE: &str = "https://graph.facebook.com/v19.0";
 type HmacSha256 = Hmac<Sha256>;
@@ -28,7 +31,10 @@ pub struct WhatsAppChannel {
 }
 
 impl WhatsAppChannel {
-    #[expect(clippy::needless_pass_by_value, reason = "owned String consumed into struct fields")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "owned String consumed into struct fields"
+    )]
     pub fn new(
         access_token: SecretString,
         phone_number_id: String,
@@ -58,11 +64,13 @@ impl WhatsAppChannel {
         let signature = signature.strip_prefix("sha256=").unwrap_or(signature);
         let provided = decode_hex(signature).ok_or_else(|| AuthFailed.build())?;
 
-        let mut mac = HmacSha256::new_from_slice(secret.expose_secret().as_bytes()).map_err(|_| {
-            Internal {
-                msg: "failed to initialize whatsapp webhook signature verifier",
-            }.build()
-        })?;
+        let mut mac =
+            HmacSha256::new_from_slice(secret.expose_secret().as_bytes()).map_err(|_| {
+                Internal {
+                    msg: "failed to initialize whatsapp webhook signature verifier",
+                }
+                .build()
+            })?;
         mac.update(body);
         mac.verify_slice(&provided).map_err(|_| AuthFailed.build())
     }
@@ -83,10 +91,7 @@ impl WhatsAppChannel {
         format!("{WHATSAPP_GRAPH_BASE}/{}", self.phone_number_id)
     }
 
-    async fn upload_media(
-        &self,
-        attachment: &OutboundAttachment,
-    ) -> Result<String> {
+    async fn upload_media(&self, attachment: &OutboundAttachment) -> Result<String> {
         let channel = self.id();
         let bytes = attachment_bytes(&channel, attachment)?;
         let filename = attachment_filename(attachment);
@@ -107,12 +112,16 @@ impl WhatsAppChannel {
             .map_err(|e| self.channel_err(format!("whatsapp media upload failed: {e}")))?;
 
         let status = resp.status();
-        let body: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid whatsapp media upload response: {e}")))?;
+        let body: serde_json::Value = resp.json().await.map_err(|e| {
+            self.channel_err(format!("invalid whatsapp media upload response: {e}"))
+        })?;
         if !status.is_success() {
-            return Err(self.channel_err(body["error"]["message"]
+            return Err(self.channel_err(
+                body["error"]["message"]
                     .as_str()
                     .unwrap_or("unknown whatsapp media upload failure")
-                    .to_string()));
+                    .to_string(),
+            ));
         }
 
         body["id"]
@@ -146,10 +155,7 @@ impl ChannelPlugin for WhatsAppChannel {
         "WhatsApp"
     }
 
-    async fn start(
-        &self,
-        _inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>,
-    ) -> Result<()> {
+    async fn start(&self, _inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>) -> Result<()> {
         info!("whatsapp channel ready (webhook mode)");
         Ok(())
     }
@@ -206,7 +212,10 @@ impl ChannelPlugin for WhatsAppChannel {
         }
 
         let status = resp.status();
-        let body: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid whatsapp send response: {e}")))?;
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| self.channel_err(format!("invalid whatsapp send response: {e}")))?;
 
         if status.is_success() {
             let message_id = body["messages"]
@@ -271,23 +280,18 @@ pub fn parse_webhook_payload(payload: &serde_json::Value) -> Vec<InboundMessage>
                 // Skip non-content message types (status updates, reactions,
                 // read receipts, etc.) to prevent spurious processing.
                 if let Some(msg_type) = message["type"].as_str()
-                    && !is_processable_message_type(msg_type) {
-                        continue;
-                    }
+                    && !is_processable_message_type(msg_type)
+                {
+                    continue;
+                }
 
                 let attachments = build_inbound_attachments(message);
                 let message_text = extract_message_text(message);
-                let text = text_or_attachment_placeholder(
-                    message_text,
-                    &attachments,
-                );
+                let text = text_or_attachment_placeholder(message_text, &attachments);
                 let Some(text) = text else {
                     continue;
                 };
-                let sender_name = contact_map
-                    .get(sender_id)
-                    .cloned()
-                    .flatten();
+                let sender_name = contact_map.get(sender_id).cloned().flatten();
                 inbound.push(InboundMessage {
                     channel: ChannelId::new("whatsapp"),
                     account_id: account_id.clone(),
@@ -328,11 +332,8 @@ fn build_inbound_attachments(message: &serde_json::Value) -> Vec<InboundAttachme
 
         attachments.push(InboundAttachment {
             media_id: None,
-            mime_type: normalize_mime_type(
-                payload["mime_type"]
-                    .as_str()
-                    .unwrap_or(mime_fallback),
-            ).clone(),
+            mime_type: normalize_mime_type(payload["mime_type"].as_str().unwrap_or(mime_fallback))
+                .clone(),
             filename: payload["filename"].as_str().map(str::to_string),
             size_bytes: None,
             url: None,
@@ -435,8 +436,16 @@ fn build_media_send_body(
 fn is_processable_message_type(msg_type: &str) -> bool {
     matches!(
         msg_type,
-        "text" | "image" | "video" | "audio" | "document" | "sticker"
-            | "interactive" | "button" | "contacts" | "location"
+        "text"
+            | "image"
+            | "video"
+            | "audio"
+            | "document"
+            | "sticker"
+            | "interactive"
+            | "button"
+            | "contacts"
+            | "location"
     )
 }
 
@@ -453,9 +462,7 @@ fn classify_whatsapp_send_error(code: u64, message: &str) -> String {
 }
 
 fn parse_unix_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    let secs = value
-        .parse::<i64>()
-        .ok()?;
+    let secs = value.parse::<i64>().ok()?;
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
 }
 
@@ -492,10 +499,10 @@ mod tests {
 
     fn fixture(name: &str) -> serde_json::Value {
         match name {
-            "media_webhook" => serde_json::from_str(include_str!(
-                "fixture_whatsapp_media_webhook.json"
-            ))
-            .expect("fixture should parse"),
+            "media_webhook" => {
+                serde_json::from_str(include_str!("fixture_whatsapp_media_webhook.json"))
+                    .expect("fixture should parse")
+            }
             _ => panic!("unknown fixture: {name}"),
         }
     }
@@ -670,7 +677,10 @@ mod tests {
             reply_to: None,
         });
 
-        assert_eq!(body["text"]["body"], serde_json::json!("*bold* and ~strike~"));
+        assert_eq!(
+            body["text"]["body"],
+            serde_json::json!("*bold* and ~strike~")
+        );
     }
 
     #[test]
@@ -712,8 +722,14 @@ mod tests {
 
         assert_eq!(body["type"], serde_json::json!("document"));
         assert_eq!(body["document"]["id"], serde_json::json!("media-1"));
-        assert_eq!(body["document"]["filename"], serde_json::json!("report.pdf"));
-        assert_eq!(body["document"]["caption"], serde_json::json!("See attached"));
+        assert_eq!(
+            body["document"]["filename"],
+            serde_json::json!("report.pdf")
+        );
+        assert_eq!(
+            body["document"]["caption"],
+            serde_json::json!("See attached")
+        );
         assert_eq!(body["context"]["message_id"], serde_json::json!("wamid.1"));
     }
 
@@ -751,16 +767,19 @@ mod tests {
             "12345".into(),
             SecretString::from("verify-token".to_string()),
             Some(SecretString::from("app-secret".to_string())),
-        ).expect("channel should build");
+        )
+        .expect("channel should build");
         let body = br#"{"entry":[{"id":"1"}]}"#;
 
-        let mut mac =
-            HmacSha256::new_from_slice(b"app-secret").expect("hmac should initialize");
+        let mut mac = HmacSha256::new_from_slice(b"app-secret").expect("hmac should initialize");
         mac.update(body);
         let bytes = mac.finalize().into_bytes();
         let signature = format!(
             "sha256={}",
-            bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
         );
 
         channel
@@ -775,7 +794,8 @@ mod tests {
             "12345".into(),
             SecretString::from("verify-token".to_string()),
             Some(SecretString::from("app-secret".to_string())),
-        ).expect("channel should build");
+        )
+        .expect("channel should build");
         let body = br#"{"entry":[{"id":"1"}]}"#;
 
         assert!(matches!(
@@ -792,14 +812,30 @@ mod tests {
 
     #[test]
     fn is_processable_message_type_accepts_content_types() {
-        for t in ["text", "image", "video", "audio", "document", "sticker", "interactive", "button"] {
+        for t in [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "document",
+            "sticker",
+            "interactive",
+            "button",
+        ] {
             assert!(is_processable_message_type(t), "should accept {t}");
         }
     }
 
     #[test]
     fn is_processable_message_type_rejects_non_content_types() {
-        for t in ["reaction", "status", "system", "ephemeral", "order", "unknown"] {
+        for t in [
+            "reaction",
+            "status",
+            "system",
+            "ephemeral",
+            "order",
+            "unknown",
+        ] {
             assert!(!is_processable_message_type(t), "should reject {t}");
         }
     }
@@ -846,9 +882,6 @@ mod tests {
 
     #[test]
     fn classify_whatsapp_send_error_passes_through_unknown_codes() {
-        assert_eq!(
-            classify_whatsapp_send_error(0, "some error"),
-            "some error"
-        );
+        assert_eq!(classify_whatsapp_send_error(0, "some error"), "some error");
     }
 }

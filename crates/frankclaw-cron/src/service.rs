@@ -11,17 +11,14 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use frankclaw_core::error::{Result, ConfigIo, ConfigValidation, AgentRuntime};
+use frankclaw_core::error::{AgentRuntime, ConfigIo, ConfigValidation, Result};
 use frankclaw_core::types::{AgentId, SessionKey};
 
 use crate::{RunLog, RunStatus};
 
 /// Async function that executes a cron job.
-pub type JobRunner = Arc<
-    dyn Fn(CronJob) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
-        + Send
-        + Sync,
->;
+pub type JobRunner =
+    Arc<dyn Fn(CronJob) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
 /// Default timeout for a single cron job execution.
 const JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
@@ -63,9 +60,12 @@ impl CronService {
 
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ConfigIo {
-                msg: format!("failed to create cron directory: {e}"),
-            }.build())?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ConfigIo {
+                    msg: format!("failed to create cron directory: {e}"),
+                }
+                .build()
+            })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -82,11 +82,11 @@ impl CronService {
     }
 
     /// Start the cron tick loop.
-    #[expect(clippy::unused_async, reason = "async kept for API consistency with other service lifecycle methods")]
-    pub async fn start(
-        &self,
-        job_runner: JobRunner,
-    ) {
+    #[expect(
+        clippy::unused_async,
+        reason = "async kept for API consistency with other service lifecycle methods"
+    )]
+    pub async fn start(&self, job_runner: JobRunner) {
         let jobs = self.jobs.clone();
         let path = self.path.clone();
         let cancel = self.cancel.clone();
@@ -200,19 +200,22 @@ impl CronService {
         job.schedule.parse::<Schedule>().map_err(|e| {
             ConfigValidation {
                 msg: format!("invalid cron schedule '{}': {e}", job.schedule),
-            }.build()
+            }
+            .build()
         })?;
         // Validate prompt is non-empty.
         if job.prompt.trim().is_empty() {
             return ConfigValidation {
                 msg: "cron job prompt must not be empty",
-            }.fail();
+            }
+            .fail();
         }
         // Validate job ID is non-empty.
         if job.id.trim().is_empty() {
             return ConfigValidation {
                 msg: "cron job id must not be empty",
-            }.fail();
+            }
+            .fail();
         }
 
         self.jobs.write().await.insert(job.id.clone(), job);
@@ -238,12 +241,18 @@ impl CronService {
         {
             let existing = self.jobs.read().await;
             for mut job in jobs {
-                if let Some(previous) = existing.get(&job.id).and_then(|stored| stored.last_run.clone()) {
+                if let Some(previous) = existing
+                    .get(&job.id)
+                    .and_then(|stored| stored.last_run.clone())
+                {
                     job.last_run = Some(previous);
                 }
-                job.schedule.parse::<Schedule>().map_err(|e| ConfigValidation {
-                    msg: format!("invalid cron schedule '{}': {e}", job.schedule),
-                }.build())?;
+                job.schedule.parse::<Schedule>().map_err(|e| {
+                    ConfigValidation {
+                        msg: format!("invalid cron schedule '{}': {e}", job.schedule),
+                    }
+                    .build()
+                })?;
                 next.insert(job.id.clone(), job);
             }
         }
@@ -258,17 +267,73 @@ impl CronService {
     }
 }
 
+#[async_trait::async_trait]
+impl frankclaw_core::tool_services::CronManager for CronService {
+    async fn list_jobs(&self) -> Vec<serde_json::Value> {
+        self.list()
+            .await
+            .into_iter()
+            .map(|job| {
+                serde_json::json!({
+                    "id": job.id,
+                    "schedule": job.schedule,
+                    "agent_id": job.agent_id,
+                    "session_key": job.session_key.as_str(),
+                    "prompt": job.prompt,
+                    "enabled": job.enabled,
+                    "created_at": job.created_at,
+                    "last_run": job.last_run,
+                })
+            })
+            .collect()
+    }
+
+    async fn add_job(
+        &self,
+        id: &str,
+        schedule: &str,
+        agent_id: &str,
+        session_key: &str,
+        prompt: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let job = CronJob {
+            id: id.to_string(),
+            schedule: schedule.to_string(),
+            agent_id: frankclaw_core::types::AgentId::new(agent_id),
+            session_key: frankclaw_core::types::SessionKey::from_raw(session_key),
+            prompt: prompt.to_string(),
+            enabled,
+            created_at: chrono::Utc::now(),
+            last_run: None,
+        };
+        self.add(job).await
+    }
+
+    async fn remove_job(&self, id: &str) -> Result<bool> {
+        let existed = self.list().await.iter().any(|j| j.id == id);
+        self.remove(id).await?;
+        Ok(existed)
+    }
+}
+
 fn load_jobs(path: &Path) -> Result<HashMap<String, CronJob>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
 
-    let content = std::fs::read_to_string(path).map_err(|e| ConfigIo {
-        msg: format!("failed to read cron file: {e}"),
-    }.build())?;
-    serde_json::from_str(&content).map_err(|e| ConfigIo {
-        msg: format!("failed to parse cron file: {e}"),
-    }.build())
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        ConfigIo {
+            msg: format!("failed to read cron file: {e}"),
+        }
+        .build()
+    })?;
+    serde_json::from_str(&content).map_err(|e| {
+        ConfigIo {
+            msg: format!("failed to parse cron file: {e}"),
+        }
+        .build()
+    })
 }
 
 async fn save_jobs(path: Option<&Path>, jobs: &Arc<RwLock<HashMap<String, CronJob>>>) {
@@ -293,10 +358,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_jobs_preserves_last_run_for_matching_ids() {
-        let temp = std::env::temp_dir().join(format!(
-            "frankclaw-cron-{}.json",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("frankclaw-cron-{}.json", uuid::Uuid::new_v4()));
         let service = CronService::open(&temp).expect("cron store should open");
         let job = CronJob {
             id: "job-1".into(),
@@ -350,7 +413,11 @@ mod tests {
             })
             .await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("prompt must not be empty"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("prompt must not be empty")
+        );
     }
 
     #[tokio::test]
@@ -369,7 +436,11 @@ mod tests {
             })
             .await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("id must not be empty"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("id must not be empty")
+        );
     }
 
     #[tokio::test]
@@ -388,6 +459,10 @@ mod tests {
             })
             .await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("invalid cron schedule"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("invalid cron schedule")
+        );
     }
 }

@@ -7,8 +7,8 @@
 //! Derived from IronClaw (MIT OR Apache-2.0, Copyright (c) 2024-2025 NEAR AI Inc.)
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -80,7 +80,10 @@ impl ResponseCache {
         let now = Instant::now();
         let req_no = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-        let mut guard = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if let Some(entry) = guard.get_mut(&key) {
             if now.duration_since(entry.created_at) < self.config.ttl {
@@ -112,7 +115,10 @@ impl ResponseCache {
         let key = cache_key(request);
         let now = Instant::now();
 
-        let mut guard = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Evict expired entries
         let ttl = self.config.ttl;
@@ -144,7 +150,10 @@ impl ResponseCache {
 
     /// Number of entries currently in the cache.
     pub fn len(&self) -> usize {
-        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// Whether the cache is empty.
@@ -162,7 +171,10 @@ impl ResponseCache {
 
     /// Clear all cached entries.
     pub fn clear(&self) {
-        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     fn maybe_log_stats(guard: &HashMap<String, CacheEntry>, req_no: u64, total_hits: u64) {
@@ -293,10 +305,7 @@ mod tests {
         simple_request: CompletionRequest,
         different_request: CompletionRequest,
     ) {
-        assert_ne!(
-            cache_key(&simple_request),
-            cache_key(&different_request)
-        );
+        assert_ne!(cache_key(&simple_request), cache_key(&different_request));
     }
 
     #[rstest]

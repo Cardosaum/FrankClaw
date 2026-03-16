@@ -19,12 +19,9 @@ use std::time::Duration;
 use frankclaw_core::model::{CompletionMessage, CompletionRequest, ModelProvider, StreamDelta};
 use frankclaw_core::types::Role;
 use frankclaw_models::{
-    AnthropicProvider, FailoverChain, OpenAiProvider,
-    ResponseCache, ResponseCacheConfig,
-    CostGuard, CostGuardConfig,
-    CircuitBreaker, CircuitBreakerConfig, CircuitState,
-    model_cost, default_cost,
-    classify_message, score_complexity, TaskComplexity,
+    AnthropicProvider, CircuitBreaker, CircuitBreakerConfig, CircuitState, CostGuard,
+    CostGuardConfig, FailoverChain, OpenAiProvider, ResponseCache, ResponseCacheConfig,
+    TaskComplexity, classify_message, default_cost, model_cost, score_complexity,
 };
 use secrecy::SecretString;
 
@@ -42,17 +39,25 @@ async fn circuit_breaker_closes_after_successes() {
     let base = openai_base_url();
     let model = openai_model();
 
-    let provider = Arc::new(OpenAiProvider::new("openai-cb", &base, key, vec![model.clone()])
-        .expect("failed to build provider"));
+    let provider = Arc::new(
+        OpenAiProvider::new("openai-cb", &base, key, vec![model.clone()])
+            .expect("failed to build provider"),
+    );
     let chain = FailoverChain::new(vec![provider], 30);
 
     // Make a successful call — circuit should stay closed
     let request = simple_request(&model, "Reply with the word 'yes'.");
     let response = chain.complete(request, None).await;
-    assert!(response.is_ok(), "completion should succeed through circuit breaker");
+    assert!(
+        response.is_ok(),
+        "completion should succeed through circuit breaker"
+    );
 
     let health = chain.health().await;
-    assert!(health[0].healthy, "provider should be healthy after success");
+    assert!(
+        health[0].healthy,
+        "provider should be healthy after success"
+    );
 }
 
 #[tokio::test]
@@ -83,26 +88,30 @@ async fn failover_chain_skips_bad_provider_uses_good() {
     let model = openai_model();
 
     // First provider: bad key (will fail)
-    let bad_provider = Arc::new(OpenAiProvider::new(
-        "bad-openai",
-        &base,
-        SecretString::from("sk-invalid-key".to_string()),
-        vec![model.clone()],
-    ).expect("failed to build provider"));
+    let bad_provider = Arc::new(
+        OpenAiProvider::new(
+            "bad-openai",
+            &base,
+            SecretString::from("sk-invalid-key".to_string()),
+            vec![model.clone()],
+        )
+        .expect("failed to build provider"),
+    );
 
     // Second provider: good key (should succeed)
-    let good_provider = Arc::new(OpenAiProvider::new(
-        "good-openai",
-        &base,
-        oai_key,
-        vec![model.clone()],
-    ).expect("failed to build provider"));
+    let good_provider = Arc::new(
+        OpenAiProvider::new("good-openai", &base, oai_key, vec![model.clone()])
+            .expect("failed to build provider"),
+    );
 
     let chain = FailoverChain::new(vec![bad_provider, good_provider], 30);
 
     let request = simple_request(&model, "Reply with 'failover works'.");
     let response = chain.complete(request, None).await;
-    assert!(response.is_ok(), "failover should succeed via second provider");
+    assert!(
+        response.is_ok(),
+        "failover should succeed via second provider"
+    );
 
     let content = response.unwrap().content.to_lowercase();
     assert!(
@@ -132,7 +141,10 @@ async fn cache_returns_identical_response_on_second_call() {
     let request = simple_request(&model, "What is 2+2? Reply with just the number.");
 
     // First call — cache miss, hits API
-    assert!(cache.lookup(&request).is_none(), "cache should miss on first call");
+    assert!(
+        cache.lookup(&request).is_none(),
+        "cache should miss on first call"
+    );
 
     let response = provider
         .complete(request.clone(), None)
@@ -142,8 +154,13 @@ async fn cache_returns_identical_response_on_second_call() {
     cache.store(&request, &response);
 
     // Second call — cache hit
-    let cached = cache.lookup(&request).expect("cache should hit on second call");
-    assert_eq!(cached.content, response.content, "cached content should match");
+    let cached = cache
+        .lookup(&request)
+        .expect("cache should hit on second call");
+    assert_eq!(
+        cached.content, response.content,
+        "cached content should match"
+    );
     assert_eq!(
         cached.usage.input_tokens, response.usage.input_tokens,
         "cached usage should match"
@@ -170,7 +187,10 @@ async fn cache_miss_for_different_prompts() {
 
     // Different prompt — should miss
     let request2 = simple_request(&model, "What is 3+3?");
-    assert!(cache.lookup(&request2).is_none(), "different prompt should miss cache");
+    assert!(
+        cache.lookup(&request2).is_none(),
+        "different prompt should miss cache"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +212,10 @@ async fn cost_guard_tracks_real_api_usage() {
     });
 
     // Verify we're allowed
-    assert!(guard.check_allowed().await.is_ok(), "should be allowed before any calls");
+    assert!(
+        guard.check_allowed().await.is_ok(),
+        "should be allowed before any calls"
+    );
 
     let request = simple_request(&model, "Reply with 'ok'.");
     let response = provider
@@ -216,7 +239,10 @@ async fn cost_guard_tracks_real_api_usage() {
     );
 
     // Should still be allowed (well under budget)
-    assert!(guard.check_allowed().await.is_ok(), "should be allowed after one call");
+    assert!(
+        guard.check_allowed().await.is_ok(),
+        "should be allowed after one call"
+    );
 }
 
 #[tokio::test]
@@ -229,7 +255,10 @@ async fn cost_guard_blocks_when_budget_exceeded() {
 
     // Record a big call to exceed the budget
     let cost = guard.record_llm_call("gpt-4o", 10_000, 10_000).await;
-    assert!(cost > 0.01, "gpt-4o 10k tokens should cost more than 1 cent");
+    assert!(
+        cost > 0.01,
+        "gpt-4o 10k tokens should cost more than 1 cent"
+    );
 
     let result = guard.check_allowed().await;
     assert!(result.is_err(), "should be blocked after exceeding budget");
@@ -279,7 +308,10 @@ async fn smart_routing_classifies_complex_task() {
          algorithm in Rust vs Go. Write code examples for both, reason through the \
          trade-offs, and explain exactly how leader election handles split-brain scenarios.",
     );
-    eprintln!("Complex task: total={}, tier={:?}, hints={:?}", breakdown.total, breakdown.tier, breakdown.hints);
+    eprintln!(
+        "Complex task: total={}, tier={:?}, hints={:?}",
+        breakdown.total, breakdown.tier, breakdown.hints
+    );
     // With reasoning words + multi-step + code + precision triggers, this should
     // score above the Simple threshold
     let complexity: TaskComplexity = breakdown.tier.into();
@@ -301,7 +333,10 @@ async fn smart_routing_routes_code_generation_higher() {
          tests, error handling, and explain the trade-offs between different \
          concurrency strategies. Compare your approach with alternatives.",
     );
-    eprintln!("Code gen: total={}, tier={:?}, hints={:?}", breakdown.total, breakdown.tier, breakdown.hints);
+    eprintln!(
+        "Code gen: total={}, tier={:?}, hints={:?}",
+        breakdown.total, breakdown.tier, breakdown.hints
+    );
     let complexity: TaskComplexity = breakdown.tier.into();
     assert_ne!(
         complexity,
@@ -342,7 +377,10 @@ async fn cost_tables_have_known_models() {
     let (input, output) = gpt4o.unwrap();
     assert!(input > 0.0, "gpt-4o input cost should be positive");
     assert!(output > 0.0, "gpt-4o output cost should be positive");
-    assert!(output > input, "output tokens should cost more than input tokens");
+    assert!(
+        output > input,
+        "output tokens should cost more than input tokens"
+    );
 
     let haiku = model_cost("claude-haiku-4-5-20251001");
     assert!(haiku.is_some(), "claude-haiku should have cost data");
@@ -353,7 +391,10 @@ async fn cost_tables_have_known_models() {
 
     // Default cost should be reasonable
     let (def_in, def_out) = default_cost();
-    assert!(def_in > 0.0 && def_out > 0.0, "default costs should be positive");
+    assert!(
+        def_in > 0.0 && def_out > 0.0,
+        "default costs should be positive"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +414,10 @@ async fn anthropic_streaming_with_system_prompt() {
 
     let request = CompletionRequest {
         model_id: "claude-haiku-4-5-20251001".into(),
-        messages: vec![CompletionMessage::text(Role::User, "What color is the sky?")],
+        messages: vec![CompletionMessage::text(
+            Role::User,
+            "What color is the sky?",
+        )],
         max_tokens: Some(30),
         temperature: Some(0.0),
         system: Some("You must always reply in exactly one word.".into()),
@@ -407,7 +451,11 @@ async fn anthropic_streaming_with_system_prompt() {
     }
     assert!(!text_chunks.is_empty(), "should receive text deltas");
     assert!(got_done, "should receive done signal");
-    eprintln!("Streamed {} chunks, response: {}", text_chunks.len(), response.content);
+    eprintln!(
+        "Streamed {} chunks, response: {}",
+        text_chunks.len(),
+        response.content
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -423,22 +471,19 @@ async fn end_to_end_failover_with_cache_and_cost_tracking() {
     if let Some(key) = openai_key() {
         let m = openai_model();
         model = m.clone();
-        providers.push(Arc::new(OpenAiProvider::new(
-            "openai",
-            &openai_base_url(),
-            key,
-            vec![m],
-        ).expect("failed to build provider")));
+        providers.push(Arc::new(
+            OpenAiProvider::new("openai", &openai_base_url(), key, vec![m])
+                .expect("failed to build provider"),
+        ));
     }
     if let Some(key) = anthropic_key() {
         if model.is_empty() {
             model = "claude-haiku-4-5-20251001".into();
         }
-        providers.push(Arc::new(AnthropicProvider::new(
-            "anthropic",
-            key,
-            vec!["claude-haiku-4-5-20251001".into()],
-        ).expect("failed to build provider")));
+        providers.push(Arc::new(
+            AnthropicProvider::new("anthropic", key, vec!["claude-haiku-4-5-20251001".into()])
+                .expect("failed to build provider"),
+        ));
     }
 
     assert!(!providers.is_empty(), "At least one API key must be set");
@@ -489,7 +534,10 @@ async fn end_to_end_failover_with_cache_and_cost_tracking() {
     assert_eq!(cached.content, response.content);
 
     // 7. Still within budget
-    guard.check_allowed().await.expect("should still be within budget");
+    guard
+        .check_allowed()
+        .await
+        .expect("should still be within budget");
 
     // 8. Health check
     let health = chain.health().await;
@@ -510,8 +558,9 @@ async fn both_providers_agree_on_simple_math() {
 
     if let Some(key) = openai_key() {
         let model = openai_model();
-        let provider = OpenAiProvider::new("openai-math", &openai_base_url(), key, vec![model.clone()])
-            .expect("failed to build provider");
+        let provider =
+            OpenAiProvider::new("openai-math", &openai_base_url(), key, vec![model.clone()])
+                .expect("failed to build provider");
         let request = simple_request(&model, "What is 7*8? Reply with just the number.");
         if let Ok(response) = provider.complete(request, None).await {
             results.push(("openai".into(), response.content.clone()));

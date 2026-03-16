@@ -318,7 +318,7 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ### Medium
 
-- [ ] **CDP WebSocket reconnection**: Deferred — dead sessions are auto-recovered on next `browser.open` (see Critical). Mid-operation reconnection adds complexity with limited benefit since tools are short-lived operations.
+- [ ] **CDP WebSocket reconnection**: Deferred — dead sessions are auto-recovered on next `browser_open` (see Critical). Mid-operation reconnection adds complexity with limited benefit since tools are short-lived operations.
 - [ ] **Error message rewriting**: Deferred — CDP errors are already surfaced with context (e.g., "browser command 'X' failed: Y", "browser command 'X' timed out after 15s"). Further rewriting is polish.
 - [ ] **Frame selector caching**: Deferred — optimization, not correctness.
 - [x] **Concurrent browser session limit**: Added `MAX_BROWSER_SESSIONS = 10` cap. New session creation fails with descriptive error when at capacity. Enforced in `BrowserClient::open()` before calling `create_target()`.

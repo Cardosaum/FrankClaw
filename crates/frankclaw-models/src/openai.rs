@@ -5,7 +5,10 @@ use secrecy::{ExposeSecret, SecretString};
 use tracing::debug;
 
 use frankclaw_core::error::{Internal, Provider, Result};
-use frankclaw_core::model::{ModelProvider, CompletionRequest, StreamDelta, CompletionResponse, ModelDef, ModelApi, InputModality, ModelCost, ModelCompat};
+use frankclaw_core::model::{
+    CompletionRequest, CompletionResponse, InputModality, ModelApi, ModelCompat, ModelCost,
+    ModelDef, ModelProvider, StreamDelta,
+};
 
 use crate::openai_compat::{self, StreamState};
 use crate::sse::SseDecoder;
@@ -31,9 +34,12 @@ impl OpenAiProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .map_err(|e| Internal {
-                msg: format!("failed to build HTTP client: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Internal {
+                    msg: format!("failed to build HTTP client: {e}"),
+                }
+                .build()
+            })?;
 
         Ok(Self {
             id: id.into(),
@@ -70,13 +76,19 @@ impl ModelProvider for OpenAiProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
             .json(&body)
             .send()
             .await
-            .map_err(|e| Provider {
-                msg: format!("request failed: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Provider {
+                    msg: format!("request failed: {e}"),
+                }
+                .build()
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -89,9 +101,12 @@ impl ModelProvider for OpenAiProvider {
             let mut state = StreamState::default();
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| Provider {
-                    msg: format!("failed to read streaming response: {e}"),
-                }.build())?;
+                let chunk = chunk.map_err(|e| {
+                    Provider {
+                        msg: format!("failed to read streaming response: {e}"),
+                    }
+                    .build()
+                })?;
                 for event in decoder.push(chunk.as_ref()) {
                     for delta in openai_compat::apply_stream_event(&mut state, &event.data)? {
                         let _ = stream_tx.send(delta).await;
@@ -104,21 +119,28 @@ impl ModelProvider for OpenAiProvider {
                     break;
                 }
             }
-            if !state.done && let Some(event) = decoder.finish() {
+            if !state.done
+                && let Some(event) = decoder.finish()
+            {
                 for delta in openai_compat::apply_stream_event(&mut state, &event.data)? {
                     let _ = stream_tx.send(delta).await;
                 }
             }
             let response = state.finish()?;
-            let _ = stream_tx.send(StreamDelta::Done {
-                usage: Some(response.usage.clone()),
-            }).await;
+            let _ = stream_tx
+                .send(StreamDelta::Done {
+                    usage: Some(response.usage.clone()),
+                })
+                .await;
             return Ok(response);
         }
 
-        let data: serde_json::Value = response.json().await.map_err(|e| Provider {
-            msg: format!("invalid response: {e}"),
-        }.build())?;
+        let data: serde_json::Value = response.json().await.map_err(|e| {
+            Provider {
+                msg: format!("invalid response: {e}"),
+            }
+            .build()
+        })?;
         openai_compat::parse_completion_response(&data)
     }
 
@@ -149,7 +171,10 @@ impl ModelProvider for OpenAiProvider {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         self.client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
             .send()
             .await
             .is_ok_and(|r| r.status().is_success())

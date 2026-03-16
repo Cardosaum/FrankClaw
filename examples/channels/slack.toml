@@ -1,0 +1,8 @@
+[channels.slack]
+enabled = true
+require_mention_for_groups = true
+groups = ["*"]
+
+[[channels.slack.accounts]]
+app_token_env = "SLACK_APP_TOKEN"
+bot_token_env = "SLACK_BOT_TOKEN"

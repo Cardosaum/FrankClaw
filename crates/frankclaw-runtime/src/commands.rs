@@ -173,14 +173,14 @@ pub fn detect_command(message: &str) -> Option<ParsedCommand> {
     let cmd_clean = cmd_lower.split('@').next().unwrap_or(&cmd_lower);
 
     // Check against registered commands and aliases.
-    let is_known = COMMANDS.iter().any(|def| {
-        def.name == cmd_clean || def.aliases.contains(&cmd_clean)
-    });
+    let is_known = COMMANDS
+        .iter()
+        .any(|def| def.name == cmd_clean || def.aliases.contains(&cmd_clean));
 
     is_known.then(|| ParsedCommand {
-            name: resolve_alias(cmd_clean).to_string(),
-            args: args.to_string(),
-        })
+        name: resolve_alias(cmd_clean).to_string(),
+        args: args.to_string(),
+    })
 }
 
 /// Resolve command aliases to the canonical command name.
@@ -220,9 +220,7 @@ pub fn extract_directives(message: &str) -> InlineDirectives {
 
             // Extract the directive word.
             let rest = &message[directive_start_byte + 1..];
-            let word_end = rest
-                .find(|c: char| c.is_whitespace())
-                .unwrap_or(rest.len());
+            let word_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
             let word = &rest[..word_end];
             let word_lower = word.to_ascii_lowercase();
 
@@ -236,17 +234,18 @@ pub fn extract_directives(message: &str) -> InlineDirectives {
                         .unwrap_or(arg_rest.len());
                     let level = &arg_rest[..arg_end];
 
-                    if matches!(
-                        level,
-                        "off" | "low" | "medium" | "high" | "minimal"
-                    ) {
+                    if matches!(level, "off" | "low" | "medium" | "high" | "minimal") {
                         directives.think = Some(level.to_string());
                         // Push text before this directive.
                         cleaned_parts.push(&message[last_end..directive_start_byte]);
                         // Skip past directive + argument.
-                        let total_consumed = (arg_rest.as_ptr() as usize - message.as_ptr() as usize) + arg_end;
+                        let total_consumed =
+                            (arg_rest.as_ptr() as usize - message.as_ptr() as usize) + arg_end;
                         last_end = total_consumed;
-                        i += word.len() + 1 + level.len() + (arg_start - directive_start_byte - 1 - word_end);
+                        i += word.len()
+                            + 1
+                            + level.len()
+                            + (arg_start - directive_start_byte - 1 - word_end);
                         // Advance past the whole directive.
                         while i < len && !chars[i].is_whitespace() {
                             i += 1;
@@ -265,7 +264,8 @@ pub fn extract_directives(message: &str) -> InlineDirectives {
                     if !model_id.is_empty() {
                         directives.model = Some(model_id.to_string());
                         cleaned_parts.push(&message[last_end..directive_start_byte]);
-                        let total_consumed = (arg_rest.as_ptr() as usize - message.as_ptr() as usize) + arg_end;
+                        let total_consumed =
+                            (arg_rest.as_ptr() as usize - message.as_ptr() as usize) + arg_end;
                         last_end = total_consumed;
                         while i < len && !chars[i].is_whitespace() {
                             i += 1;
@@ -318,7 +318,10 @@ pub fn help_text() -> String {
                             .join(", ")
                     )
                 };
-                parts.push(format!("  `/{}`{} — {}", cmd.name, aliases, cmd.description));
+                parts.push(format!(
+                    "  `/{}`{} — {}",
+                    cmd.name, aliases, cmd.description
+                ));
             }
             parts.push(String::new());
         }

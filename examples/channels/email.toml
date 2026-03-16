@@ -1,0 +1,15 @@
+[channels.email]
+enabled = true
+
+[[channels.email.accounts]]
+imap_server = "imap.gmail.com"
+imap_port = 993
+imap_user = "you@gmail.com"
+imap_password_env = "EMAIL_PASSWORD"
+smtp_server = "smtp.gmail.com"
+smtp_port = 587
+smtp_user = "you@gmail.com"
+smtp_password_env = "EMAIL_PASSWORD"
+smtp_from = "you@gmail.com"
+poll_interval_secs = 30
+allowed_senders = []

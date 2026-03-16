@@ -77,9 +77,7 @@ pub enum SpawnResult {
         child_session_key: SessionKey,
     },
     /// Spawn was rejected (depth limit, concurrency limit, etc.).
-    Rejected {
-        reason: String,
-    },
+    Rejected { reason: String },
 }
 
 /// Lifecycle state of a subagent run.
@@ -203,10 +201,8 @@ impl SubagentRegistry {
         }
 
         let run_id = RunId::new();
-        let child_session_key = SessionKey::from_raw(format!(
-            "subagent:{}:{}",
-            request.agent_id, run_id
-        ));
+        let child_session_key =
+            SessionKey::from_raw(format!("subagent:{}:{}", request.agent_id, run_id));
 
         let record = RunRecord {
             run_id: run_id.clone(),
@@ -238,9 +234,12 @@ impl SubagentRegistry {
     /// Mark a run as started (transitioned from Pending to Running).
     pub async fn mark_running(&self, run_id: &RunId) -> Result<()> {
         let mut runs = self.runs.lock().await;
-        let record = runs.get_mut(run_id).ok_or_else(|| Internal {
-            msg: format!("subagent run not found: {run_id}"),
-        }.build())?;
+        let record = runs.get_mut(run_id).ok_or_else(|| {
+            Internal {
+                msg: format!("subagent run not found: {run_id}"),
+            }
+            .build()
+        })?;
         record.state = RunState::Running;
         record.started_at = Some(Utc::now());
         Ok(())
@@ -250,11 +249,12 @@ impl SubagentRegistry {
     pub async fn complete(&self, notice: CompletionNotice) -> Result<()> {
         {
             let mut runs = self.runs.lock().await;
-            let record = runs
-                .get_mut(&notice.run_id)
-                .ok_or_else(|| Internal {
+            let record = runs.get_mut(&notice.run_id).ok_or_else(|| {
+                Internal {
                     msg: format!("subagent run not found: {}", notice.run_id),
-                }.build())?;
+                }
+                .build()
+            })?;
             record.state = notice.state.clone();
             record.ended_at = Some(Utc::now());
             record.result_text.clone_from(&notice.result_text);
@@ -329,9 +329,7 @@ impl SubagentRegistry {
                 record.state,
                 RunState::Completed | RunState::Failed | RunState::TimedOut | RunState::Killed
             ) {
-                record
-                    .ended_at
-                    .is_none_or(|t| t > cutoff)
+                record.ended_at.is_none_or(|t| t > cutoff)
             } else {
                 true // Keep active runs.
             }
@@ -360,27 +358,36 @@ pub fn build_subagent_context(record: &RunRecord, max_depth: u32) -> String {
 
     let depth_str = record.depth.to_string();
     let max_depth_str = max_depth.to_string();
-    parts.push(prompts::render(prompts::SUBAGENT_IDENTITY, &[
-        ("depth", &depth_str),
-        ("max_depth", &max_depth_str),
-    ]));
+    parts.push(prompts::render(
+        prompts::SUBAGENT_IDENTITY,
+        &[("depth", &depth_str), ("max_depth", &max_depth_str)],
+    ));
 
     // Truncate and sanitize task/label to prevent memory abuse and prompt
     // injection — these could originate from LLM-generated spawn requests.
     if let Some(ref label) = record.label {
         let safe_label = sanitize::sanitize_for_prompt(label);
-        let safe_label = if safe_label.len() > MAX_TASK_LEN { &safe_label[..MAX_TASK_LEN] } else { &safe_label };
+        let safe_label = if safe_label.len() > MAX_TASK_LEN {
+            &safe_label[..MAX_TASK_LEN]
+        } else {
+            &safe_label
+        };
         parts.push(format!("Task label: {safe_label}"));
     }
 
     let safe_task = sanitize::sanitize_for_prompt(&record.task);
-    let safe_task = if safe_task.len() > MAX_TASK_LEN { &safe_task[..MAX_TASK_LEN] } else { &safe_task };
+    let safe_task = if safe_task.len() > MAX_TASK_LEN {
+        &safe_task[..MAX_TASK_LEN]
+    } else {
+        &safe_task
+    };
     parts.push(format!("Task: {safe_task}"));
 
     let timeout_str = record.timeout_secs.to_string();
-    parts.push(prompts::render(prompts::SUBAGENT_TIMEOUT, &[
-        ("timeout_secs", &timeout_str),
-    ]));
+    parts.push(prompts::render(
+        prompts::SUBAGENT_TIMEOUT,
+        &[("timeout_secs", &timeout_str)],
+    ));
 
     if record.depth < max_depth {
         parts.push(prompts::SUBAGENT_CAN_SPAWN.trim().to_string());
@@ -412,7 +419,10 @@ mod tests {
         let registry = SubagentRegistry::new();
         let result = registry.register_spawn(&spawn_request(0)).await;
         match result {
-            SpawnResult::Accepted { run_id, child_session_key } => {
+            SpawnResult::Accepted {
+                run_id,
+                child_session_key,
+            } => {
                 assert!(!run_id.0.is_empty());
                 assert!(child_session_key.as_str().starts_with("subagent:"));
             }
@@ -570,12 +580,7 @@ mod tests {
         };
 
         assert_eq!(registry.depth_of(&child_session_key).await, 1);
-        assert_eq!(
-            registry
-                .depth_of(&SessionKey::from_raw("unknown"))
-                .await,
-            0
-        );
+        assert_eq!(registry.depth_of(&SessionKey::from_raw("unknown")).await, 0);
     }
 
     #[tokio::test]

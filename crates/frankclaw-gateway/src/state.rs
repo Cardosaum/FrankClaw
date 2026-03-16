@@ -4,13 +4,14 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 
-use frankclaw_channels::{web::WebChannel, whatsapp::WhatsAppChannel, ChannelSet};
+use frankclaw_channels::{ChannelSet, web::WebChannel, whatsapp::WhatsAppChannel};
 use frankclaw_core::channel::ChannelPlugin;
 use frankclaw_core::config::FrankClawConfig;
 use frankclaw_core::types::ChannelId;
 use frankclaw_core::types::ConnId;
-use frankclaw_runtime::Runtime;
+use frankclaw_cron::CronService;
 use frankclaw_media::MediaStore;
+use frankclaw_runtime::Runtime;
 use frankclaw_sessions::SqliteSessionStore;
 
 use crate::broadcast::BroadcastHandle;
@@ -46,6 +47,9 @@ pub struct GatewayState {
     /// Local media store for authenticated upload/download flows.
     pub media: Arc<MediaStore>,
 
+    /// Cron job scheduler service.
+    pub cron: Option<Arc<CronService>>,
+
     /// Monotonic connection counter.
     pub next_conn_id: std::sync::atomic::AtomicU64,
 
@@ -54,6 +58,15 @@ pub struct GatewayState {
 
     /// Signals graceful shutdown to all tasks.
     pub shutdown: CancellationToken,
+
+    /// Active chat runs keyed by session key, used for chat.cancel.
+    pub active_runs: DashMap<String, CancellationToken>,
+
+    /// Pending tool approval decisions keyed by approval_id.
+    pub pending_approvals: DashMap<
+        String,
+        tokio::sync::oneshot::Sender<frankclaw_core::tool_approval::ApprovalDecision>,
+    >,
 }
 
 /// Per-connection state.
@@ -77,6 +90,20 @@ impl GatewayState {
         pairing: Arc<PairingStore>,
         media: Arc<MediaStore>,
     ) -> Arc<Self> {
+        Self::with_cron(config, sessions, runtime, channels, pairing, media, None)
+    }
+
+    pub fn with_cron(
+        config: FrankClawConfig,
+        sessions: Arc<SqliteSessionStore>,
+        runtime: Arc<Runtime>,
+        channels: Arc<ChannelSet>,
+        pairing: Arc<PairingStore>,
+        media: Arc<MediaStore>,
+        cron: Option<Arc<CronService>>,
+    ) -> Arc<Self> {
+        let broadcast = BroadcastHandle::new(256);
+        let canvas = CanvasStore::with_broadcast(broadcast.sender());
         Arc::new(Self {
             config: ArcSwap::new(Arc::new(config)),
             sessions,
@@ -84,11 +111,14 @@ impl GatewayState {
             runtime,
             channels,
             pairing,
-            canvas: CanvasStore::new(),
             media,
+            cron,
             next_conn_id: std::sync::atomic::AtomicU64::new(1),
-            broadcast: BroadcastHandle::new(256),
+            broadcast,
+            canvas,
             shutdown: CancellationToken::new(),
+            active_runs: DashMap::new(),
+            pending_approvals: DashMap::new(),
         })
     }
 

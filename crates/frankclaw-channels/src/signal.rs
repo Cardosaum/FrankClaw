@@ -4,14 +4,17 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use tracing::{info, warn};
 
-use frankclaw_core::channel::{ChannelPlugin, InboundMessage, ChannelCapabilities, HealthStatus, OutboundMessage, SendResult, InboundAttachment};
-use frankclaw_core::error::{Result, Channel};
+use frankclaw_core::channel::{
+    ChannelCapabilities, ChannelPlugin, HealthStatus, InboundAttachment, InboundMessage,
+    OutboundMessage, SendResult,
+};
+use frankclaw_core::error::{Channel, Result};
 use frankclaw_core::types::ChannelId;
 
 use crate::inbound_media::infer_inbound_mime_type;
 use crate::media_text::text_quote_or_attachment_placeholder;
 use crate::outbound_media::attachment_bytes;
-use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
+use crate::outbound_text::{OutboundTextFlavor, normalize_outbound_text};
 
 const SIGNAL_API_PATH_CHECK: &str = "/api/v1/check";
 const SIGNAL_API_PATH_EVENTS: &str = "/api/v1/events";
@@ -25,13 +28,18 @@ pub struct SignalChannel {
 }
 
 impl SignalChannel {
-    #[expect(clippy::needless_pass_by_value, reason = "owned String consumed into struct fields")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "owned String consumed into struct fields"
+    )]
     pub fn new(base_url: String, account: Option<String>) -> Result<Self> {
         let client = crate::build_channel_http_client()?;
 
         Ok(Self {
             base_url: normalize_base_url(&base_url),
-            account: account.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()),
+            account: account
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             client,
         })
     }
@@ -41,7 +49,8 @@ impl SignalChannel {
     }
 
     fn events_url(&self) -> Result<url::Url> {
-        let mut url = url::Url::parse(&self.endpoint(SIGNAL_API_PATH_EVENTS)).map_err(|e| self.channel_err(format!("invalid signal events url: {e}")))?;
+        let mut url = url::Url::parse(&self.endpoint(SIGNAL_API_PATH_EVENTS))
+            .map_err(|e| self.channel_err(format!("invalid signal events url: {e}")))?;
         if let Some(account) = self.account.as_deref() {
             url.query_pairs_mut().append_pair("account", account);
         }
@@ -61,27 +70,35 @@ impl SignalChannel {
             .map_err(|e| self.channel_err(format!("signal event stream connect failed: {e}")))?;
 
         if !resp.status().is_success() {
-            return Err(self.channel_err(format!("signal event stream returned HTTP {}", resp.status())));
+            return Err(self.channel_err(format!(
+                "signal event stream returned HTTP {}",
+                resp.status()
+            )));
         }
 
         let mut parser = SignalSseParser::default();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| self.channel_err(format!("signal event stream read failed: {e}")))?;
-            let text = std::str::from_utf8(&chunk).map_err(|e| self.channel_err(format!("signal event stream sent invalid UTF-8: {e}")))?;
+            let chunk = chunk
+                .map_err(|e| self.channel_err(format!("signal event stream read failed: {e}")))?;
+            let text = std::str::from_utf8(&chunk).map_err(|e| {
+                self.channel_err(format!("signal event stream sent invalid UTF-8: {e}"))
+            })?;
             for event in parser.push(text) {
                 if let Some(inbound) = parse_receive_event(&event, self.account.as_deref())
-                    && inbound_tx.send(inbound).await.is_err() {
-                        return Ok(());
-                    }
+                    && inbound_tx.send(inbound).await.is_err()
+                {
+                    return Ok(());
+                }
             }
         }
 
         if let Some(event) = parser.finish()
             && let Some(inbound) = parse_receive_event(&event, self.account.as_deref())
-                && inbound_tx.send(inbound).await.is_err() {
-                    return Ok(());
-                }
+            && inbound_tx.send(inbound).await.is_err()
+        {
+            return Ok(());
+        }
 
         Err(self.channel_err("signal event stream closed".into()))
     }
@@ -111,10 +128,7 @@ impl ChannelPlugin for SignalChannel {
         "Signal"
     }
 
-    async fn start(
-        &self,
-        inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>,
-    ) -> Result<()> {
+    async fn start(&self, inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>) -> Result<()> {
         info!("signal channel starting (SSE mode)");
         loop {
             match self.run_event_stream(inbound_tx.clone()).await {
@@ -133,7 +147,12 @@ impl ChannelPlugin for SignalChannel {
     }
 
     async fn health(&self) -> HealthStatus {
-        match self.client.get(self.endpoint(SIGNAL_API_PATH_CHECK)).send().await {
+        match self
+            .client
+            .get(self.endpoint(SIGNAL_API_PATH_CHECK))
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => HealthStatus::Connected,
             Ok(resp) => HealthStatus::Degraded {
                 reason: format!("HTTP {}", resp.status()),
@@ -146,9 +165,15 @@ impl ChannelPlugin for SignalChannel {
 
     async fn send(&self, msg: OutboundMessage) -> Result<SendResult> {
         let (endpoint, body) = if msg.attachments.is_empty() {
-            (self.endpoint(SIGNAL_API_PATH_RPC), build_send_request(&msg, self.account.as_deref()))
+            (
+                self.endpoint(SIGNAL_API_PATH_RPC),
+                build_send_request(&msg, self.account.as_deref()),
+            )
         } else {
-            (self.endpoint(SIGNAL_API_PATH_SEND), build_send_attachment_request(&msg, self.account.as_deref())?)
+            (
+                self.endpoint(SIGNAL_API_PATH_SEND),
+                build_send_attachment_request(&msg, self.account.as_deref())?,
+            )
         };
         let resp = self
             .client
@@ -176,11 +201,16 @@ impl ChannelPlugin for SignalChannel {
             });
         }
 
-        let rpc: SignalRpcResponse = resp.json().await.map_err(|e| self.channel_err(format!("invalid signal send response: {e}")))?;
+        let rpc: SignalRpcResponse = resp
+            .json()
+            .await
+            .map_err(|e| self.channel_err(format!("invalid signal send response: {e}")))?;
 
         if let Some(error) = rpc.error {
             return Ok(SendResult::Failed {
-                reason: error.message.unwrap_or_else(|| format!("Signal RPC error {}", error.code.unwrap_or_default())),
+                reason: error.message.unwrap_or_else(|| {
+                    format!("Signal RPC error {}", error.code.unwrap_or_default())
+                }),
             });
         }
 
@@ -375,12 +405,10 @@ fn parse_receive_event(
         return None;
     }
 
-    let data_message = envelope
-        .data_message
-        .or_else(|| {
-            let edit = envelope.edit_message?;
-            edit.data_message
-        })?;
+    let data_message = envelope.data_message.or_else(|| {
+        let edit = envelope.edit_message?;
+        edit.data_message
+    })?;
     if data_message.reaction.is_some()
         && data_message
             .message
@@ -414,7 +442,10 @@ fn parse_receive_event(
         .map(|text| replace_mention_orc(text, data_message.mentions.as_deref()));
     let text = text_quote_or_attachment_placeholder(
         message_text.as_deref(),
-        data_message.quote.as_ref().and_then(|quote| quote.text.as_deref()),
+        data_message
+            .quote
+            .as_ref()
+            .and_then(|quote| quote.text.as_deref()),
         &attachments,
     )?;
     let timestamp = envelope
@@ -458,7 +489,10 @@ fn build_inbound_attachments(
         .collect()
 }
 
-fn detect_group_mention(mentions: Option<&[SignalMention]>, configured_account: Option<&str>) -> bool {
+fn detect_group_mention(
+    mentions: Option<&[SignalMention]>,
+    configured_account: Option<&str>,
+) -> bool {
     let Some(mentions) = mentions else {
         return false;
     };
@@ -528,18 +562,20 @@ fn build_send_attachment_request(
     msg: &OutboundMessage,
     account: Option<&str>,
 ) -> Result<serde_json::Value> {
-    let number = account.ok_or_else(|| Channel {
-        channel: ChannelId::new("signal"),
-        msg: "signal attachment sends require a configured account number",
-    }.build())?;
+    let number = account.ok_or_else(|| {
+        Channel {
+            channel: ChannelId::new("signal"),
+            msg: "signal attachment sends require a configured account number",
+        }
+        .build()
+    })?;
     let text = normalize_outbound_text(&msg.text, OutboundTextFlavor::Plain);
     let attachments = msg
         .attachments
         .iter()
         .map(|attachment| {
-            attachment_bytes(&ChannelId::new("signal"), attachment).map(|bytes| {
-                base64::engine::general_purpose::STANDARD.encode(bytes)
-            })
+            attachment_bytes(&ChannelId::new("signal"), attachment)
+                .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -560,7 +596,8 @@ fn build_send_attachment_request(
             return Channel {
                 channel: ChannelId::new("signal"),
                 msg: format!("signal attachment sends do not support username target '{username}'"),
-            }.fail();
+            }
+            .fail();
         }
     }
 
@@ -692,10 +729,10 @@ mod tests {
 
     fn fixture(name: &str) -> serde_json::Value {
         match name {
-            "receive_attachment" => serde_json::from_str(include_str!(
-                "fixture_signal_receive_attachment.json"
-            ))
-            .expect("fixture should parse"),
+            "receive_attachment" => {
+                serde_json::from_str(include_str!("fixture_signal_receive_attachment.json"))
+                    .expect("fixture should parse")
+            }
             _ => panic!("unknown fixture: {name}"),
         }
     }
@@ -990,13 +1027,13 @@ mod tests {
     fn normalize_signal_identity_handles_phone_and_uuid() {
         // Phone numbers get E.164 normalization
         assert_eq!(normalize_signal_identity("+1 555 123 4567"), "+15551234567");
-        assert_eq!(normalize_signal_identity("signal:+15551234567"), "+15551234567");
+        assert_eq!(
+            normalize_signal_identity("signal:+15551234567"),
+            "+15551234567"
+        );
 
         // UUIDs get lowercased
-        assert_eq!(
-            normalize_signal_identity("ABC-DEF-123"),
-            "abc-def-123"
-        );
+        assert_eq!(normalize_signal_identity("ABC-DEF-123"), "abc-def-123");
     }
 
     #[test]
@@ -1020,11 +1057,7 @@ mod tests {
             Some("+15551234567"),
         ));
         // No configured account — can't detect self
-        assert!(!is_self_message(
-            Some("+15551234567"),
-            None,
-            None,
-        ));
+        assert!(!is_self_message(Some("+15551234567"), None, None,));
     }
 
     // --- Mention ORC replacement ---

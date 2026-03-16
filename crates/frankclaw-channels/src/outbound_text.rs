@@ -4,10 +4,7 @@ pub enum OutboundTextFlavor {
     WhatsApp,
 }
 
-pub fn normalize_outbound_text(
-    text: &str,
-    flavor: OutboundTextFlavor,
-) -> String {
+pub fn normalize_outbound_text(text: &str, flavor: OutboundTextFlavor) -> String {
     let normalized = strip_reasoning_prefix(text);
     let normalized = normalized.trim().replace("\r\n", "\n");
 
@@ -32,7 +29,10 @@ fn strip_reasoning_prefix(text: &str) -> String {
     let split_index = lines
         .windows(2)
         .position(|window| {
-            assert!(window.len() > 1, "windows(2) always yields exactly 2 elements");
+            assert!(
+                window.len() > 1,
+                "windows(2) always yields exactly 2 elements"
+            );
             window[0].trim().is_empty() && !window[1].trim().is_empty()
         })
         .map(|index| index + 1);

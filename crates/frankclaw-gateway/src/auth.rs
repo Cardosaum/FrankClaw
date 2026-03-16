@@ -2,8 +2,7 @@ use std::net::SocketAddr;
 
 use frankclaw_core::auth::{AuthMode, AuthRole};
 use frankclaw_core::error::{
-    AuthFailed, AuthRequired, ConfigValidation, FrankClawError, Internal,
-    RateLimited, Result,
+    AuthFailed, AuthRequired, ConfigValidation, FrankClawError, Internal, RateLimited, Result,
 };
 use frankclaw_crypto::{verify_password, verify_token_eq};
 use secrecy::{ExposeSecret, SecretString};
@@ -40,18 +39,25 @@ pub fn authenticate(
 ) -> Result<AuthRole> {
     // Check rate limit first.
     if let Some(addr) = remote_addr
-        && let Some(remaining) = rate_limiter.is_locked(&addr.ip()) {
-            return RateLimited {
-                retry_after_secs: remaining.as_secs(),
-            }.fail();
+        && let Some(remaining) = rate_limiter.is_locked(&addr.ip())
+    {
+        return RateLimited {
+            retry_after_secs: remaining.as_secs(),
         }
+        .fail();
+    }
 
     let result = match (mode, provided) {
         // No auth required — only safe on loopback.
         (AuthMode::None, _) => Ok(AuthRole::Admin),
 
         // Token-based auth.
-        (AuthMode::Token { token: Some(expected) }, AuthCredential::BearerToken(provided)) => {
+        (
+            AuthMode::Token {
+                token: Some(expected),
+            },
+            AuthCredential::BearerToken(provided),
+        ) => {
             if verify_token_eq(provided.expose_secret(), expected.expose_secret()) {
                 Ok(AuthRole::Admin)
             } else {
@@ -94,7 +100,8 @@ pub fn authenticate(
             tracing::error!("token auth mode configured but no token set");
             Internal {
                 msg: "auth misconfigured",
-            }.fail()
+            }
+            .fail()
         }
 
         // Mismatched credential type.
@@ -126,10 +133,7 @@ pub enum AuthCredential {
 ///
 /// HARD REQUIREMENT: network-accessible bind modes MUST have auth enabled.
 /// This prevents accidentally exposing an unauthenticated gateway to the network.
-pub fn validate_bind_auth(
-    bind: &frankclaw_core::config::BindMode,
-    auth: &AuthMode,
-) -> Result<()> {
+pub fn validate_bind_auth(bind: &frankclaw_core::config::BindMode, auth: &AuthMode) -> Result<()> {
     match (bind, auth) {
         // Loopback is safe without auth.
         (frankclaw_core::config::BindMode::Loopback, _) => Ok(()),
@@ -229,9 +233,12 @@ fn classify_surface(bind: &frankclaw_core::config::BindMode) -> Result<ExposureS
         frankclaw_core::config::BindMode::Loopback => Ok(ExposureSurface::Loopback),
         frankclaw_core::config::BindMode::Lan => Ok(ExposureSurface::Lan),
         frankclaw_core::config::BindMode::Address(address) => {
-            let ip: std::net::IpAddr = address.parse().map_err(|_| ConfigValidation {
-                msg: format!("gateway.bind address '{address}' is not a valid IP address"),
-            }.build())?;
+            let ip: std::net::IpAddr = address.parse().map_err(|_| {
+                ConfigValidation {
+                    msg: format!("gateway.bind address '{address}' is not a valid IP address"),
+                }
+                .build()
+            })?;
             let is_private = match ip {
                 std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
                 std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
@@ -275,7 +282,12 @@ mod tests {
             .expect("assessment should succeed");
         assert_eq!(report.surface, ExposureSurface::Loopback);
         assert!(!report.remote_ready);
-        assert!(report.warnings.iter().any(|warning| warning.contains("loopback-only")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("loopback-only"))
+        );
     }
 
     #[test]
@@ -289,9 +301,11 @@ mod tests {
         let report = assess_exposure(&config).expect("assessment should succeed");
         assert!(report.remote_ready);
         assert!(!report.public_ready);
-        assert!(report
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("without TLS")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("without TLS"))
+        );
     }
 }

@@ -281,3 +281,38 @@ warn.no_channels: nessun canale configurato
 warn.no_providers: nessun provider di modelli configurato
 warn.state_missing: "la directory di stato '%{path}' non esiste ancora"
 warn.whatsapp_no_secret: il canale WhatsApp non ha app_secret configurato; le firme dei webhook in ingresso non saranno verificate
+audit.secrets.ref_shadowed: "Il canale '%{channel}' ha sia '%{inline_key}' che '%{env_key}' — il valore inline sovrascrive il riferimento all'ambiente"
+audit.secrets.ref_shadowed_fix: "Rimuovi il campo inline '%{inline_key}' e mantieni solo il riferimento all'ambiente"
+audit.secrets.plaintext_env: "Il file '%{file}' contiene un segreto in testo in chiaro per %{key}"
+audit.secrets.plaintext_env_fix: "Sposta i segreti dal file '%{file}' in un gestore di segreti o un vault crittografato"
+audit.secrets.legacy_file: "File di credenziali legacy trovato: %{file}"
+audit.secrets.legacy_file_fix: Elimina il file legacy e usa riferimenti a variabili d'ambiente
+login.copilot.starting: Avvio dell'autenticazione GitHub Copilot...
+login.copilot.open_url: "Apri questo URL nel tuo browser: %{url}"
+login.copilot.enter_code: "Inserisci questo codice: %{code}"
+login.copilot.waiting: In attesa di autorizzazione...
+login.copilot.success: "Token GitHub Copilot salvato in: %{path}"
+login.copilot.next_steps: "Aggiungi alla tua configurazione: { \"id\": \"copilot\", \"api\": \"github-copilot\", \"models\": [\"gpt-4o\"] }"
+login.unsupported: "Provider di login non supportato '%{provider}'. Supportati: github-copilot"
+plugin.list_title: Plugin Scoperti
+plugin.none_found: Nessun plugin trovato.
+plugin.enabled: abilitato
+plugin.disabled: disabilitato
+plugin.enabled_msg: "Plugin '%{id}' abilitato."
+plugin.disabled_msg: "Plugin '%{id}' disabilitato."
+plugin.not_found: "Plugin '%{id}' non trovato."
+plugin.info_id: ID
+plugin.info_name: Nome
+plugin.info_version: Versione
+plugin.info_description: Descrizione
+plugin.info_path: Percorso
+plugin.info_status: Stato
+plugin.info_channels: Canali
+plugin.info_tools: Strumenti
+tui.status_idle: INATTIVO
+tui.status_streaming: TRASMISSIONE
+tui.status_error: ERRORE
+tui.input_placeholder: Scrivi un messaggio...
+acp.starting: Avvio del server ACP (JSON-RPC 2.0 su NDJSON)...
+acp.ready: "Server ACP pronto. Lettura dall'input standard."
+acp.error: "Errore ACP: %{error}"

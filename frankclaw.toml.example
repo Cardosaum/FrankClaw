@@ -1,0 +1,99 @@
+[gateway]
+port = 18789
+bind = "lan"
+
+[gateway.auth]
+mode = "token"
+token = "CHANGE_ME_generate_with_openssl_rand_hex_32"
+
+[agents.agents.default]
+name = "Assistant"
+model = "openai/gpt-4o-mini"
+system_prompt = "You are a helpful assistant."
+# All available tools listed below. Remove any you don't need.
+tools = [
+    "bash",
+    "session_inspect",
+    "sessions_list",
+    "sessions_history",
+    "browser_open",
+    "browser_extract",
+    "browser_snapshot",
+    "browser_screenshot",
+    "browser_aria_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_wait",
+    "browser_press",
+    "browser_sessions",
+    "browser_close",
+    "canvas_get",
+    "canvas_set",
+    "canvas_append",
+    "canvas_clear",
+    "file_read",
+    "file_write",
+    "file_edit",
+    "web_fetch",
+    "web_search",
+    "memory_get",
+    "memory_search",
+    "message_send",
+    "message_react",
+    "config_get",
+    "agents_list",
+    "cron_list",
+    "cron_add",
+    "cron_remove",
+    "image_describe",
+    "audio_transcribe",
+    "pdf_read",
+]
+
+[channels.telegram]
+enabled = false
+dm_policy = "pairing"
+
+[[channels.telegram.accounts]]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+
+[channels.whatsapp]
+enabled = false
+dm_policy = "pairing"
+
+[[channels.whatsapp.accounts]]
+access_token_env = "WHATSAPP_TOKEN"
+phone_number_id_env = "WHATSAPP_PHONE_ID"
+verify_token_env = "WHATSAPP_VERIFY_TOKEN"
+
+[channels.discord]
+enabled = false
+dm_policy = "pairing"
+
+[[channels.discord.accounts]]
+bot_token_env = "DISCORD_BOT_TOKEN"
+
+[channels.slack]
+enabled = false
+dm_policy = "pairing"
+
+[[channels.slack.accounts]]
+bot_token_env = "SLACK_BOT_TOKEN"
+app_token_env = "SLACK_APP_TOKEN"
+
+[memory]
+enabled = false
+embedding_provider = "openai"
+embedding_api_key_ref = "OPENAI_API_KEY"
+chunk_size = 1500
+cache_embeddings = true
+
+[[models.providers]]
+type = "openai"
+api_key_ref = "OPENAI_API_KEY"
+models = ["gpt-4o-mini", "gpt-4o"]
+
+[[models.providers]]
+type = "anthropic"
+api_key_ref = "ANTHROPIC_API_KEY"
+models = ["claude-sonnet-4-6"]

@@ -87,8 +87,9 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 arc-swap = "1"
 
-# Cancellation
+# Cancellation & streaming
 tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = "0.1"
 
 # Error handling
 thiserror = "2"
@@ -108,6 +109,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # URL
 url = { version = "2", features = ["serde"] }
 
+# HTML→text conversion
+html2text = "0.14"
+
+# PDF text extraction
+pdf-extract = "0.10"
+
 # Byte sizes
 bytesize = { version = "2", features = ["serde"] }
 
@@ -122,6 +129,13 @@ tokio-rustls = "0.26"
 rustls = "0.23"
 rustls-pki-types = "1"
 webpki-roots = "0.26"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Markdown parsing
+pulldown-cmark = "0.12"
 
 # Async trait
 async-trait = "0.1"

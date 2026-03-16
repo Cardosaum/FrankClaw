@@ -13,6 +13,11 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true }
+secrecy = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

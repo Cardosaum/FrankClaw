@@ -21,8 +21,7 @@ pub fn openai_base_url() -> String {
     if key.starts_with("sk-or-") {
         "https://openrouter.ai/api/v1".into()
     } else {
-        std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into())
+        std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into())
     }
 }
 

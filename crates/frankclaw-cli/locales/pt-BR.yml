@@ -281,3 +281,38 @@ warn.no_channels: nenhum canal configurado
 warn.no_providers: nenhum provedor de modelo configurado
 warn.state_missing: "diretório de estado '%{path}' ainda não existe"
 warn.whatsapp_no_secret: canal whatsapp não possui app_secret configurado; assinaturas de webhook de entrada não serão verificadas
+audit.secrets.ref_shadowed: "Canal '%{channel}' possui tanto '%{inline_key}' quanto '%{env_key}' — o valor inline sobrepõe a referência de ambiente"
+audit.secrets.ref_shadowed_fix: "Remova o campo inline '%{inline_key}' e mantenha apenas a referência de ambiente"
+audit.secrets.plaintext_env: "Arquivo '%{file}' contém segredo em texto puro para %{key}"
+audit.secrets.plaintext_env_fix: "Mova os segredos do arquivo '%{file}' para um gerenciador de segredos ou cofre criptografado"
+audit.secrets.legacy_file: "Arquivo de credencial legado encontrado: %{file}"
+audit.secrets.legacy_file_fix: Exclua o arquivo legado e use referências de variáveis de ambiente
+login.copilot.starting: Iniciando autenticação do GitHub Copilot...
+login.copilot.open_url: "Abra esta URL no seu navegador: %{url}"
+login.copilot.enter_code: "Digite este código: %{code}"
+login.copilot.waiting: Aguardando autorização...
+login.copilot.success: "Token do GitHub Copilot salvo em: %{path}"
+login.copilot.next_steps: "Adicione à sua configuração: { \"id\": \"copilot\", \"api\": \"github-copilot\", \"models\": [\"gpt-4o\"] }"
+login.unsupported: "Provedor de login não suportado '%{provider}'. Suportados: github-copilot"
+plugin.list_title: Plugins Descobertos
+plugin.none_found: Nenhum plugin encontrado.
+plugin.enabled: habilitado
+plugin.disabled: desabilitado
+plugin.enabled_msg: "Plugin '%{id}' habilitado."
+plugin.disabled_msg: "Plugin '%{id}' desabilitado."
+plugin.not_found: "Plugin '%{id}' não encontrado."
+plugin.info_id: ID
+plugin.info_name: Nome
+plugin.info_version: Versão
+plugin.info_description: Descrição
+plugin.info_path: Caminho
+plugin.info_status: Status
+plugin.info_channels: Canais
+plugin.info_tools: Ferramentas
+tui.status_idle: INATIVO
+tui.status_streaming: TRANSMITINDO
+tui.status_error: ERRO
+tui.input_placeholder: Digite uma mensagem...
+acp.starting: Iniciando servidor ACP (JSON-RPC 2.0 sobre NDJSON)...
+acp.ready: Servidor ACP pronto. Lendo da entrada padrão.
+acp.error: "Erro ACP: %{error}"

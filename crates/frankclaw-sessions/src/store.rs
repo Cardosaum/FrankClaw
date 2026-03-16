@@ -5,12 +5,10 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
 use tracing::{debug, warn};
 
-use frankclaw_core::error::{Result, SessionStorage, InvalidRequest};
-use frankclaw_core::session::{
-    PruningConfig, SessionEntry, SessionStore, TranscriptEntry,
-};
+use frankclaw_core::error::{InvalidRequest, Result, SessionStorage};
+use frankclaw_core::session::{PruningConfig, SessionEntry, SessionStore, TranscriptEntry};
 use frankclaw_core::types::{AgentId, SessionKey};
-use frankclaw_crypto::{decrypt, derive_subkey, encrypt, MasterKey};
+use frankclaw_crypto::{MasterKey, decrypt, derive_subkey, encrypt};
 
 use crate::migrations;
 
@@ -32,15 +30,15 @@ impl SqliteSessionStore {
     ///
     /// - `path`: SQLite file path. Created if it doesn't exist.
     /// - `master_key`: If provided, derives a session encryption subkey.
-    pub fn open(
-        path: &std::path::Path,
-        master_key: Option<&MasterKey>,
-    ) -> Result<Self> {
+    pub fn open(path: &std::path::Path, master_key: Option<&MasterKey>) -> Result<Self> {
         // Ensure parent directory exists with restricted permissions.
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| SessionStorage {
-                msg: format!("failed to create session directory: {e}"),
-            }.build())?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                SessionStorage {
+                    msg: format!("failed to create session directory: {e}"),
+                }
+                .build()
+            })?;
 
             // Set directory permissions to owner-only (Unix).
             #[cfg(unix)]
@@ -56,18 +54,27 @@ impl SqliteSessionStore {
             .max_size(8)
             .connection_timeout(std::time::Duration::from_secs(5))
             .build(manager)
-            .map_err(|e| SessionStorage {
-                msg: format!("connection pool error: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                SessionStorage {
+                    msg: format!("connection pool error: {e}"),
+                }
+                .build()
+            })?;
 
         // Run migrations on a fresh connection.
         {
-            let conn = pool.get().map_err(|e| SessionStorage {
-                msg: format!("migration connection error: {e}"),
-            }.build())?;
-            migrations::run_migrations(&conn).map_err(|e| SessionStorage {
-                msg: format!("migration error: {e}"),
-            }.build())?;
+            let conn = pool.get().map_err(|e| {
+                SessionStorage {
+                    msg: format!("migration connection error: {e}"),
+                }
+                .build()
+            })?;
+            migrations::run_migrations(&conn).map_err(|e| {
+                SessionStorage {
+                    msg: format!("migration error: {e}"),
+                }
+                .build()
+            })?;
 
             // Set file permissions to owner-only.
             #[cfg(unix)]
@@ -93,19 +100,19 @@ impl SqliteSessionStore {
         match &self.encryption_key {
             Some(key) => {
                 let blob = encrypt(key, content.as_bytes())?;
-                serde_json::to_vec(&blob).map_err(|e| SessionStorage {
-                    msg: format!("encryption serialization error: {e}"),
-                }.build())
+                serde_json::to_vec(&blob).map_err(|e| {
+                    SessionStorage {
+                        msg: format!("encryption serialization error: {e}"),
+                    }
+                    .build()
+                })
             }
             None => Ok(content.as_bytes().to_vec()),
         }
     }
 
     /// Decrypt content if encryption is enabled, otherwise return raw string.
-    fn decrypt_content(
-        encryption_key: Option<&[u8; 32]>,
-        data: &[u8],
-    ) -> Result<String> {
+    fn decrypt_content(encryption_key: Option<&[u8; 32]>, data: &[u8]) -> Result<String> {
         match encryption_key {
             Some(key) => {
                 let blob: frankclaw_crypto::EncryptedBlob =
@@ -122,20 +129,29 @@ impl SqliteSessionStore {
                         ),
                     }.build()
                 })?;
-                String::from_utf8(plaintext).map_err(|e| SessionStorage {
-                    msg: format!("invalid UTF-8 in transcript: {e}"),
-                }.build())
+                String::from_utf8(plaintext).map_err(|e| {
+                    SessionStorage {
+                        msg: format!("invalid UTF-8 in transcript: {e}"),
+                    }
+                    .build()
+                })
             }
-            None => String::from_utf8(data.to_vec()).map_err(|e| SessionStorage {
-                msg: format!("invalid UTF-8 in transcript: {e}"),
-            }.build()),
+            None => String::from_utf8(data.to_vec()).map_err(|e| {
+                SessionStorage {
+                    msg: format!("invalid UTF-8 in transcript: {e}"),
+                }
+                .build()
+            }),
         }
     }
 
     fn get_conn(&self) -> Result<r2d2::PooledConnection<SqliteConnectionManager>> {
-        self.pool.get().map_err(|e| SessionStorage {
-            msg: format!("pool error: {e}"),
-        }.build())
+        self.pool.get().map_err(|e| {
+            SessionStorage {
+                msg: format!("pool error: {e}"),
+            }
+            .build()
+        })
     }
 
     pub async fn rewrite_last_assistant_message(
@@ -169,21 +185,19 @@ impl SqliteSessionStore {
             conn.execute(
                 "UPDATE transcript SET content = ?1, timestamp = ?2
                  WHERE session_key = ?3 AND seq = ?4",
-                params![
-                    encrypted_content,
-                    Utc::now().to_rfc3339(),
-                    key_str,
-                    seq,
-                ],
+                params![encrypted_content, Utc::now().to_rfc3339(), key_str, seq,],
             )
             .map_err(|e| SessionStorage { msg: e.to_string() }.build())?;
 
             Ok(true)
         })
         .await
-        .map_err(|e| SessionStorage {
-            msg: format!("task join error: {e}"),
-        }.build())?
+        .map_err(|e| {
+            SessionStorage {
+                msg: format!("task join error: {e}"),
+            }
+            .build()
+        })?
     }
 }
 
@@ -229,9 +243,12 @@ impl SessionStore for SqliteSessionStore {
             Ok(result)
         })
         .await
-        .map_err(|e| SessionStorage {
-            msg: format!("task join error: {e}"),
-        }.build())?
+        .map_err(|e| {
+            SessionStorage {
+                msg: format!("task join error: {e}"),
+            }
+            .build()
+        })?
     }
 
     async fn upsert(&self, entry: &SessionEntry) -> Result<()> {
@@ -264,9 +281,12 @@ impl SessionStore for SqliteSessionStore {
             Ok(())
         })
         .await
-        .map_err(|e| SessionStorage {
-            msg: format!("task join error: {e}"),
-        }.build())?
+        .map_err(|e| {
+            SessionStorage {
+                msg: format!("task join error: {e}"),
+            }
+            .build()
+        })?
     }
 
     async fn delete(&self, key: &SessionKey) -> Result<()> {
@@ -280,9 +300,12 @@ impl SessionStore for SqliteSessionStore {
             Ok(())
         })
         .await
-        .map_err(|e| SessionStorage {
-            msg: format!("task join error: {e}"),
-        }.build())?
+        .map_err(|e| {
+            SessionStorage {
+                msg: format!("task join error: {e}"),
+            }
+            .build()
+        })?
     }
 
     async fn list(
@@ -331,15 +354,17 @@ impl SessionStore for SqliteSessionStore {
 
             let mut entries = Vec::new();
             for row in rows {
-                entries
-                    .push(row.map_err(|e| SessionStorage { msg: e.to_string() }.build())?);
+                entries.push(row.map_err(|e| SessionStorage { msg: e.to_string() }.build())?);
             }
             Ok(entries)
         })
         .await
-        .map_err(|e| SessionStorage {
-            msg: format!("task join error: {e}"),
-        }.build())?
+        .map_err(|e| {
+            SessionStorage {
+                msg: format!("task join error: {e}"),
+            }
+            .build()
+        })?
     }
 
     async fn append_transcript(&self, key: &SessionKey, entry: &TranscriptEntry) -> Result<()> {
@@ -350,21 +375,32 @@ impl SessionStore for SqliteSessionStore {
                     entry.content.len(),
                     MAX_TRANSCRIPT_ENTRY_BYTES,
                 ),
-            }.fail();
+            }
+            .fail();
         }
         let conn = self.get_conn()?;
         let key_str = key.as_str().to_string();
         let encrypted_content = self.encrypt_content(&entry.content)?;
         let seq = entry.seq;
         let role = serde_json::to_string(&entry.role).unwrap_or_default();
-        let metadata = entry.metadata.as_ref().map(|m| serde_json::to_string(m).unwrap_or_default());
+        let metadata = entry
+            .metadata
+            .as_ref()
+            .map(|m| serde_json::to_string(m).unwrap_or_default());
         let timestamp = entry.timestamp.to_rfc3339();
 
         tokio::task::spawn_blocking(move || {
             conn.execute(
                 "INSERT INTO transcript (session_key, seq, role, content, metadata, timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![key_str, seq as i64, role, encrypted_content, metadata, timestamp],
+                params![
+                    key_str,
+                    seq as i64,
+                    role,
+                    encrypted_content,
+                    metadata,
+                    timestamp
+                ],
             )
             .map_err(|e| SessionStorage { msg: e.to_string() }.build())?;
 
@@ -378,9 +414,12 @@ impl SessionStore for SqliteSessionStore {
             Ok(())
         })
         .await
-        .map_err(|e| SessionStorage {
-            msg: format!("task join error: {e}"),
-        }.build())?
+        .map_err(|e| {
+            SessionStorage {
+                msg: format!("task join error: {e}"),
+            }
+            .build()
+        })?
     }
 
     async fn get_transcript(
@@ -430,11 +469,13 @@ impl SessionStore for SqliteSessionStore {
             };
 
             let raw_rows: Vec<RowTuple> = if let Some(seq) = seq_val {
-                let mapped = stmt.query_map(params![key_str, seq, limit as i64], extract_row)
+                let mapped = stmt
+                    .query_map(params![key_str, seq, limit as i64], extract_row)
                     .map_err(|e| SessionStorage { msg: e.to_string() }.build())?;
                 mapped.collect::<rusqlite::Result<Vec<_>>>()
             } else {
-                let mapped = stmt.query_map(params![key_str, limit as i64], extract_row)
+                let mapped = stmt
+                    .query_map(params![key_str, limit as i64], extract_row)
                     .map_err(|e| SessionStorage { msg: e.to_string() }.build())?;
                 mapped.collect::<rusqlite::Result<Vec<_>>>()
             }
@@ -449,7 +490,8 @@ impl SessionStore for SqliteSessionStore {
                     role: serde_json::from_str::<frankclaw_core::types::Role>(&role_str)
                         .unwrap_or(frankclaw_core::types::Role::User),
                     content,
-                    metadata: metadata_str.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
+                    metadata: metadata_str
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
                     timestamp: timestamp_str.parse().unwrap_or_else(|_| Utc::now()),
                 });
             }
@@ -459,9 +501,12 @@ impl SessionStore for SqliteSessionStore {
             Ok(entries)
         })
         .await
-        .map_err(|e| SessionStorage {
-            msg: format!("task join error: {e}"),
-        }.build())?
+        .map_err(|e| {
+            SessionStorage {
+                msg: format!("task join error: {e}"),
+            }
+            .build()
+        })?
     }
 
     async fn clear_transcript(&self, key: &SessionKey) -> Result<()> {
@@ -477,9 +522,12 @@ impl SessionStore for SqliteSessionStore {
             Ok(())
         })
         .await
-        .map_err(|e| SessionStorage {
-            msg: format!("task join error: {e}"),
-        }.build())?
+        .map_err(|e| {
+            SessionStorage {
+                msg: format!("task join error: {e}"),
+            }
+            .build()
+        })?
     }
 
     async fn maintenance(&self, config: &PruningConfig) -> Result<u64> {
@@ -521,15 +569,21 @@ impl SessionStore for SqliteSessionStore {
                 .map_err(|e| SessionStorage { msg: e.to_string() }.build())?;
 
             if overflow > 0 {
-                warn!(overflow, max_sessions, "pruned sessions exceeding per-agent limit");
+                warn!(
+                    overflow,
+                    max_sessions, "pruned sessions exceeding per-agent limit"
+                );
             }
 
             Ok((deleted + overflow) as u64)
         })
         .await
-        .map_err(|e| SessionStorage {
-            msg: format!("task join error: {e}"),
-        }.build())?
+        .map_err(|e| {
+            SessionStorage {
+                msg: format!("task join error: {e}"),
+            }
+            .build()
+        })?
     }
 }
 
@@ -672,9 +726,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
         let path = temp_dir.join("sessions.db");
-        let store = std::sync::Arc::new(
-            SqliteSessionStore::open(&path, None).expect("store should open"),
-        );
+        let store =
+            std::sync::Arc::new(SqliteSessionStore::open(&path, None).expect("store should open"));
         let key = SessionKey::from_raw("agent:main:concurrent");
 
         store
@@ -832,9 +885,7 @@ mod tests {
         // Open with a different key — reading should fail with clear error.
         let key2 = MasterKey::from_bytes([2u8; 32]);
         let store2 = SqliteSessionStore::open(&path, Some(&key2)).expect("store should open");
-        let err = store2
-            .get_transcript(&session_key, 10, None)
-            .await;
+        let err = store2.get_transcript(&session_key, 10, None).await;
         assert!(err.is_err());
         let msg = err.unwrap_err().to_string();
         assert!(
@@ -843,6 +894,302 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    /// Helper to create a temp store for tests.
+    fn temp_store(suffix: &str) -> (std::path::PathBuf, SqliteSessionStore) {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-sessions-{suffix}-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+        let path = temp_dir.join("sessions.db");
+        let store = SqliteSessionStore::open(&path, None).expect("store should open");
+        (temp_dir, store)
+    }
+
+    fn test_session(key: &str) -> SessionEntry {
+        SessionEntry {
+            key: SessionKey::from_raw(key),
+            agent_id: AgentId::default_agent(),
+            channel: ChannelId::new("web"),
+            account_id: "default".into(),
+            scoping: SessionScoping::PerChannelPeer,
+            created_at: Utc::now(),
+            last_message_at: Some(Utc::now()),
+            thread_id: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_for_missing_session() {
+        let (dir, store) = temp_store("get-none");
+        let result = store
+            .get(&SessionKey::from_raw("nonexistent"))
+            .await
+            .expect("get should succeed");
+        assert!(result.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn upsert_then_get_roundtrip() {
+        let (dir, store) = temp_store("upsert-get");
+        let entry = test_session("agent:main:roundtrip");
+        store.upsert(&entry).await.expect("upsert");
+        let loaded = store
+            .get(&entry.key)
+            .await
+            .expect("get")
+            .expect("should exist");
+        assert_eq!(loaded.key.as_str(), entry.key.as_str());
+        assert_eq!(loaded.agent_id.as_str(), entry.agent_id.as_str());
+        assert_eq!(loaded.channel.as_str(), "web");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn upsert_updates_existing_session() {
+        let (dir, store) = temp_store("upsert-update");
+        let mut entry = test_session("agent:main:update");
+        store.upsert(&entry).await.expect("initial upsert");
+
+        entry.thread_id = Some("thread-1".into());
+        entry.metadata = serde_json::json!({"updated": true});
+        store.upsert(&entry).await.expect("update upsert");
+
+        let loaded = store.get(&entry.key).await.expect("get").expect("exists");
+        assert_eq!(loaded.thread_id.as_deref(), Some("thread-1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_session_and_transcript() {
+        let (dir, store) = temp_store("delete");
+        let key = SessionKey::from_raw("agent:main:delete");
+        store
+            .upsert(&test_session("agent:main:delete"))
+            .await
+            .expect("upsert");
+        store
+            .append_transcript(
+                &key,
+                &TranscriptEntry {
+                    seq: 1,
+                    role: Role::User,
+                    content: "hello".into(),
+                    timestamp: Utc::now(),
+                    metadata: None,
+                },
+            )
+            .await
+            .expect("append");
+
+        store.delete(&key).await.expect("delete");
+
+        assert!(store.get(&key).await.expect("get").is_none());
+        let transcript = store
+            .get_transcript(&key, 100, None)
+            .await
+            .expect("transcript");
+        assert!(transcript.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn list_returns_sessions_for_agent() {
+        let (dir, store) = temp_store("list");
+        store
+            .upsert(&test_session("agent:main:a"))
+            .await
+            .expect("upsert a");
+        store
+            .upsert(&test_session("agent:main:b"))
+            .await
+            .expect("upsert b");
+        store
+            .upsert(&test_session("agent:main:c"))
+            .await
+            .expect("upsert c");
+
+        let all = store
+            .list(&AgentId::default_agent(), 10, 0)
+            .await
+            .expect("list");
+        assert_eq!(all.len(), 3);
+
+        // Test pagination
+        let page = store
+            .list(&AgentId::default_agent(), 2, 0)
+            .await
+            .expect("page 1");
+        assert_eq!(page.len(), 2);
+
+        let page2 = store
+            .list(&AgentId::default_agent(), 2, 2)
+            .await
+            .expect("page 2");
+        assert_eq!(page2.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn clear_transcript_removes_entries() {
+        let (dir, store) = temp_store("clear");
+        let key = SessionKey::from_raw("agent:main:clear");
+        store
+            .upsert(&test_session("agent:main:clear"))
+            .await
+            .expect("upsert");
+        for i in 1..=5 {
+            store
+                .append_transcript(
+                    &key,
+                    &TranscriptEntry {
+                        seq: i,
+                        role: Role::User,
+                        content: format!("msg-{i}"),
+                        timestamp: Utc::now(),
+                        metadata: None,
+                    },
+                )
+                .await
+                .expect("append");
+        }
+
+        store.clear_transcript(&key).await.expect("clear");
+        let transcript = store.get_transcript(&key, 100, None).await.expect("get");
+        assert!(transcript.is_empty());
+
+        // Session itself should still exist
+        assert!(store.get(&key).await.expect("get").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn get_transcript_pagination_with_before_seq() {
+        let (dir, store) = temp_store("pagination");
+        let key = SessionKey::from_raw("agent:main:paginate");
+        store
+            .upsert(&test_session("agent:main:paginate"))
+            .await
+            .expect("upsert");
+        for i in 1..=10 {
+            store
+                .append_transcript(
+                    &key,
+                    &TranscriptEntry {
+                        seq: i,
+                        role: if i % 2 == 1 {
+                            Role::User
+                        } else {
+                            Role::Assistant
+                        },
+                        content: format!("msg-{i}"),
+                        timestamp: Utc::now(),
+                        metadata: None,
+                    },
+                )
+                .await
+                .expect("append");
+        }
+
+        // Get entries before seq 6 (should return 1-5)
+        let page = store
+            .get_transcript(&key, 100, Some(6))
+            .await
+            .expect("page");
+        assert_eq!(page.len(), 5);
+        assert_eq!(page[0].seq, 1);
+        assert_eq!(page[4].seq, 5);
+
+        // Get last 3 entries before seq 6
+        let page = store.get_transcript(&key, 3, Some(6)).await.expect("page");
+        assert_eq!(page.len(), 3);
+        assert_eq!(page[0].seq, 3);
+        assert_eq!(page[2].seq, 5);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn encrypted_roundtrip_with_same_key() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-sessions-enc-roundtrip-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+        let path = temp_dir.join("sessions.db");
+        let master = MasterKey::from_bytes([42u8; 32]);
+        let store = SqliteSessionStore::open(&path, Some(&master)).expect("open");
+        let key = SessionKey::from_raw("agent:main:encrypted");
+
+        store
+            .upsert(&test_session("agent:main:encrypted"))
+            .await
+            .expect("upsert");
+        store
+            .append_transcript(
+                &key,
+                &TranscriptEntry {
+                    seq: 1,
+                    role: Role::User,
+                    content: "encrypted content 🔐".into(),
+                    timestamp: Utc::now(),
+                    metadata: Some(serde_json::json!({"tool": "bash"})),
+                },
+            )
+            .await
+            .expect("append");
+
+        let transcript = store.get_transcript(&key, 10, None).await.expect("get");
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript[0].content, "encrypted content 🔐");
+        assert_eq!(transcript[0].metadata.as_ref().unwrap()["tool"], "bash");
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn maintenance_prunes_old_sessions() {
+        let (dir, store) = temp_store("maintenance");
+        let old_time = Utc::now() - chrono::Duration::days(60);
+        let mut old_entry = test_session("agent:main:old");
+        old_entry.created_at = old_time;
+        old_entry.last_message_at = Some(old_time);
+        store.upsert(&old_entry).await.expect("upsert old");
+
+        let new_entry = test_session("agent:main:new");
+        store.upsert(&new_entry).await.expect("upsert new");
+
+        let pruned = store
+            .maintenance(&PruningConfig {
+                max_age_days: 30,
+                max_sessions_per_agent: 1000,
+                disk_budget_bytes: 100_000_000,
+            })
+            .await
+            .expect("maintenance");
+
+        assert!(pruned >= 1, "should prune at least the old session");
+
+        // Old session should be gone, new should remain
+        assert!(store.get(&old_entry.key).await.expect("get old").is_none());
+        assert!(store.get(&new_entry.key).await.expect("get new").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn empty_transcript_retrieval() {
+        let (dir, store) = temp_store("empty-transcript");
+        let key = SessionKey::from_raw("agent:main:empty");
+        store
+            .upsert(&test_session("agent:main:empty"))
+            .await
+            .expect("upsert");
+
+        let transcript = store.get_transcript(&key, 100, None).await.expect("get");
+        assert!(transcript.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

@@ -9,9 +9,9 @@ mod hashing;
 mod keys;
 mod token;
 
-pub use encryption::{decrypt, encrypt, EncryptedBlob};
-pub use hashing::{hash_password, verify_password, PasswordHash};
-pub use keys::{derive_subkey, MasterKey};
+pub use encryption::{EncryptedBlob, decrypt, encrypt};
+pub use hashing::{PasswordHash, hash_password, verify_password};
+pub use keys::{MasterKey, derive_subkey};
 pub use token::{generate_token, verify_token_eq};
 
 /// Crypto errors — never leak key material in messages.

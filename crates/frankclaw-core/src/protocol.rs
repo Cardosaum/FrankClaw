@@ -73,6 +73,7 @@ pub enum Method {
     SessionsPatch,
     SessionsReset,
     SessionsDelete,
+    SessionsCompact,
 
     // Models
     ModelsList,
@@ -99,8 +100,17 @@ pub enum Method {
     NodesPairApprove,
     NodesPairReject,
 
+    // Usage
+    UsageGet,
+
+    // Tool approval
+    ToolApprovalResolve,
+
     // Health
     HealthProbe,
+
+    // Keepalive
+    Ping,
 }
 
 impl Method {
@@ -117,6 +127,7 @@ impl Method {
             | Self::SessionsPatch
             | Self::SessionsReset
             | Self::SessionsDelete
+            | Self::SessionsCompact
             | Self::CronAdd
             | Self::CronUpdate
             | Self::CronRemove
@@ -128,7 +139,8 @@ impl Method {
             | Self::WebhooksRemove
             | Self::WebhooksTest
             | Self::NodesPairApprove
-            | Self::NodesPairReject => AuthRole::Editor,
+            | Self::NodesPairReject
+            | Self::ToolApprovalResolve => AuthRole::Editor,
 
             // Viewer (read-only)
             Self::AgentIdentity
@@ -148,7 +160,9 @@ impl Method {
             | Self::LogsQuery
             | Self::NodesList
             | Self::NodesPairRequest
-            | Self::HealthProbe => AuthRole::Viewer,
+            | Self::UsageGet
+            | Self::HealthProbe
+            | Self::Ping => AuthRole::Viewer,
         }
     }
 }
@@ -160,6 +174,7 @@ pub enum EventType {
     ChatDelta,
     ChatComplete,
     ChatError,
+    ChatAborted,
     PresenceUpdate,
     ChannelHealth,
     ConfigChanged,
@@ -168,6 +183,8 @@ pub enum EventType {
     CronRun,
     LogEntry,
     NodePairRequest,
+    ToolApprovalRequested,
+    ToolApprovalResolved,
 }
 
 /// Structured protocol error.

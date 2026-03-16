@@ -1,0 +1,8 @@
+[channels.signal]
+enabled = true
+require_mention_for_groups = true
+groups = ["*"]
+
+[[channels.signal.accounts]]
+base_url_env = "SIGNAL_BASE_URL"
+account_env = "SIGNAL_ACCOUNT"

@@ -233,13 +233,13 @@ Browser tools need a DevTools endpoint. Keep it loopback-only.
 ### Docker Compose
 
 ```bash
-cp examples/channels/web.json frankclaw.json
+cp examples/channels/web.json frankclaw.toml
 docker compose up -d gateway chromium
 export FRANKCLAW_BROWSER_DEVTOOLS_URL="http://127.0.0.1:9222/"
 ```
 
 The `gateway` service expects:
-- `./frankclaw.json` with your real config
+- `./frankclaw.toml` with your real config
 - `./state/` for sessions and pairing state
 - provider and channel env vars in the shell or an `.env` file Compose can read
 
@@ -265,16 +265,16 @@ chromium \
     "agents": {
       "default": {
         "tools": [
-          "session.inspect",
-          "browser.open",
-          "browser.extract",
-          "browser.snapshot",
-          "browser.click",
-          "browser.type",
-          "browser.wait",
-          "browser.press",
-          "browser.sessions",
-          "browser.close"
+          "session_inspect",
+          "browser_open",
+          "browser_extract",
+          "browser_snapshot",
+          "browser_click",
+          "browser_type",
+          "browser_wait",
+          "browser_press",
+          "browser_sessions",
+          "browser_close"
         ]
       }
     }

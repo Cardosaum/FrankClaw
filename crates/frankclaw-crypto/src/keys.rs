@@ -27,7 +27,10 @@ impl MasterKey {
     ///
     /// Parameters: t=3 iterations, m=64MB memory, p=4 parallelism.
     /// These are OWASP-recommended minimums for interactive logins.
-    pub fn from_passphrase(passphrase: &SecretString, salt: &[u8; 16]) -> Result<Self, CryptoError> {
+    pub fn from_passphrase(
+        passphrase: &SecretString,
+        salt: &[u8; 16],
+    ) -> Result<Self, CryptoError> {
         let params = argon2::Params::new(64 * 1024, 3, 4, Some(32))
             .map_err(|_| CryptoError::KeyDerivationFailed)?;
         let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
@@ -67,8 +70,8 @@ pub fn derive_subkey(master: &MasterKey, context: &str) -> Result<[u8; 32], Cryp
     let prk = extract.finalize().into_bytes();
 
     // Expand: OKM = HMAC(key=PRK, msg=context || 0x01)
-    let mut expand = HmacSha256::new_from_slice(&prk)
-        .map_err(|_| CryptoError::KeyDerivationFailed)?;
+    let mut expand =
+        HmacSha256::new_from_slice(&prk).map_err(|_| CryptoError::KeyDerivationFailed)?;
     expand.update(context.as_bytes());
     expand.update(&[0x01]);
     let okm = expand.finalize().into_bytes();

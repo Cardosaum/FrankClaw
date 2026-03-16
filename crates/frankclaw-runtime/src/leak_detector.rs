@@ -137,7 +137,10 @@ fn mask_secret(secret: &str) -> String {
 
 // ── Pattern definitions ─────────────────────────────────────────────────
 
-#[expect(clippy::too_many_lines, reason = "pattern catalog; each entry is a simple struct literal")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "pattern catalog; each entry is a simple struct literal"
+)]
 fn default_patterns() -> Vec<LeakPattern> {
     vec![
         // ── Critical: Block ──────────────────────────────────────────
@@ -174,7 +177,9 @@ fn default_patterns() -> Vec<LeakPattern> {
             check: |w| {
                 w.starts_with("AKIA")
                     && w.len() == 20
-                    && w[4..].chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && w[4..]
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
             },
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
@@ -190,7 +195,9 @@ fn default_patterns() -> Vec<LeakPattern> {
                     || w.starts_with("ghs_")
                     || w.starts_with("ghr_"))
                     && w.len() >= 40
-                    && w[4..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && w[4..]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
             },
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
@@ -295,9 +302,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         LeakPattern {
             name: "high_entropy_hex_64",
             prefix: "",
-            check: |w| {
-                w.len() == 64 && w.chars().all(|c| c.is_ascii_hexdigit())
-            },
+            check: |w| w.len() == 64 && w.chars().all(|c| c.is_ascii_hexdigit()),
             severity: LeakSeverity::Medium,
             action: LeakAction::Warn,
             full_content_check: false,

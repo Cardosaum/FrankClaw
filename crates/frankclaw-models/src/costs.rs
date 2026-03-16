@@ -15,9 +15,7 @@ pub fn model_cost(model_id: &str) -> Option<(f64, f64)> {
     }
 
     // Normalize: strip provider prefixes (e.g., "openai/gpt-4o" -> "gpt-4o")
-    let id = model_id
-        .rsplit_once('/')
-        .map_or(model_id, |(_, name)| name);
+    let id = model_id.rsplit_once('/').map_or(model_id, |(_, name)| name);
 
     match id {
         // OpenAI — GPT-4.x
@@ -102,7 +100,10 @@ mod tests {
     fn known_model_has_cost(#[case] model: &str) {
         let (input, output) = model_cost(model).expect("expected cost for known model");
         assert!(input > 0.0, "expected positive input cost for {model}");
-        assert!(output > input, "expected output cost > input cost for {model}");
+        assert!(
+            output > input,
+            "expected output cost > input cost for {model}"
+        );
     }
 
     #[test]

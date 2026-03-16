@@ -74,7 +74,10 @@ impl AuthMode {
     }
 }
 
-#[expect(clippy::ref_option, reason = "serde custom serializer requires &Option<T> signature")]
+#[expect(
+    clippy::ref_option,
+    reason = "serde custom serializer requires &Option<T> signature"
+)]
 fn serialize_optional_secret_string<S>(
     value: &Option<SecretString>,
     serializer: S,
@@ -94,8 +97,7 @@ fn deserialize_optional_secret_string<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    Option::<String>::deserialize(deserializer)
-        .map(|value| value.map(SecretString::from))
+    Option::<String>::deserialize(deserializer).map(|value| value.map(SecretString::from))
 }
 
 /// Authorization role for a connected client.
@@ -146,8 +148,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&auth).expect("token mode should serialize");
-        let decoded: AuthMode =
-            serde_json::from_str(&json).expect("token mode should deserialize");
+        let decoded: AuthMode = serde_json::from_str(&json).expect("token mode should deserialize");
 
         match decoded {
             AuthMode::Token { token } => {

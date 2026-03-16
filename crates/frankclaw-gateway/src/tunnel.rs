@@ -84,9 +84,10 @@ impl Tunnel {
 impl Drop for Tunnel {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.child.try_lock()
-            && let Some(ref mut child) = *guard {
-                let _ = child.start_kill();
-            }
+            && let Some(ref mut child) = *guard
+        {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -111,13 +112,19 @@ async fn start_cloudflare(token: &str, host: &str, port: u16) -> Result<Tunnel> 
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| Internal {
-            msg: format!("failed to spawn cloudflared: {e}"),
-        }.build())?;
+        .map_err(|e| {
+            Internal {
+                msg: format!("failed to spawn cloudflared: {e}"),
+            }
+            .build()
+        })?;
 
-    let stderr = child.stderr.take().ok_or_else(|| Internal {
-        msg: "failed to capture cloudflared stderr",
-    }.build())?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        Internal {
+            msg: "failed to capture cloudflared stderr",
+        }
+        .build()
+    })?;
 
     // Drain stdout in background.
     if let Some(stdout) = child.stdout.take() {
@@ -167,13 +174,19 @@ async fn start_ngrok(
         cmd.args(["--domain", domain]);
     }
 
-    let mut child = cmd.spawn().map_err(|e| Internal {
-        msg: format!("failed to spawn ngrok: {e}"),
-    }.build())?;
+    let mut child = cmd.spawn().map_err(|e| {
+        Internal {
+            msg: format!("failed to spawn ngrok: {e}"),
+        }
+        .build()
+    })?;
 
-    let stdout = child.stdout.take().ok_or_else(|| Internal {
-        msg: "failed to capture ngrok stdout",
-    }.build())?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        Internal {
+            msg: "failed to capture ngrok stdout",
+        }
+        .build()
+    })?;
 
     // Drain stderr in background.
     if let Some(stderr) = child.stderr.take() {
@@ -187,15 +200,17 @@ async fn start_ngrok(
     }
 
     // Scan stdout for URL in logfmt output (url=https://...).
-    let url = extract_url_from_stream(stdout, "url=https://", Duration::from_secs(15)).await.map_err(|_| Internal {
+    let url = extract_url_from_stream(stdout, "url=https://", Duration::from_secs(15))
+        .await
+        .map_err(|_| {
+            Internal {
                 msg: "ngrok did not output a public URL within 15 seconds",
-            }.build())?;
+            }
+            .build()
+        })?;
 
     // Clean up "url=" prefix if present.
-    let url = url
-        .strip_prefix("url=")
-        .unwrap_or(&url)
-        .to_string();
+    let url = url.strip_prefix("url=").unwrap_or(&url).to_string();
 
     info!(tunnel = "ngrok", url = %url, "tunnel started");
 
@@ -219,7 +234,10 @@ async fn start_custom(
     host: &str,
     port: u16,
 ) -> Result<Tunnel> {
-    #[expect(clippy::literal_string_with_formatting_args, reason = "template placeholders for user-defined tunnel commands, not format! args")]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "template placeholders for user-defined tunnel commands, not format! args"
+    )]
     let expanded = command
         .replace("{host}", host)
         .replace("{port}", &port.to_string());
@@ -228,7 +246,8 @@ async fn start_custom(
     if parts.is_empty() {
         return ConfigValidation {
             msg: "tunnel command is empty",
-        }.fail();
+        }
+        .fail();
     }
 
     let mut child = Command::new(parts[0])
@@ -237,9 +256,12 @@ async fn start_custom(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| Internal {
-            msg: format!("failed to spawn tunnel command '{}': {e}", parts[0]),
-        }.build())?;
+        .map_err(|e| {
+            Internal {
+                msg: format!("failed to spawn tunnel command '{}': {e}", parts[0]),
+            }
+            .build()
+        })?;
 
     // Drain stderr in background.
     if let Some(stderr) = child.stderr.take() {
@@ -254,9 +276,12 @@ async fn start_custom(
 
     let url = if let Some(pattern) = url_pattern {
         // Scan stdout for a URL containing the pattern.
-        let stdout = child.stdout.take().ok_or_else(|| Internal {
-            msg: "failed to capture tunnel stdout",
-        }.build())?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            Internal {
+                msg: "failed to capture tunnel stdout",
+            }
+            .build()
+        })?;
         extract_url_from_stream(stdout, pattern, Duration::from_secs(15)).await?
     } else {
         // No pattern — drain stdout and use local URL.
@@ -312,10 +337,12 @@ async fn extract_url_from_stream<R: tokio::io::AsyncRead + Unpin>(
         Ok(Some(url)) => Ok(url),
         Ok(None) => Internal {
             msg: format!("tunnel output ended without a URL (looking for '{prefix}')"),
-        }.fail(),
+        }
+        .fail(),
         Err(_) => Internal {
             msg: format!("tunnel did not output a URL within {}s", timeout.as_secs()),
-        }.fail(),
+        }
+        .fail(),
     }
 }
 
@@ -410,9 +437,7 @@ mod tests {
     #[test]
     fn custom_command_placeholder_expansion() {
         let cmd = "bore local --to bore.pub --port {port}";
-        let expanded = cmd
-            .replace("{host}", "127.0.0.1")
-            .replace("{port}", "8080");
+        let expanded = cmd.replace("{host}", "127.0.0.1").replace("{port}", "8080");
         assert_eq!(expanded, "bore local --to bore.pub --port 8080");
     }
 
@@ -457,8 +482,9 @@ mod tests {
     async fn extract_url_from_cursor() {
         let data = b"some line\nhttps://tunnel.example.com ready\n";
         let cursor = std::io::Cursor::new(data.to_vec());
-        let url =
-            extract_url_from_stream(cursor, "https://", Duration::from_secs(5)).await.unwrap();
+        let url = extract_url_from_stream(cursor, "https://", Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(url, "https://tunnel.example.com");
     }
 
@@ -466,8 +492,7 @@ mod tests {
     async fn extract_url_timeout_on_no_match() {
         let data = b"no urls\njust text\n";
         let cursor = std::io::Cursor::new(data.to_vec());
-        let result =
-            extract_url_from_stream(cursor, "https://", Duration::from_millis(100)).await;
+        let result = extract_url_from_stream(cursor, "https://", Duration::from_millis(100)).await;
         assert!(result.is_err());
     }
 }

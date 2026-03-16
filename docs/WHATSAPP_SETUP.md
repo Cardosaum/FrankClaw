@@ -76,7 +76,7 @@ export WHATSAPP_VERIFY_TOKEN="any-random-string-you-pick"
 export WHATSAPP_APP_SECRET="abcdef123456"
 ```
 
-**Important:** The config file (`frankclaw.json`) stores environment variable *names*, not
+**Important:** The config file (`frankclaw.toml`) stores environment variable *names*, not
 the actual secret values. For example, `"access_token_env": "WHATSAPP_ACCESS_TOKEN"` tells
 FrankClaw to read the value from the `WHATSAPP_ACCESS_TOKEN` environment variable at startup.
 Do not paste the actual token into the JSON config.
@@ -90,7 +90,7 @@ source ~/.config/zsh/secrets
 ./target/debug/frankclaw doctor
 ```
 
-This writes the WhatsApp channel config to `frankclaw.json`. Verify it looks like:
+This writes the WhatsApp channel config to `frankclaw.toml`. Verify it looks like:
 
 ```json
 {
@@ -257,7 +257,7 @@ forward it to the AI provider and send the response back.
 
 ### "Provider references missing environment variable"
 
-- The `frankclaw.json` config expects **environment variable names**, not values.
+- The `frankclaw.toml` config expects **environment variable names**, not values.
 - Wrong: `"api_key_ref": "sk-proj-abc123..."` (actual key)
 - Right: `"api_key_ref": "OPENAI_API_KEY"` (env var name)
 - Make sure you `source` your secrets file before starting the gateway.

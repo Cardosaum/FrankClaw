@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 use frankclaw_core::protocol::{EventFrame, EventType, Frame, RequestFrame, ResponseFrame};
 use frankclaw_core::session::SessionStore;
 use frankclaw_core::types::{AgentId, ConnId, SessionKey};
@@ -7,14 +9,12 @@ use frankclaw_core::types::{AgentId, ConnId, SessionKey};
 use crate::state::GatewayState;
 
 /// Handle `sessions.list` method.
-pub async fn sessions_list(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
+pub async fn sessions_list(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
     let agent_id = request
         .params
         .get("agent_id")
-        .and_then(|v| v.as_str()).map_or_else(AgentId::default_agent, AgentId::new);
+        .and_then(|v| v.as_str())
+        .map_or_else(AgentId::default_agent, AgentId::new);
 
     let limit = request
         .params
@@ -38,10 +38,7 @@ pub async fn sessions_list(
 }
 
 /// Handle `chat.history` method.
-pub async fn chat_history(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
+pub async fn chat_history(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
     let session_key = match parse_session_key_param(&request) {
         Ok(key) => key,
         Err(response) => return response,
@@ -72,10 +69,7 @@ pub async fn chat_history(
 }
 
 /// Handle `sessions.get` method.
-pub async fn sessions_get(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
+pub async fn sessions_get(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
     let session_key = match parse_session_key_param(&request) {
         Ok(key) => key,
         Err(response) => return response,
@@ -92,10 +86,7 @@ pub async fn sessions_get(
 }
 
 /// Handle `sessions.reset` method.
-pub async fn sessions_reset(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
+pub async fn sessions_reset(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
     let session_key = match parse_session_key_param(&request) {
         Ok(key) => key,
         Err(response) => return response,
@@ -126,18 +117,22 @@ pub async fn sessions_reset(
 }
 
 /// Handle `chat.send` method.
-#[expect(clippy::too_many_lines, reason = "request validation and orchestration in one handler")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "request validation and orchestration in one handler"
+)]
 pub async fn chat_send(
     state: &Arc<GatewayState>,
     conn_id: ConnId,
     request: RequestFrame,
 ) -> ResponseFrame {
-    let max_message_bytes = state
-        .current_config()
-        .security
-        .max_webhook_body_bytes;
+    let max_message_bytes = state.current_config().security.max_webhook_body_bytes;
 
-    let message = match request.params.get("message").and_then(|value| value.as_str()) {
+    let message = match request
+        .params
+        .get("message")
+        .and_then(|value| value.as_str())
+    {
         Some(message) if !message.trim().is_empty() => {
             if message.len() > max_message_bytes {
                 return ResponseFrame::err(
@@ -183,6 +178,17 @@ pub async fn chat_send(
         .unwrap_or(true);
     let request_id = request.id.clone();
 
+    // Create a cancellation token for this run and register it.
+    let cancel_token = CancellationToken::new();
+    // Use request_id as the run key (unique per chat request).
+    let run_key = match &request_id {
+        frankclaw_core::types::RequestId::Text(s) => s.clone(),
+        frankclaw_core::types::RequestId::Number(n) => n.to_string(),
+    };
+    state
+        .active_runs
+        .insert(run_key.clone(), cancel_token.clone());
+
     let stream_tx = if stream {
         state.clients.get(&conn_id).map(|client| {
             let client_tx = client.tx.clone();
@@ -196,23 +202,29 @@ pub async fn chat_send(
                             "kind": "text",
                             "delta": text,
                         }),
-                        frankclaw_core::model::StreamDelta::ToolCallStart { id, name } => serde_json::json!({
-                            "request_id": request_id,
-                            "kind": "tool_call_start",
-                            "tool_call_id": id,
-                            "tool_name": name,
-                        }),
-                        frankclaw_core::model::StreamDelta::ToolCallDelta { id, arguments } => serde_json::json!({
-                            "request_id": request_id,
-                            "kind": "tool_call_delta",
-                            "tool_call_id": id,
-                            "arguments_delta": arguments,
-                        }),
-                        frankclaw_core::model::StreamDelta::ToolCallEnd { id } => serde_json::json!({
-                            "request_id": request_id,
-                            "kind": "tool_call_end",
-                            "tool_call_id": id,
-                        }),
+                        frankclaw_core::model::StreamDelta::ToolCallStart { id, name } => {
+                            serde_json::json!({
+                                "request_id": request_id,
+                                "kind": "tool_call_start",
+                                "tool_call_id": id,
+                                "tool_name": name,
+                            })
+                        }
+                        frankclaw_core::model::StreamDelta::ToolCallDelta { id, arguments } => {
+                            serde_json::json!({
+                                "request_id": request_id,
+                                "kind": "tool_call_delta",
+                                "tool_call_id": id,
+                                "arguments_delta": arguments,
+                            })
+                        }
+                        frankclaw_core::model::StreamDelta::ToolCallEnd { id } => {
+                            serde_json::json!({
+                                "request_id": request_id,
+                                "kind": "tool_call_end",
+                                "tool_call_id": id,
+                            })
+                        }
                         frankclaw_core::model::StreamDelta::Done { usage } => serde_json::json!({
                             "request_id": request_id,
                             "kind": "done",
@@ -229,9 +241,10 @@ pub async fn chat_send(
                         payload,
                     });
                     if let Ok(json) = serde_json::to_string(&frame)
-                        && client_tx.send(json).await.is_err() {
-                            break;
-                        }
+                        && client_tx.send(json).await.is_err()
+                    {
+                        break;
+                    }
                 }
             });
             delta_tx
@@ -239,6 +252,31 @@ pub async fn chat_send(
     } else {
         None
     };
+
+    // Set up interactive tool approval channel.
+    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::channel::<(
+        frankclaw_core::tool_approval::ApprovalRequest,
+        tokio::sync::oneshot::Sender<frankclaw_core::tool_approval::ApprovalDecision>,
+    )>(4);
+    {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            while let Some((req, decision_tx)) = approval_rx.recv().await {
+                // Store the decision sender so tool.approval.resolve can find it.
+                state_clone
+                    .pending_approvals
+                    .insert(req.approval_id.clone(), decision_tx);
+                // Broadcast the approval request to all clients.
+                let event = Frame::Event(EventFrame {
+                    event: EventType::ToolApprovalRequested,
+                    payload: serde_json::to_value(&req).unwrap_or_default(),
+                });
+                if let Ok(json) = serde_json::to_string(&event) {
+                    let _ = state_clone.broadcast.send(json);
+                }
+            }
+        });
+    }
 
     match state
         .runtime
@@ -254,10 +292,16 @@ pub async fn chat_send(
             thinking_budget: None,
             channel_id: None,
             channel_capabilities: None,
+            canvas: Some(state.canvas.clone()),
+            cancel_token: Some(cancel_token),
+            approval_tx: Some(approval_tx),
         })
         .await
     {
         Ok(response) => {
+            // Remove from active runs.
+            state.active_runs.remove(&run_key);
+
             let event = Frame::Event(EventFrame {
                 event: EventType::ChatComplete,
                 payload: serde_json::json!({
@@ -282,8 +326,20 @@ pub async fn chat_send(
             )
         }
         Err(err) => {
+            // Remove from active runs.
+            state.active_runs.remove(&run_key);
+
+            let is_cancelled = matches!(
+                err,
+                frankclaw_core::error::FrankClawError::TurnCancelled { .. }
+            );
+            let event_type = if is_cancelled {
+                EventType::ChatAborted
+            } else {
+                EventType::ChatError
+            };
             let event = Frame::Event(EventFrame {
-                event: EventType::ChatError,
+                event: event_type,
                 payload: serde_json::json!({
                     "request_id": request_id,
                     "message": err.to_string(),
@@ -292,17 +348,40 @@ pub async fn chat_send(
             if let Ok(json) = serde_json::to_string(&event) {
                 let _ = state.broadcast.send(json);
             }
-            ResponseFrame::err(request.id, err.status_code(), err.to_string())
+            let code = if is_cancelled { 499 } else { err.status_code() };
+            ResponseFrame::err(request.id, code, err.to_string())
         }
     }
 }
 
+/// Handle `chat.cancel` method.
+pub async fn chat_cancel(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let request_id = match request.params.get("request_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.trim().to_string(),
+        _ => return ResponseFrame::err(request.id, 400, "request_id is required"),
+    };
+
+    if let Some((_, token)) = state.active_runs.remove(&request_id) {
+        token.cancel();
+        ResponseFrame::ok(
+            request.id,
+            serde_json::json!({
+                "request_id": request_id,
+                "status": "cancelled",
+            }),
+        )
+    } else {
+        ResponseFrame::err(request.id, 404, "no active chat run with that request_id")
+    }
+}
+
 /// Handle `webhooks.test` method.
-pub async fn webhooks_test(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
-    let mapping_id = match request.params.get("mapping_id").and_then(|value| value.as_str()) {
+pub async fn webhooks_test(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let mapping_id = match request
+        .params
+        .get("mapping_id")
+        .and_then(|value| value.as_str())
+    {
         Some(mapping_id) if !mapping_id.trim().is_empty() => mapping_id,
         _ => return ResponseFrame::err(request.id, 400, "mapping_id is required"),
     };
@@ -360,10 +439,7 @@ pub async fn webhooks_test(
 }
 
 /// Handle `canvas.get` method.
-pub async fn canvas_get(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
+pub async fn canvas_get(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
     let canvas = state
         .canvas
         .get(&canvas_id_from_params(&request.params))
@@ -372,16 +448,16 @@ pub async fn canvas_get(
 }
 
 /// Handle `canvas.export` method.
-pub async fn canvas_export(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
+pub async fn canvas_export(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
     let canvas_id = canvas_id_from_params(&request.params);
     let Some(canvas) = state.canvas.get(&canvas_id).await else {
         return ResponseFrame::err(request.id, 404, "canvas not found");
     };
     let format = crate::canvas::CanvasExportFormat::parse(
-        request.params.get("format").and_then(|value| value.as_str()),
+        request
+            .params
+            .get("format")
+            .and_then(|value| value.as_str()),
     );
     let filename = format!(
         "{}.{}",
@@ -402,10 +478,7 @@ pub async fn canvas_export(
 }
 
 /// Handle `canvas.set` method.
-pub async fn canvas_set(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
+pub async fn canvas_set(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
     let title = request
         .params
         .get("title")
@@ -439,15 +512,19 @@ pub async fn canvas_set(
         );
     }
 
-    let document = match state.canvas.set(crate::canvas::CanvasDocument {
-        id: canvas_id,
-        title,
-        body,
-        session_key,
-        blocks,
-        revision: 0,
-        updated_at: chrono::Utc::now(),
-    }).await {
+    let document = match state
+        .canvas
+        .set(crate::canvas::CanvasDocument {
+            id: canvas_id,
+            title,
+            body,
+            session_key,
+            blocks,
+            revision: 0,
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+    {
         Ok(doc) => doc,
         Err(e) => return ResponseFrame::err(request.id, 400, e.to_string()),
     };
@@ -457,10 +534,7 @@ pub async fn canvas_set(
 }
 
 /// Handle `canvas.patch` method.
-pub async fn canvas_patch(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
+pub async fn canvas_patch(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
     let title = request
         .params
         .get("title")
@@ -477,7 +551,9 @@ pub async fn canvas_patch(
         if value.is_null() {
             Some(None)
         } else {
-            value.as_str().map(|session_key| Some(session_key.to_string()))
+            value
+                .as_str()
+                .map(|session_key| Some(session_key.to_string()))
         }
     });
     let append_blocks = match parse_canvas_blocks(request.params.get("append_blocks")) {
@@ -504,7 +580,8 @@ pub async fn canvas_patch(
                 expected_revision,
             },
         )
-        .await {
+        .await
+    {
         Ok(doc) => doc,
         Err(e) => return ResponseFrame::err(request.id, 409, e.to_string()),
     };
@@ -513,14 +590,14 @@ pub async fn canvas_patch(
 }
 
 /// Handle `canvas.clear` method.
-pub async fn canvas_clear(
-    state: &Arc<GatewayState>,
-    request: RequestFrame,
-) -> ResponseFrame {
+pub async fn canvas_clear(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
     let canvas_id = canvas_id_from_params(&request.params);
     state.canvas.clear(&canvas_id).await;
     broadcast_canvas_update(state, &canvas_id, None);
-    ResponseFrame::ok(request.id, serde_json::json!({ "cleared": true, "canvas_id": canvas_id }))
+    ResponseFrame::ok(
+        request.id,
+        serde_json::json!({ "cleared": true, "canvas_id": canvas_id }),
+    )
 }
 
 fn broadcast_canvas_update(
@@ -576,6 +653,245 @@ fn parse_canvas_blocks(
     serde_json::from_value(value.clone()).map_err(|_| "invalid canvas blocks payload")
 }
 
+/// Handle `usage.get` method — return aggregated usage stats for sessions.
+pub async fn usage_get(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let agent_id = request
+        .params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(AgentId::new)
+        .unwrap_or_else(AgentId::default_agent);
+
+    let limit = request
+        .params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .min(200) as usize;
+
+    let offset = request
+        .params
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    match state.sessions.list(&agent_id, limit, offset).await {
+        Ok(sessions) => {
+            let mut total_input_tokens: u64 = 0;
+            let mut total_output_tokens: u64 = 0;
+            let mut total_turns: u64 = 0;
+            let mut total_cost_usd: f64 = 0.0;
+
+            let session_usage: Vec<serde_json::Value> = sessions
+                .iter()
+                .map(|s| {
+                    let input = s
+                        .metadata
+                        .get("total_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let output = s
+                        .metadata
+                        .get("total_output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let turns = s
+                        .metadata
+                        .get("total_turns")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let cost = s
+                        .metadata
+                        .get("total_cost_usd")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let model = s
+                        .metadata
+                        .get("last_model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    total_input_tokens += input;
+                    total_output_tokens += output;
+                    total_turns += turns;
+                    total_cost_usd += cost;
+
+                    serde_json::json!({
+                        "session_key": s.key.as_str(),
+                        "channel": s.channel.as_str(),
+                        "created_at": s.created_at,
+                        "last_message_at": s.last_message_at,
+                        "input_tokens": input,
+                        "output_tokens": output,
+                        "total_tokens": input + output,
+                        "turns": turns,
+                        "cost_usd": cost,
+                        "last_model": model,
+                    })
+                })
+                .collect();
+
+            ResponseFrame::ok(
+                request.id,
+                serde_json::json!({
+                    "sessions": session_usage,
+                    "totals": {
+                        "input_tokens": total_input_tokens,
+                        "output_tokens": total_output_tokens,
+                        "total_tokens": total_input_tokens + total_output_tokens,
+                        "turns": total_turns,
+                        "cost_usd": total_cost_usd,
+                    },
+                    "count": session_usage.len(),
+                }),
+            )
+        }
+        Err(err) => ResponseFrame::err(request.id, 500, err.to_string()),
+    }
+}
+
+/// Handle `tool.approval.resolve` method.
+pub async fn tool_approval_resolve(
+    state: &Arc<GatewayState>,
+    request: RequestFrame,
+) -> ResponseFrame {
+    let approval_id = match request.params.get("approval_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.trim().to_string(),
+        _ => return ResponseFrame::err(request.id, 400, "approval_id is required"),
+    };
+
+    let decision_str = match request.params.get("decision").and_then(|v| v.as_str()) {
+        Some(d) => d,
+        None => return ResponseFrame::err(request.id, 400, "decision is required"),
+    };
+
+    let decision = match decision_str {
+        "allow_once" => frankclaw_core::tool_approval::ApprovalDecision::AllowOnce,
+        "allow_always" => frankclaw_core::tool_approval::ApprovalDecision::AllowAlways,
+        "deny" => frankclaw_core::tool_approval::ApprovalDecision::Deny,
+        _ => {
+            return ResponseFrame::err(
+                request.id,
+                400,
+                "decision must be 'allow_once', 'allow_always', or 'deny'",
+            );
+        }
+    };
+
+    if let Some((_, decision_tx)) = state.pending_approvals.remove(&approval_id) {
+        if decision_tx.send(decision).is_ok() {
+            // Broadcast resolution event.
+            let event = Frame::Event(EventFrame {
+                event: EventType::ToolApprovalResolved,
+                payload: serde_json::json!({
+                    "approval_id": approval_id,
+                    "decision": decision_str,
+                }),
+            });
+            if let Ok(json) = serde_json::to_string(&event) {
+                let _ = state.broadcast.send(json);
+            }
+            ResponseFrame::ok(
+                request.id,
+                serde_json::json!({
+                    "approval_id": approval_id,
+                    "decision": decision_str,
+                }),
+            )
+        } else {
+            ResponseFrame::err(request.id, 410, "approval request already expired")
+        }
+    } else {
+        ResponseFrame::err(request.id, 404, "no pending approval with that ID")
+    }
+}
+
+/// Handle `sessions.delete` method.
+pub async fn sessions_delete(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let session_key = match parse_session_key_param(&request) {
+        Ok(key) => key,
+        Err(response) => return response,
+    };
+
+    // Cancel any active chat run for this session.
+    let run_key = session_key.as_str().to_string();
+    if let Some((_, token)) = state.active_runs.remove(&run_key) {
+        token.cancel();
+    }
+
+    match state.sessions.delete(&session_key).await {
+        Ok(()) => {
+            let event = Frame::Event(EventFrame {
+                event: EventType::SessionUpdated,
+                payload: serde_json::json!({
+                    "session_key": session_key.as_str(),
+                    "action": "deleted",
+                }),
+            });
+            if let Ok(json) = serde_json::to_string(&event) {
+                let _ = state.broadcast.send(json);
+            }
+            ResponseFrame::ok(
+                request.id,
+                serde_json::json!({
+                    "session_key": session_key.as_str(),
+                    "status": "deleted",
+                }),
+            )
+        }
+        Err(err) => ResponseFrame::err(request.id, 500, err.to_string()),
+    }
+}
+
+/// Handle `sessions.patch` method — update session metadata fields.
+pub async fn sessions_patch(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let session_key = match parse_session_key_param(&request) {
+        Ok(key) => key,
+        Err(response) => return response,
+    };
+
+    // Get existing session.
+    let mut session = match state.sessions.get(&session_key).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return ResponseFrame::err(request.id, 404, "session not found"),
+        Err(err) => return ResponseFrame::err(request.id, 500, err.to_string()),
+    };
+
+    // Apply patch fields to metadata.
+    let patch = match request.params.get("patch") {
+        Some(patch) if patch.is_object() => patch.clone(),
+        _ => return ResponseFrame::err(request.id, 400, "patch object is required"),
+    };
+
+    // Merge patch into existing metadata.
+    if let (Some(existing), Some(incoming)) = (session.metadata.as_object_mut(), patch.as_object())
+    {
+        for (key, value) in incoming {
+            existing.insert(key.clone(), value.clone());
+        }
+    } else {
+        session.metadata = patch;
+    }
+
+    match state.sessions.upsert(&session).await {
+        Ok(()) => {
+            let event = Frame::Event(EventFrame {
+                event: EventType::SessionUpdated,
+                payload: serde_json::json!({
+                    "session_key": session_key.as_str(),
+                    "action": "patched",
+                }),
+            });
+            if let Ok(json) = serde_json::to_string(&event) {
+                let _ = state.broadcast.send(json);
+            }
+            let json = serde_json::to_value(&session).unwrap_or_default();
+            ResponseFrame::ok(request.id, serde_json::json!({ "session": json }))
+        }
+        Err(err) => ResponseFrame::err(request.id, 500, err.to_string()),
+    }
+}
+
 fn parse_session_key_param(
     request: &RequestFrame,
 ) -> std::result::Result<SessionKey, ResponseFrame> {
@@ -595,11 +911,11 @@ mod tests {
 
     use async_trait::async_trait;
     use frankclaw_channels::ChannelSet;
-    use frankclaw_core::model::{
-        CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi,
-        ModelCompat, ModelCost, ModelDef, ModelProvider, StreamDelta, Usage,
-    };
     use frankclaw_core::auth::AuthRole;
+    use frankclaw_core::model::{
+        CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi, ModelCompat,
+        ModelCost, ModelDef, ModelProvider, StreamDelta, Usage,
+    };
     use frankclaw_core::protocol::Method;
     use frankclaw_core::session::{SessionEntry, SessionScoping, SessionStore, TranscriptEntry};
     use frankclaw_core::types::{AgentId, ChannelId, ConnId, RequestId, Role};
@@ -657,13 +973,20 @@ mod tests {
     }
 
     async fn setup_canvas(state: &Arc<GatewayState>) {
-        canvas_set(state, make_request(Method::CanvasSet, serde_json::json!({
-            "canvas_id": "ops",
-            "title": "Ops",
-            "body": "Current deployment summary",
-            "session_key": "default:web:control",
-            "blocks": [{"kind": "note", "text": "deploy window open"}],
-        }))).await;
+        canvas_set(
+            state,
+            make_request(
+                Method::CanvasSet,
+                serde_json::json!({
+                    "canvas_id": "ops",
+                    "title": "Ops",
+                    "body": "Current deployment summary",
+                    "session_key": "default:web:control",
+                    "blocks": [{"kind": "note", "text": "deploy window open"}],
+                }),
+            ),
+        )
+        .await;
     }
 
     // ── Mock providers ───────────────────────────────────────────────
@@ -775,9 +1098,7 @@ mod tests {
 
     // ── State builders ───────────────────────────────────────────────
 
-    async fn build_test_state(
-        temp_dir: &PathBuf,
-    ) -> (Arc<GatewayState>, Arc<SqliteSessionStore>) {
+    async fn build_test_state(temp_dir: &PathBuf) -> (Arc<GatewayState>, Arc<SqliteSessionStore>) {
         build_test_state_with_providers(temp_dir, vec![Arc::new(MockProvider)]).await
     }
 
@@ -792,8 +1113,7 @@ mod tests {
                 .expect("sessions should open"),
         );
         let pairing = Arc::new(
-            PairingStore::open(&temp_dir.join("pairings.json"))
-                .expect("pairings should open"),
+            PairingStore::open(&temp_dir.join("pairings.json")).expect("pairings should open"),
         );
         let media = Arc::new(
             MediaStore::new(temp_dir.join("media"), 1024 * 1024, 1)
@@ -843,13 +1163,19 @@ mod tests {
             },
         )
         .expect("metadata should serialize");
-        sessions.upsert(&entry).await.expect("session should upsert");
+        sessions
+            .upsert(&entry)
+            .await
+            .expect("session should upsert");
 
         let response = sessions_get(
             &state,
-            make_request(Method::SessionsGet, serde_json::json!({
-                "session_key": session_key.as_str(),
-            })),
+            make_request(
+                Method::SessionsGet,
+                serde_json::json!({
+                    "session_key": session_key.as_str(),
+                }),
+            ),
         )
         .await;
 
@@ -888,9 +1214,12 @@ mod tests {
 
         let response = sessions_reset(
             &state,
-            make_request(Method::SessionsReset, serde_json::json!({
-                "session_key": session_key.as_str(),
-            })),
+            make_request(
+                Method::SessionsReset,
+                serde_json::json!({
+                    "session_key": session_key.as_str(),
+                }),
+            ),
         )
         .await;
 
@@ -905,11 +1234,9 @@ mod tests {
     #[tokio::test]
     async fn chat_send_streams_delta_events_to_requesting_client() {
         let temp = TempTestDir::new("frankclaw-gateway-methods-stream");
-        let (state, _sessions) = build_test_state_with_providers(
-            &temp.path,
-            vec![Arc::new(StreamingMockProvider)],
-        )
-        .await;
+        let (state, _sessions) =
+            build_test_state_with_providers(&temp.path, vec![Arc::new(StreamingMockProvider)])
+                .await;
         let conn_id = ConnId(42);
         let (client_tx, mut client_rx) = tokio::sync::mpsc::channel(16);
         state.clients.insert(
@@ -993,12 +1320,15 @@ mod tests {
 
         let response = webhooks_test(
             &state,
-            make_request(Method::WebhooksTest, serde_json::json!({
-                "mapping_id": "incoming",
-                "payload": {
-                    "message": "hello from hook"
-                }
-            })),
+            make_request(
+                Method::WebhooksTest,
+                serde_json::json!({
+                    "mapping_id": "incoming",
+                    "payload": {
+                        "message": "hello from hook"
+                    }
+                }),
+            ),
         )
         .await;
 
@@ -1027,19 +1357,27 @@ mod tests {
 
         let set_response = canvas_set(
             &state,
-            make_request(Method::CanvasSet, serde_json::json!({
-                "canvas_id": "ops",
-                "title": "Ops",
-                "body": "Current deployment summary",
-                "session_key": "default:web:control",
-                "blocks": [{"kind": "note", "text": "deploy window open"}],
-            })),
+            make_request(
+                Method::CanvasSet,
+                serde_json::json!({
+                    "canvas_id": "ops",
+                    "title": "Ops",
+                    "body": "Current deployment summary",
+                    "session_key": "default:web:control",
+                    "blocks": [{"kind": "note", "text": "deploy window open"}],
+                }),
+            ),
         )
         .await;
 
         assert!(set_response.error.is_none());
         assert_eq!(
-            state.canvas.get("ops").await.expect("canvas should exist").title,
+            state
+                .canvas
+                .get("ops")
+                .await
+                .expect("canvas should exist")
+                .title,
             "Ops"
         );
         assert_eq!(
@@ -1062,9 +1400,12 @@ mod tests {
 
         let get_response = canvas_get(
             &state,
-            make_request(Method::CanvasGet, serde_json::json!({
-                "canvas_id": "ops",
-            })),
+            make_request(
+                Method::CanvasGet,
+                serde_json::json!({
+                    "canvas_id": "ops",
+                }),
+            ),
         )
         .await;
 
@@ -1093,10 +1434,13 @@ mod tests {
 
         let export_response = canvas_export(
             &state,
-            make_request(Method::CanvasExport, serde_json::json!({
-                "canvas_id": "ops",
-                "format": "markdown",
-            })),
+            make_request(
+                Method::CanvasExport,
+                serde_json::json!({
+                    "canvas_id": "ops",
+                    "format": "markdown",
+                }),
+            ),
         )
         .await;
 
@@ -1126,10 +1470,13 @@ mod tests {
 
         let patch_response = canvas_patch(
             &state,
-            make_request(Method::CanvasPatch, serde_json::json!({
-                "canvas_id": "ops",
-                "append_blocks": [{"kind": "markdown", "text": "## Next steps"}]
-            })),
+            make_request(
+                Method::CanvasPatch,
+                serde_json::json!({
+                    "canvas_id": "ops",
+                    "append_blocks": [{"kind": "markdown", "text": "## Next steps"}]
+                }),
+            ),
         )
         .await;
 
@@ -1154,13 +1501,477 @@ mod tests {
 
         let clear_response = canvas_clear(
             &state,
-            make_request(Method::CanvasClear, serde_json::json!({
-                "canvas_id": "ops",
-            })),
+            make_request(
+                Method::CanvasClear,
+                serde_json::json!({
+                    "canvas_id": "ops",
+                }),
+            ),
         )
         .await;
 
         assert!(clear_response.error.is_none());
         assert!(state.canvas.get("ops").await.is_none());
     }
+
+    #[tokio::test]
+    async fn chat_cancel_stops_active_run() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-cancel-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, _sessions) = build_test_state(&temp_dir).await;
+
+        // Insert a fake active run token.
+        let token = tokio_util::sync::CancellationToken::new();
+        state.active_runs.insert("req-42".into(), token.clone());
+        assert!(!token.is_cancelled());
+
+        // Cancel it.
+        let response = chat_cancel(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("cancel-1".into()),
+                method: Method::ChatCancel,
+                params: serde_json::json!({ "request_id": "req-42" }),
+            },
+        )
+        .await;
+
+        assert!(response.error.is_none());
+        assert_eq!(
+            response.result.as_ref().and_then(|v| v["status"].as_str()),
+            Some("cancelled")
+        );
+        assert!(token.is_cancelled());
+        assert!(state.active_runs.is_empty());
+
+        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
+        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn chat_cancel_returns_404_for_unknown_run() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-cancel-404-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, _sessions) = build_test_state(&temp_dir).await;
+
+        let response = chat_cancel(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("cancel-2".into()),
+                method: Method::ChatCancel,
+                params: serde_json::json!({ "request_id": "nonexistent" }),
+            },
+        )
+        .await;
+
+        assert_eq!(response.error.as_ref().map(|e| e.code), Some(404));
+
+        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
+        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn chat_cancel_requires_request_id() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-cancel-400-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, _sessions) = build_test_state(&temp_dir).await;
+
+        let response = chat_cancel(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("cancel-3".into()),
+                method: Method::ChatCancel,
+                params: serde_json::json!({}),
+            },
+        )
+        .await;
+
+        assert_eq!(response.error.as_ref().map(|e| e.code), Some(400));
+
+        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
+        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn sessions_delete_removes_session() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-delete-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, sessions) = build_test_state(&temp_dir).await;
+        let session_key = SessionKey::from_raw("agent:main:web:default:user-del");
+
+        let entry = SessionEntry {
+            key: session_key.clone(),
+            agent_id: AgentId::default_agent(),
+            channel: ChannelId::new("web"),
+            account_id: "default".into(),
+            scoping: SessionScoping::PerChannelPeer,
+            created_at: chrono::Utc::now(),
+            last_message_at: None,
+            thread_id: None,
+            metadata: serde_json::json!({}),
+        };
+        sessions
+            .upsert(&entry)
+            .await
+            .expect("session should upsert");
+
+        // Delete.
+        let response = sessions_delete(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("del-1".into()),
+                method: Method::SessionsDelete,
+                params: serde_json::json!({ "session_key": session_key.as_str() }),
+            },
+        )
+        .await;
+        assert!(response.error.is_none(), "delete should succeed");
+        assert_eq!(response.result.as_ref().unwrap()["status"], "deleted");
+
+        // Verify it's gone.
+        let got = sessions.get(&session_key).await.expect("get should work");
+        assert!(got.is_none(), "session should be deleted");
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn sessions_delete_requires_session_key() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-delete-nokey-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, _sessions) = build_test_state(&temp_dir).await;
+
+        let response = sessions_delete(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("del-2".into()),
+                method: Method::SessionsDelete,
+                params: serde_json::json!({}),
+            },
+        )
+        .await;
+        assert_eq!(response.error.as_ref().map(|e| e.code), Some(400));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn sessions_patch_updates_metadata() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-patch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, sessions) = build_test_state(&temp_dir).await;
+        let session_key = SessionKey::from_raw("agent:main:web:default:user-patch");
+
+        let entry = SessionEntry {
+            key: session_key.clone(),
+            agent_id: AgentId::default_agent(),
+            channel: ChannelId::new("web"),
+            account_id: "default".into(),
+            scoping: SessionScoping::PerChannelPeer,
+            created_at: chrono::Utc::now(),
+            last_message_at: None,
+            thread_id: None,
+            metadata: serde_json::json!({"label": "old"}),
+        };
+        sessions
+            .upsert(&entry)
+            .await
+            .expect("session should upsert");
+
+        let response = sessions_patch(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("patch-1".into()),
+                method: Method::SessionsPatch,
+                params: serde_json::json!({
+                    "session_key": session_key.as_str(),
+                    "patch": { "label": "new", "extra": 42 },
+                }),
+            },
+        )
+        .await;
+        assert!(response.error.is_none(), "patch should succeed");
+
+        // Verify metadata was merged.
+        let updated = sessions.get(&session_key).await.unwrap().unwrap();
+        assert_eq!(updated.metadata["label"], "new");
+        assert_eq!(updated.metadata["extra"], 42);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn sessions_patch_returns_404_for_missing_session() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-patch-404-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, _sessions) = build_test_state(&temp_dir).await;
+
+        let response = sessions_patch(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("patch-2".into()),
+                method: Method::SessionsPatch,
+                params: serde_json::json!({
+                    "session_key": "nonexistent:session",
+                    "patch": { "label": "test" },
+                }),
+            },
+        )
+        .await;
+        assert_eq!(response.error.as_ref().map(|e| e.code), Some(404));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn usage_get_returns_session_usage() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-usage-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, sessions) = build_test_state(&temp_dir).await;
+        let session_key = SessionKey::from_raw("agent:main:web:default:user-usage");
+
+        let entry = SessionEntry {
+            key: session_key.clone(),
+            agent_id: AgentId::default_agent(),
+            channel: ChannelId::new("web"),
+            account_id: "default".into(),
+            scoping: SessionScoping::PerChannelPeer,
+            created_at: chrono::Utc::now(),
+            last_message_at: None,
+            thread_id: None,
+            metadata: serde_json::json!({
+                "total_input_tokens": 100,
+                "total_output_tokens": 50,
+                "total_turns": 3,
+                "total_cost_usd": 0.0025,
+                "last_model": "gpt-4o",
+            }),
+        };
+        sessions
+            .upsert(&entry)
+            .await
+            .expect("session should upsert");
+
+        let response = usage_get(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("usage-1".into()),
+                method: Method::UsageGet,
+                params: serde_json::json!({}),
+            },
+        )
+        .await;
+        assert!(response.error.is_none(), "usage_get should succeed");
+        let result = response.result.unwrap();
+        assert_eq!(result["totals"]["input_tokens"], 100);
+        assert_eq!(result["totals"]["output_tokens"], 50);
+        assert_eq!(result["totals"]["turns"], 3);
+        assert_eq!(result["count"], 1);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+}
+
+/// Handle `sessions.compact` method.
+pub async fn sessions_compact(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let session_key = match request.params.get("session_key").and_then(|v| v.as_str()) {
+        Some(key) => SessionKey::from_raw(key),
+        None => {
+            return ResponseFrame::err(request.id, 400, "session_key is required");
+        }
+    };
+
+    let agent_id = request
+        .params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(AgentId::new);
+
+    match state
+        .runtime
+        .compact_session(&session_key, agent_id.as_ref())
+        .await
+    {
+        Ok(result) => {
+            // Broadcast session update.
+            let event = Frame::Event(EventFrame {
+                event: EventType::SessionUpdated,
+                payload: serde_json::json!({
+                    "session_key": session_key.as_str(),
+                    "action": "compacted",
+                }),
+            });
+            if let Ok(json) = serde_json::to_string(&event) {
+                let _ = state.broadcast.send(json);
+            }
+
+            ResponseFrame::ok(
+                request.id,
+                serde_json::json!({
+                    "status": "ok",
+                    "pruned_count": result.pruned_count,
+                    "has_summary": result.summary.is_some(),
+                    "estimated_tokens_before": result.estimated_tokens_before,
+                    "estimated_tokens_after": result.estimated_tokens_after,
+                }),
+            )
+        }
+        Err(e) => ResponseFrame::err(request.id, 500, format!("compaction failed: {e}")),
+    }
+}
+
+// ── Cron handlers ────────────────────────────────────────────────────────
+
+/// Handle `cron.list` method.
+pub async fn cron_list(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let Some(cron) = &state.cron else {
+        return ResponseFrame::err(request.id, 503, "cron service not available");
+    };
+    let jobs = cron.list().await;
+    let json: Vec<serde_json::Value> = jobs
+        .into_iter()
+        .map(|j| serde_json::to_value(j).unwrap_or_default())
+        .collect();
+    ResponseFrame::ok(request.id, serde_json::json!({ "jobs": json }))
+}
+
+/// Handle `cron.add` method.
+pub async fn cron_add(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let Some(cron) = &state.cron else {
+        return ResponseFrame::err(request.id, 503, "cron service not available");
+    };
+
+    let schedule = match request.params.get("schedule").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return ResponseFrame::err(request.id, 400, "schedule is required"),
+    };
+    let prompt = match request.params.get("prompt").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return ResponseFrame::err(request.id, 400, "prompt is required"),
+    };
+    let agent_id = request
+        .params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
+    let session_key = request
+        .params
+        .get("session_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let id = request
+        .params
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| format!("job-{}", chrono::Utc::now().timestamp_millis()));
+
+    use frankclaw_core::tool_services::CronManager;
+    let sk = if session_key.is_empty() {
+        format!("{agent_id}:cron:{id}")
+    } else {
+        session_key.to_string()
+    };
+    match cron
+        .add_job(&id, &schedule, agent_id, &sk, &prompt, true)
+        .await
+    {
+        Ok(()) => ResponseFrame::ok(request.id, serde_json::json!({ "status": "ok", "id": id })),
+        Err(e) => ResponseFrame::err(request.id, 400, format!("failed to add job: {e}")),
+    }
+}
+
+/// Handle `cron.remove` method.
+pub async fn cron_remove(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let Some(cron) = &state.cron else {
+        return ResponseFrame::err(request.id, 503, "cron service not available");
+    };
+    let id = match request.params.get("id").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return ResponseFrame::err(request.id, 400, "id is required"),
+    };
+    use frankclaw_core::tool_services::CronManager;
+    match cron.remove_job(id).await {
+        Ok(existed) => ResponseFrame::ok(
+            request.id,
+            serde_json::json!({ "status": "ok", "existed": existed }),
+        ),
+        Err(e) => ResponseFrame::err(request.id, 500, format!("failed to remove job: {e}")),
+    }
+}
+
+/// Handle `cron.run` method — triggers immediate execution of a job.
+pub async fn cron_run(state: &Arc<GatewayState>, request: RequestFrame) -> ResponseFrame {
+    let Some(cron) = &state.cron else {
+        return ResponseFrame::err(request.id, 503, "cron service not available");
+    };
+    let id = match request.params.get("id").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return ResponseFrame::err(request.id, 400, "id is required"),
+    };
+
+    let jobs = cron.list().await;
+    let job = match jobs.into_iter().find(|j| j.id == id) {
+        Some(j) => j,
+        None => return ResponseFrame::err(request.id, 404, "job not found"),
+    };
+
+    // Spawn the job asynchronously so we don't block the RPC.
+    let state2 = state.clone();
+    tokio::spawn(async move {
+        let result = state2
+            .runtime
+            .chat(frankclaw_runtime::ChatRequest {
+                agent_id: Some(job.agent_id.clone()),
+                session_key: Some(job.session_key.clone()),
+                message: job.prompt.clone(),
+                attachments: Vec::new(),
+                model_id: None,
+                max_tokens: None,
+                temperature: None,
+                stream_tx: None,
+                thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
+                canvas: Some(state2.canvas.clone()),
+                cancel_token: None,
+                approval_tx: None,
+            })
+            .await;
+        let status = if result.is_ok() { "success" } else { "failed" };
+        let event = Frame::Event(EventFrame {
+            event: EventType::CronRun,
+            payload: serde_json::json!({
+                "job_id": job.id,
+                "status": status,
+            }),
+        });
+        if let Ok(json) = serde_json::to_string(&event) {
+            let _ = state2.broadcast.send(json);
+        }
+    });
+
+    ResponseFrame::ok(
+        request.id,
+        serde_json::json!({ "status": "triggered", "id": id }),
+    )
 }

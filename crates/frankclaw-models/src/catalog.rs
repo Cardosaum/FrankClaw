@@ -6,9 +6,7 @@
 
 use std::sync::LazyLock;
 
-use frankclaw_core::model::{
-    InputModality, ModelApi, ModelCompat, ModelCost, ModelDef,
-};
+use frankclaw_core::model::{InputModality, ModelApi, ModelCompat, ModelCost, ModelDef};
 
 /// Look up a model by ID and return its known metadata.
 /// Returns `None` for unknown models (caller should use defaults).

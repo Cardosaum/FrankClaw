@@ -1,5 +1,5 @@
 use frankclaw_core::channel::OutboundAttachment;
-use frankclaw_core::error::{Result, Channel};
+use frankclaw_core::error::{Channel, Result};
 use frankclaw_core::media::safe_extension_for_mime;
 use frankclaw_core::types::ChannelId;
 
@@ -33,11 +33,13 @@ pub fn require_single_attachment<'att>(
         [] => Channel {
             channel: channel.clone(),
             msg: "attachment send requested without any attachments",
-        }.fail(),
+        }
+        .fail(),
         _ => Channel {
             channel: channel.clone(),
             msg: "multiple attachments are not supported yet on this channel",
-        }.fail(),
+        }
+        .fail(),
     }
 }
 
@@ -49,18 +51,13 @@ pub fn attachment_filename(attachment: &OutboundAttachment) -> String {
         .unwrap_or_else(|| default_filename(&attachment.mime_type))
 }
 
-pub fn attachment_bytes(
-    channel: &ChannelId,
-    attachment: &OutboundAttachment,
-) -> Result<Vec<u8>> {
+pub fn attachment_bytes(channel: &ChannelId, attachment: &OutboundAttachment) -> Result<Vec<u8>> {
     if attachment.bytes.is_empty() {
         return Channel {
             channel: channel.clone(),
-            msg: format!(
-                "attachment {} is missing inline bytes",
-                attachment.media_id
-            ),
-        }.fail();
+            msg: format!("attachment {} is missing inline bytes", attachment.media_id),
+        }
+        .fail();
     }
 
     Ok(attachment.bytes.clone())
@@ -81,10 +78,7 @@ mod tests {
         assert_eq!(attachment_kind("image/png"), AttachmentKind::Image);
         assert_eq!(attachment_kind("audio/ogg"), AttachmentKind::Audio);
         assert_eq!(attachment_kind("video/mp4"), AttachmentKind::Video);
-        assert_eq!(
-            attachment_kind("application/pdf"),
-            AttachmentKind::Document
-        );
+        assert_eq!(attachment_kind("application/pdf"), AttachmentKind::Document);
     }
 
     #[test]

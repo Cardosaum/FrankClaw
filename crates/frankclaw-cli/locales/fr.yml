@@ -281,3 +281,38 @@ warn.no_channels: aucun canal configuré
 warn.no_providers: aucun fournisseur de modèles configuré
 warn.state_missing: "le répertoire d'état '%{path}' n'existe pas encore"
 warn.whatsapp_no_secret: "le canal whatsapp n'a pas de app_secret configuré ; les signatures des webhooks entrants ne seront pas vérifiées"
+audit.secrets.ref_shadowed: "Le canal '%{channel}' a à la fois '%{inline_key}' et '%{env_key}' — la valeur inline masque la référence d'environnement"
+audit.secrets.ref_shadowed_fix: "Supprimez le champ inline '%{inline_key}' et conservez uniquement la référence d'environnement"
+audit.secrets.plaintext_env: "Le fichier '%{file}' contient un secret en clair pour %{key}"
+audit.secrets.plaintext_env_fix: "Déplacez les secrets du fichier '%{file}' vers un gestionnaire de secrets ou un coffre-fort chiffré"
+audit.secrets.legacy_file: "Fichier de credentials hérité trouvé : %{file}"
+audit.secrets.legacy_file_fix: Supprimez le fichier hérité et utilisez des références à des variables d'environnement
+login.copilot.starting: Démarrage de l'authentification GitHub Copilot...
+login.copilot.open_url: "Ouvrez cette URL dans votre navigateur : %{url}"
+login.copilot.enter_code: "Entrez ce code : %{code}"
+login.copilot.waiting: En attente d'autorisation...
+login.copilot.success: "Jeton GitHub Copilot enregistré dans : %{path}"
+login.copilot.next_steps: "Ajoutez à votre configuration : { \"id\": \"copilot\", \"api\": \"github-copilot\", \"models\": [\"gpt-4o\"] }"
+login.unsupported: "Fournisseur de connexion non pris en charge '%{provider}'. Pris en charge : github-copilot"
+plugin.list_title: Plugins Découverts
+plugin.none_found: Aucun plugin trouvé.
+plugin.enabled: activé
+plugin.disabled: désactivé
+plugin.enabled_msg: "Plugin '%{id}' activé."
+plugin.disabled_msg: "Plugin '%{id}' désactivé."
+plugin.not_found: "Plugin '%{id}' introuvable."
+plugin.info_id: ID
+plugin.info_name: Nom
+plugin.info_version: Version
+plugin.info_description: Description
+plugin.info_path: Chemin
+plugin.info_status: Statut
+plugin.info_channels: Canaux
+plugin.info_tools: Outils
+tui.status_idle: INACTIF
+tui.status_streaming: DIFFUSION
+tui.status_error: ERREUR
+tui.input_placeholder: Saisissez un message...
+acp.starting: Démarrage du serveur ACP (JSON-RPC 2.0 sur NDJSON)...
+acp.ready: "Serveur ACP prêt. Lecture depuis l'entrée standard."
+acp.error: "Erreur ACP : %{error}"

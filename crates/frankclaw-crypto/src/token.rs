@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 
 /// Generate a cryptographically secure random token (256 bits, base64url encoded).
@@ -75,7 +75,9 @@ mod tests {
     #[test]
     fn token_has_256_bits_entropy() {
         let token = generate_token();
-        let decoded = URL_SAFE_NO_PAD.decode(&token).expect("token should be valid base64url");
+        let decoded = URL_SAFE_NO_PAD
+            .decode(&token)
+            .expect("token should be valid base64url");
         assert_eq!(decoded.len(), 32, "token should be 32 bytes (256 bits)");
     }
 
@@ -87,8 +89,7 @@ mod tests {
             .collect();
         // Each byte position should have some variance.
         for pos in 0..32 {
-            let values: std::collections::HashSet<u8> =
-                tokens.iter().map(|t| t[pos]).collect();
+            let values: std::collections::HashSet<u8> = tokens.iter().map(|t| t[pos]).collect();
             assert!(
                 values.len() > 5,
                 "byte position {pos} should have varied values, got {}",

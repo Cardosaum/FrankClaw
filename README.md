@@ -6,7 +6,7 @@ FrankClaw is a ground-up Rust rewrite of [OpenClaw](https://github.com/openclaw/
 
 What's at parity:
 - 7 messaging channels: Web, Telegram, Discord, Slack, Signal, WhatsApp, Email (IMAP/SMTP)
-- Multi-provider AI with failover, circuit breaker, retry with exponential backoff
+- Multi-provider AI with model-aware failover routing, circuit breaker, retry with exponential backoff
 - Full agent runtime: context compaction, subagent orchestration, command system, skills, hooks
 - Smart model routing: 13-dimension complexity scorer routes simple queries to cheaper models
 - MCP (Model Context Protocol) client: stdio and HTTP transports for tool ecosystem integration
@@ -14,19 +14,29 @@ What's at parity:
 - Cost tracking with daily budget guards
 - Credential leak detection (12 patterns scanned in all LLM/tool output)
 - Extended thinking support for Claude 3.7+ and o1-style models
-- Media pipeline with vision/audio understanding
-- Canvas host with revision conflict detection
-- Browser automation (CDP-based, 9 tools)
+- Multi-provider media understanding: OpenAI, Anthropic, Ollama vision + Whisper transcription with fallback chain
+- Memory/RAG: SQLite FTS5 + vector search with embedding providers, file sync
+- Rich 8-tab web console: dark mode, tool approval UI, usage analytics, agent management, cron jobs, logs viewer, focus mode
+- Webhook transforms: JSON path extraction, templates, per-mapping rate limiting and concurrency control
+- Canvas host with revision conflict detection, SVG/HTML/Markdown rendering in web console
+- OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`) for drop-in client support
+- Browser automation (CDP-based, 11 tools including screenshot and ARIA snapshot)
 - Bash tool with allowlist + sandbox (ai-jail)
-- 3-tier tool risk levels (ReadOnly → Mutating → Destructive) with per-tool approval overrides
+- 3-tier tool risk levels (ReadOnly → Mutating → Destructive) with per-tool approval overrides and inline approval UI
 - Tunnel support: Cloudflare Tunnel, ngrok, and custom commands for webhook exposure
 - Job state machine with self-repair for background tasks
 - Event-driven routine triggers (cron, message pattern, system events, manual)
 - Interactive REPL (`frankclaw chat`) with streaming, slash commands, and tab completion
+- Full-screen TUI (`frankclaw chat --tui`) with ratatui: streaming chat log, slash commands, model/session status
+- ACP (Agent Client Protocol): JSON-RPC 2.0 over NDJSON for agent interop (`frankclaw acp`)
+- Plugin management: manifest-based discovery, enable/disable lifecycle (`frankclaw plugin`)
+- Browser profiles: named CDP configurations with port allocation (18800-18899)
+- Batch embedding providers: Gemini (768D) and Voyage AI (1024D) with 100-text batching
+- Rich markdown rendering: CommonMark → IR → ANSI terminal output
 - Operator experience: setup wizard, doctor diagnostics, security audit, daemon management
 
 What's intentionally skipped (low value or over-engineered):
-- TTS, polls, WhatsApp Web (Baileys), Gmail Pub/Sub, ACP protocol, auto-update
+- TTS, polls, WhatsApp Web (Baileys), Gmail Pub/Sub, auto-update
 - 17 long-tail channels (Google Chat, iMessage, IRC, Teams, Matrix, etc.) — can be added via the plugin trait
 
 For full details, see [PARITY_TODO.md](docs/PARITY_TODO.md) and [FEATURE_PLANS.md](docs/FEATURE_PLANS.md).
@@ -35,7 +45,7 @@ For channel setup, see [CHANNEL_SETUP.md](docs/CHANNEL_SETUP.md), `examples/chan
 ## Features
 
 - **Multi-channel messaging** — Web, Telegram, Discord, Slack, Signal, WhatsApp, Email (IMAP/SMTP)
-- **Multi-provider AI** — OpenAI, Anthropic, Ollama with automatic failover, circuit breaker, and retry with exponential backoff + jitter
+- **Multi-provider AI** — OpenAI, Anthropic, Ollama, GitHub Copilot, Google Gemini, OpenRouter, Groq, Together, DeepSeek with model-aware failover routing, circuit breaker, and retry with exponential backoff + jitter
 - **Smart model routing** — 13-dimension complexity scorer routes simple queries to cheaper/faster models, saving cost without sacrificing quality
 - **MCP integration** — Model Context Protocol client (stdio + HTTP transports) connects any MCP server as a tool source
 - **Response caching** — SHA-256 keyed LRU cache with configurable TTL avoids redundant API calls
@@ -47,16 +57,20 @@ For channel setup, see [CHANNEL_SETUP.md](docs/CHANNEL_SETUP.md), `examples/chan
 - **Job state machine** — Full lifecycle tracking (Pending→InProgress→Completed→Accepted) with stuck detection and self-repair
 - **Interactive REPL** — `frankclaw chat` with streaming responses, slash commands, tab completion, and history persistence
 - **Canvas host** — local authenticated visual workspace surface
-- **Bounded tools** — session inspection plus Chromium-backed `browser.open`, `browser.extract`, `browser.snapshot`, `browser.click`, `browser.type`, `browser.wait`, `browser.press`, `browser.sessions`, and `browser.close`
+- **Bounded tools** — session inspection plus Chromium-backed `browser_open`, `browser_extract`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_wait`, `browser_press`, `browser_sessions`, and `browser_close`
 - **3-tier tool risk levels** — Tools are classified as ReadOnly, Mutating, or Destructive. Approval gates are controlled via `FRANKCLAW_TOOL_APPROVAL` with per-tool overrides.
 - **Bash tool** — Shell command execution with timeout, output truncation, and configurable security policy (deny-all, allowlist, or allow-all)
 - **Optional sandbox** — [ai-jail](https://github.com/akitaonrails/ai-jail) integration (bubblewrap + landlock) for OS-level command isolation, complementary to the bash allowlist
 - **Operator support** — interactive setup wizard, doctor diagnostics, security audit with severity ratings, process management (start/stop daemon), status, remote exposure checks, onboarding, and systemd unit generation
-- **Docker runtime** — `docker compose up gateway chromium` starts the gateway plus a local DevTools endpoint for browser tools
+- **Docker runtime** — `docker compose up -d` starts the gateway, headless Chromium, and Cloudflare tunnel in one command
 - **Prompt templates** — All LLM-facing text lives in editable markdown files, embedded at compile time
+- **Media understanding** — Multi-provider vision (OpenAI, Anthropic, Ollama) and audio transcription (Whisper) with ordered fallback chain, configurable via `understanding` config section
+- **Memory/RAG** — SQLite FTS5 full-text search + cosine vector similarity with hybrid scoring, embedding providers (OpenAI, Ollama, Gemini, Voyage AI) with SHA-256 caching, paragraph-based chunking, automatic file sync
+- **Rich web console** — 8-tab interface (Connect, Chat, Canvas, System, Usage, Agents, Cron, Logs) with dark/light mode, tool approval cards, image paste, usage analytics with CSV export, focus mode, resizable markdown sidebar, WebSocket auto-reconnect with keepalive
+- **Webhook transforms** — JSON path extraction from nested payloads, message templates, per-mapping concurrency limits and fixed-window rate limiting
 - **Media pipeline** — File handling with SSRF protection, filename sanitization, and optional VirusTotal malware scanning
 - **Internationalized CLI** — 9 locales (en, pt-BR, pt-PT, es, fr, de, it, ja, ko) via `FRANKCLAW_LANG`
-- **Plugin system** — Trait-based channel and provider adapters
+- **Plugin system** — Manifest-based plugin discovery, enable/disable lifecycle, CLI management (`frankclaw plugin`)
 - **Zero unsafe code** — `#![forbid(unsafe_code)]` on every crate
 
 ## Architecture
@@ -94,16 +108,16 @@ For channel setup, see [CHANNEL_SETUP.md](docs/CHANNEL_SETUP.md), `examples/chan
 |-------|-------------|
 | `frankclaw-core` | Shared types, traits, error hierarchy, SSRF IP blocklist |
 | `frankclaw-crypto` | ChaCha20-Poly1305 encryption, Argon2id hashing, HMAC-SHA256 key derivation |
-| `frankclaw-gateway` | Axum WebSocket + HTTP server, auth, rate limiting, config hot-reload, tunnel support |
+| `frankclaw-gateway` | Axum WebSocket + HTTP server, auth, rate limiting, config hot-reload, tunnel support, 8-tab web console, webhook limiter |
 | `frankclaw-sessions` | SQLite session store with optional encrypted transcripts |
-| `frankclaw-models` | AI provider adapters (OpenAI, Anthropic, Ollama) with failover, circuit breaker, caching, cost tracking, smart routing |
+| `frankclaw-models` | AI provider adapters (OpenAI, Anthropic, Ollama, Copilot, Gemini, OpenRouter, Groq, Together, DeepSeek) with model-aware failover, circuit breaker, caching, cost tracking, smart routing |
 | `frankclaw-channels` | Messaging channel adapters (Web, Telegram, Discord, Slack, Signal, WhatsApp, Email) |
-| `frankclaw-runtime` | Agent runtime, prompt templates, subagent orchestration, context compaction |
-| `frankclaw-tools` | Tool registry, bash execution (with optional ai-jail sandbox), browser tools, MCP client |
-| `frankclaw-memory` | Vector search traits for long-term memory |
+| `frankclaw-runtime` | Agent runtime, prompt templates, subagent orchestration, context compaction, hooks wiring |
+| `frankclaw-tools` | Tool registry, bash execution (with optional ai-jail sandbox), browser tools, MCP client, audio transcription |
+| `frankclaw-memory` | SQLite FTS5 + vector memory store with embedding providers (OpenAI, Ollama, Gemini, Voyage AI), caching, file sync |
 | `frankclaw-cron` | Scheduled jobs with event triggers, job state machine, and self-repair |
-| `frankclaw-media` | File storage with SSRF-safe HTTP fetcher and optional VirusTotal malware scanning |
-| `frankclaw-plugin-sdk` | Plugin registry for extending channels and tools |
+| `frankclaw-media` | File storage with SSRF-safe HTTP fetcher, optional VirusTotal malware scanning, multi-provider media understanding (vision + transcription) |
+| `frankclaw-plugin-sdk` | Plugin registry with manifest parsing, filesystem discovery, enable/disable lifecycle |
 | `frankclaw-cli` | CLI binary with all subcommands |
 
 ## Requirements
@@ -130,7 +144,7 @@ The binary is at `target/release/frankclaw`.
 ./target/release/frankclaw onboard --channel web
 ```
 
-This creates `~/.local/share/frankclaw/frankclaw.json` with secure defaults and `0600` file permissions.
+This creates `~/.local/share/frankclaw/frankclaw.toml` with secure defaults and `0600` file permissions.
 Use `--channel telegram`, `--channel whatsapp`, `--channel slack`, `--channel discord`, `--channel signal`, or `--channel email` to start from a channel-specific profile.
 
 ### 3. Generate an Auth Token
@@ -141,34 +155,24 @@ Use `--channel telegram`, `--channel whatsapp`, `--channel slack`, `--channel di
 
 Copy the output token (256-bit, base64url-encoded) and add it to your config:
 
-```json
-{
-  "gateway": {
-    "auth": {
-      "mode": "token",
-      "token": "YOUR_TOKEN_HERE"
-    }
-  }
-}
+```toml
+[gateway.auth]
+mode = "token"
+token = "YOUR_TOKEN_HERE"
 ```
 
 ### 4. Configure a Model Provider
 
 Add at least one AI provider to your config. For local-only setup with Ollama:
 
-```json
-{
-  "models": {
-    "providers": [
-      {
-        "id": "ollama",
-        "api": "ollama",
-        "base_url": "http://127.0.0.1:11434"
-      }
-    ],
-    "default_model": "llama3"
-  }
-}
+```toml
+[models]
+default_model = "llama3"
+
+[[models.providers]]
+id = "ollama"
+api = "ollama"
+base_url = "http://127.0.0.1:11434"
 ```
 
 For OpenAI or Anthropic, set the API key via environment variable:
@@ -181,20 +185,13 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 And add the provider to config:
 
-```json
-{
-  "models": {
-    "providers": [
-      {
-        "id": "openai",
-        "api": "openai",
-        "base_url": "https://api.openai.com/v1",
-        "api_key_ref": "OPENAI_API_KEY",
-        "models": ["gpt-4o", "gpt-4o-mini"]
-      }
-    ]
-  }
-}
+```toml
+[[models.providers]]
+id = "openai"
+api = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_ref = "OPENAI_API_KEY"
+models = ["gpt-4o", "gpt-4o-mini"]
 ```
 
 ### 5. Start the Gateway
@@ -240,63 +237,69 @@ chromium \
 
 ### Docker Compose Mode
 
-```bash
-cp examples/channels/web.json frankclaw.json
-docker compose up -d gateway chromium
-```
-
-This starts a local Chromium container exposing DevTools on `127.0.0.1:9222`.
-
-If you need a non-default endpoint, set:
+`docker compose up -d` starts three services: the FrankClaw gateway, headless Chromium (for browser tools), and a Cloudflare tunnel (for webhook exposure). All services communicate over an internal Docker network.
 
 ```bash
-export FRANKCLAW_BROWSER_DEVTOOLS_URL="http://127.0.0.1:9222/"
+# 1. Create your config from the example
+cp frankclaw.toml.example frankclaw.toml
+# Edit frankclaw.toml — enable channels, set auth token, add tools
+
+# 2. Set up secrets
+cp .env.docker.example .env.docker
+# Edit .env.docker — add API keys, channel tokens
+
+# 3. Set up Cloudflare tunnel (for public webhook access)
+cp docker/cloudflared/config.yml.example docker/cloudflared/config.yml
+# Edit config.yml — set your hostname
+cp ~/.cloudflared/<tunnel-id>.json docker/cloudflared/credentials.json
+cp ~/.cloudflared/cert.pem docker/cloudflared/cert.pem
+chmod 644 docker/cloudflared/credentials.json docker/cloudflared/cert.pem
+
+# 4. Start everything
+docker compose up -d
 ```
+
+The gateway binds to `0.0.0.0` inside the container (LAN mode) so cloudflared can reach it. Auth is required — set a token in `frankclaw.toml`. To access the gateway directly from the host (for debugging), uncomment the `ports` section in `docker-compose.yml`.
 
 Then allow browser tools on an agent:
 
-```json
-{
-  "agents": {
-    "default_agent": "default",
-    "agents": {
-      "default": {
-        "tools": [
-          "session.inspect",
-          "browser.open",
-          "browser.extract",
-          "browser.snapshot",
-          "browser.click",
-          "browser.type",
-          "browser.wait",
-          "browser.press",
-          "browser.sessions",
-          "browser.close"
-        ]
-      }
-    }
-  }
-}
+```toml
+[agents]
+default_agent = "default"
+
+[agents.agents.default]
+tools = [
+    "session_inspect",
+    "browser_open",
+    "browser_extract",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_wait",
+    "browser_press",
+    "browser_sessions",
+    "browser_close",
+]
 ```
 
 Example use:
 
 ```bash
-frankclaw tools invoke --tool browser.open --session default:web:control --args '{"url":"https://example.com"}'
-frankclaw tools invoke --tool browser.extract --session default:web:control
-frankclaw tools invoke --tool browser.snapshot --session default:web:control
+frankclaw tools invoke --tool browser_open --session default:web:control --args '{"url":"https://example.com"}'
+frankclaw tools invoke --tool browser_extract --session default:web:control
+frankclaw tools invoke --tool browser_snapshot --session default:web:control
 FRANKCLAW_TOOL_APPROVAL=mutating \
-frankclaw tools invoke --tool browser.type --session default:web:control --args '{"selector":"input[name=q]","text":"frankclaw"}'
+frankclaw tools invoke --tool browser_type --session default:web:control --args '{"selector":"input[name=q]","text":"frankclaw"}'
 FRANKCLAW_TOOL_APPROVAL=mutating \
-frankclaw tools invoke --tool browser.click --session default:web:control --args '{"selector":"button[type=submit]"}'
-frankclaw tools invoke --tool browser.wait --session default:web:control --args '{"selector":"#results","timeout_ms":2000}'
+frankclaw tools invoke --tool browser_click --session default:web:control --args '{"selector":"button[type=submit]"}'
+frankclaw tools invoke --tool browser_wait --session default:web:control --args '{"selector":"#results","timeout_ms":2000}'
 FRANKCLAW_TOOL_APPROVAL=mutating \
-frankclaw tools invoke --tool browser.press --session default:web:control --args '{"selector":"input[name=q]","key":"Enter"}'
-frankclaw tools invoke --tool browser.sessions --session default:web:control
-frankclaw tools invoke --tool browser.close --session default:web:control
+frankclaw tools invoke --tool browser_press --session default:web:control --args '{"selector":"input[name=q]","key":"Enter"}'
+frankclaw tools invoke --tool browser_sessions --session default:web:control
+frankclaw tools invoke --tool browser_close --session default:web:control
 ```
 
-`browser.click`, `browser.type`, `browser.press`, and `browser.select_option` are classified as **Mutating** tools and require `FRANKCLAW_TOOL_APPROVAL=mutating` (or the legacy `FRANKCLAW_ALLOW_BROWSER_MUTATIONS=1`).
+`browser_click`, `browser_type`, `browser_press`, and `browser_select_option` are classified as **Mutating** tools and require `FRANKCLAW_TOOL_APPROVAL=mutating` (or the legacy `FRANKCLAW_ALLOW_BROWSER_MUTATIONS=1`).
 
 Live regression check against a real local Chromium instance:
 
@@ -309,6 +312,12 @@ FRANKCLAW_BROWSER_DEVTOOLS_URL=http://127.0.0.1:9223/ \
 
 ```
 frankclaw chat            Interactive REPL chat (streaming, slash commands, tab completion)
+frankclaw chat --tui      Full-screen TUI mode (ratatui)
+frankclaw acp             Start ACP server (JSON-RPC 2.0 over NDJSON stdin/stdout)
+frankclaw plugin list     List discovered plugins
+frankclaw plugin enable   Enable a plugin by ID
+frankclaw plugin disable  Disable a plugin by ID
+frankclaw plugin info     Show plugin details
 frankclaw gateway         Start the gateway server
 frankclaw gen-token       Generate a 256-bit auth token
 frankclaw hash-password   Hash a password with Argon2id for config
@@ -443,7 +452,7 @@ The config file and `.env` may contain API keys and tokens. **Mitigation:** `060
 | **Channel adapters** | WASM-based plugin channels | 7 native compiled-in adapters (Web, Telegram, Discord, Slack, Signal, WhatsApp, Email) |
 | **Tool approval** | Capability-based permissions per workspace | 3-tier risk levels (ReadOnly/Mutating/Destructive) with per-tool overrides |
 | **Encryption at rest** | AES-256-GCM credential vault | ChaCha20-Poly1305 for sessions, config, and credentials |
-| **Memory / search** | PostgreSQL pgvector + FTS with reciprocal rank fusion | Vector search trait (LanceDB backend planned), SQLite FTS |
+| **Memory / search** | PostgreSQL pgvector + FTS with reciprocal rank fusion | SQLite FTS5 + cosine vector search with hybrid scoring, embedding providers (OpenAI, Ollama), file sync |
 | **LLM resilience** | Circuit breaker + retry + smart routing | Circuit breaker + retry with exponential backoff + jitter, smart routing (13-dimension complexity scorer), response caching, cost tracking with budget guards |
 | **MCP integration** | JSON-RPC client (stdio, HTTP, Unix socket) | JSON-RPC 2.0 client (stdio, HTTP) with tool wrapping and risk level mapping |
 | **Default AI provider** | NEAR AI (with OpenRouter, Together, Fireworks, Ollama) | Any OpenAI-compatible API, Anthropic, Ollama |
@@ -463,91 +472,91 @@ The config file and `.env` may contain API keys and tokens. **Mitigation:** `060
 
 ## Configuration Reference
 
-FrankClaw uses a single JSON config file. All fields have secure defaults.
+FrankClaw uses a single TOML config file. All fields have secure defaults.
 
-```jsonc
-{
-  // Gateway server settings
-  "gateway": {
-    "port": 18789,              // TCP port
-    "bind": "loopback",         // "loopback", "lan", or a specific IP
-    "auth": {
-      "mode": "token",          // "none", "token", "password", "trusted_proxy", "tailscale"
-      "token": "..."            // 256-bit base64url token (from gen-token)
-    },
-    "rate_limit": {
-      "max_attempts": 5,        // Failed auths before lockout
-      "window_secs": 60,        // Sliding window
-      "lockout_secs": 300       // Lockout duration
-    },
-    "max_ws_message_bytes": 4194304,  // 4 MB
-    "max_connections": 64
-  },
+```toml
+# Gateway server settings
+[gateway]
+port = 18789                    # TCP port
+bind = "loopback"               # "loopback", "lan", or a specific IP
+max_ws_message_bytes = 4194304  # 4 MB
+max_connections = 64
 
-  // Agent definitions
-  "agents": {
-    "default_agent": "default",
-    "agents": {
-      "default": {
-        "name": "Default Agent",
-        "model": "gpt-4o",
-        "system_prompt": "You are a helpful assistant.",
-        "sandbox": { "mode": "none" }
-      }
-    }
-  },
+[gateway.auth]
+mode = "token"                  # "none", "token", "password", "trusted_proxy", "tailscale"
+token = "..."                   # 256-bit base64url token (from gen-token)
 
-  // Model providers (tried in order for failover)
-  "models": {
-    "providers": [
-      {
-        "id": "openai",
-        "api": "openai",
-        "base_url": "https://api.openai.com/v1",
-        "api_key_ref": "OPENAI_API_KEY",
-        "models": ["gpt-4o", "gpt-4o-mini"],
-        "cooldown_secs": 60
-      }
-    ],
-    "default_model": "gpt-4o"
-  },
+[gateway.rate_limit]
+max_attempts = 5                # Failed auths before lockout
+window_secs = 60                # Sliding window
+lockout_secs = 300              # Lockout duration
 
-  // Session management
-  "session": {
-    "scoping": "main",         // "main", "per_peer", "per_channel_peer", "global"
-    "reset": {
-      "daily_at_hour": null,   // UTC hour (0-23) or null
-      "idle_timeout_secs": null,
-      "max_entries": 500
-    },
-    "pruning": {
-      "max_age_days": 30,
-      "max_sessions_per_agent": 500,
-      "disk_budget_bytes": 10485760  // 10 MB
-    }
-  },
+# Agent definitions
+[agents]
+default_agent = "default"
 
-  // Security settings
-  "security": {
-    "encrypt_sessions": true,   // ChaCha20-Poly1305 encryption at rest
-    "encrypt_media": false,     // Optional media encryption (performance trade-off)
-    "ssrf_protection": true,    // Block fetches to private IP ranges
-    "max_webhook_body_bytes": 1048576  // 1 MB
-  },
+[agents.agents.default]
+name = "Default Agent"
+model = "gpt-4o"
+system_prompt = "You are a helpful assistant."
 
-  // Media pipeline
-  "media": {
-    "max_file_size_bytes": 5242880,  // 5 MB
-    "ttl_hours": 2
-  },
+[agents.agents.default.sandbox]
+mode = "none"
 
-  // Logging
-  "logging": {
-    "level": "info",           // trace, debug, info, warn, error
-    "format": "pretty",       // "pretty", "json", "compact"
-    "redact_secrets": true     // Replace secrets with [REDACTED] in logs
-  }
-}
+# Model providers (tried in order for failover)
+[models]
+default_model = "gpt-4o"
+
+[[models.providers]]
+id = "openai"
+api = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_ref = "OPENAI_API_KEY"
+models = ["gpt-4o", "gpt-4o-mini"]
+cooldown_secs = 60
+
+# Session management
+[session]
+scoping = "main"                # "main", "per_peer", "per_channel_peer", "global"
+
+[session.reset]
+# daily_at_hour = 0             # UTC hour (0-23), omit to disable
+# idle_timeout_secs = 3600      # omit to disable
+max_entries = 500
+
+[session.pruning]
+max_age_days = 30
+max_sessions_per_agent = 500
+disk_budget_bytes = 10485760    # 10 MB
+
+# Security settings
+[security]
+encrypt_sessions = true         # ChaCha20-Poly1305 encryption at rest
+encrypt_media = false           # Optional media encryption (performance trade-off)
+ssrf_protection = true          # Block fetches to private IP ranges
+max_webhook_body_bytes = 1048576  # 1 MB
+
+# Media pipeline
+[media]
+max_file_size_bytes = 5242880   # 5 MB
+ttl_hours = 2
+
+# Media understanding (vision + transcription)
+[understanding]
+enabled = false
+vision_provider = "openai"          # "openai", "anthropic", "ollama", or "none"
+vision_model = "gpt-4o"
+vision_api_key_ref = "OPENAI_API_KEY"
+transcription_provider = "openai"   # "openai" or "none"
+transcription_model = "whisper-1"
+transcription_api_key_ref = "OPENAI_API_KEY"
+auto_transcribe_voice = false
+
+# Logging
+[logging]
+level = "info"                  # trace, debug, info, warn, error
+format = "pretty"               # "pretty", "json", "compact"
+redact_secrets = true           # Replace secrets with [REDACTED] in logs
 ```
 
 ## Environment Variables
@@ -613,7 +622,7 @@ frankclaw/
 │   ├── frankclaw-sessions/    # SQLite session store
 │   ├── frankclaw-models/      # AI model providers
 │   ├── frankclaw-channels/    # Messaging channel adapters
-│   ├── frankclaw-memory/      # Vector memory traits
+│   ├── frankclaw-memory/      # SQLite FTS5 + vector memory store
 │   ├── frankclaw-cron/        # Scheduled jobs
 │   ├── frankclaw-runtime/     # Agent runtime & prompt templates
 │   ├── frankclaw-tools/       # Tool registry, bash & browser tools
@@ -651,7 +660,17 @@ See [PARITY_TODO.md](docs/PARITY_TODO.md) for the current parity tracker.
 - [x] Tunnel support (Cloudflare, ngrok, custom)
 - [x] Job state machine with self-repair
 - [x] Event-driven routine triggers
-- [ ] LanceDB vector memory backend
+- [x] Memory/RAG with SQLite FTS5 + vector search
+- [x] Multi-provider media understanding (vision + transcription)
+- [x] Rich web console (8 tabs, dark mode, tool approval, analytics)
+- [x] Webhook transforms (JSON path, templates, rate limiting)
+- [x] Hook lifecycle wiring (message + tool events)
+- [x] Full-screen TUI with ratatui (`frankclaw chat --tui`)
+- [x] ACP protocol (JSON-RPC 2.0 over NDJSON)
+- [x] Plugin management with manifest discovery and lifecycle
+- [x] Browser profiles with CDP port allocation
+- [x] Batch embedding providers (Gemini, Voyage AI)
+- [x] Rich markdown rendering (CommonMark → IR → ANSI)
 - [ ] Long-tail attachment/media edge cases on supported channels
 - [ ] Companion nodes and apps
 - [ ] Voice

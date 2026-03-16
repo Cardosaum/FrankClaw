@@ -138,16 +138,14 @@ impl CostGuard {
     }
 
     /// Record a completed LLM call. Call this AFTER the LLM call completes.
-    pub async fn record_llm_call(
-        &self,
-        model: &str,
-        input_tokens: u32,
-        output_tokens: u32,
-    ) -> f64 {
+    pub async fn record_llm_call(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
         let (input_rate, output_rate) =
             costs::model_cost(model).unwrap_or_else(costs::default_cost);
 
-        let cost = input_rate.mul_add(f64::from(input_tokens), output_rate * f64::from(output_tokens));
+        let cost = input_rate.mul_add(
+            f64::from(input_tokens),
+            output_rate * f64::from(output_tokens),
+        );
 
         // Update daily cost (reset if new day)
         {
@@ -317,9 +315,7 @@ mod tests {
     async fn daily_spend_tracking(unlimited_guard: CostGuard) {
         assert_eq!(unlimited_guard.daily_spend().await, 0.0);
 
-        let cost = unlimited_guard
-            .record_llm_call("gpt-4o", 1000, 500)
-            .await;
+        let cost = unlimited_guard.record_llm_call("gpt-4o", 1000, 500).await;
         assert!(cost > 0.0);
         assert_eq!(unlimited_guard.daily_spend().await, cost);
     }
@@ -340,9 +336,7 @@ mod tests {
         assert!(unlimited_guard.model_usage().await.is_empty());
 
         unlimited_guard.record_llm_call("gpt-4o", 1000, 500).await;
-        unlimited_guard
-            .record_llm_call("gpt-4o", 2000, 1000)
-            .await;
+        unlimited_guard.record_llm_call("gpt-4o", 2000, 1000).await;
         unlimited_guard
             .record_llm_call("claude-3-5-sonnet-20241022", 500, 200)
             .await;

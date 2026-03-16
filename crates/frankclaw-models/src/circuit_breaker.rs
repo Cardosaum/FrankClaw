@@ -69,7 +69,10 @@ impl CircuitBreaker {
 
     /// Current circuit state (may transition Open → HalfOpen if timeout elapsed).
     pub fn circuit_state(&self) -> CircuitState {
-        let mut s = self.state.lock().expect("invariant: breaker mutex not poisoned");
+        let mut s = self
+            .state
+            .lock()
+            .expect("invariant: breaker mutex not poisoned");
         maybe_transition_to_half_open(&mut s, &self.config);
         s.state
     }
@@ -84,7 +87,10 @@ impl CircuitBreaker {
     /// Check if a call is allowed. Returns `false` if the circuit is open
     /// and the recovery timeout hasn't elapsed yet.
     pub fn check_allowed(&self) -> bool {
-        let mut s = self.state.lock().expect("invariant: breaker mutex not poisoned");
+        let mut s = self
+            .state
+            .lock()
+            .expect("invariant: breaker mutex not poisoned");
         maybe_transition_to_half_open(&mut s, &self.config);
         // Open state blocks; Closed and HalfOpen allow.
         s.state != CircuitState::Open
@@ -92,7 +98,10 @@ impl CircuitBreaker {
 
     /// Record a successful call.
     pub fn record_success(&self) {
-        let mut s = self.state.lock().expect("invariant: breaker mutex not poisoned");
+        let mut s = self
+            .state
+            .lock()
+            .expect("invariant: breaker mutex not poisoned");
         match s.state {
             CircuitState::Closed => {
                 s.consecutive_failures = 0;
@@ -113,7 +122,10 @@ impl CircuitBreaker {
     /// Record a transient failure. Non-transient errors should NOT be recorded
     /// (e.g., auth failures, context length exceeded, model not found).
     pub fn record_failure(&self) {
-        let mut s = self.state.lock().expect("invariant: breaker mutex not poisoned");
+        let mut s = self
+            .state
+            .lock()
+            .expect("invariant: breaker mutex not poisoned");
         match s.state {
             CircuitState::Closed => {
                 s.consecutive_failures += 1;

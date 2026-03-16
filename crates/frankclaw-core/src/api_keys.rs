@@ -178,7 +178,10 @@ fn compute_cooldown(consecutive_failures: u32, reason: FailureReason) -> Duratio
     // Exponential: base * 5^(failures-1), capped at MAX_COOLDOWN.
     let exponent = consecutive_failures.saturating_sub(1).min(5);
     let multiplier = 5u64.pow(exponent);
-    #[expect(clippy::cast_possible_truncation, reason = "multiplier is at most 5^5 = 3125, which fits in u32")]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "multiplier is at most 5^5 = 3125, which fits in u32"
+    )]
     let cooldown = base.saturating_mul(multiplier as u32);
 
     cooldown.min(MAX_COOLDOWN)
@@ -230,7 +233,10 @@ impl ProviderKeyManager {
 
     /// List registered providers.
     pub fn providers(&self) -> Vec<&str> {
-        self.rotators.keys().map(std::string::String::as_str).collect()
+        self.rotators
+            .keys()
+            .map(std::string::String::as_str)
+            .collect()
     }
 }
 

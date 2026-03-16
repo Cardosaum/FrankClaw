@@ -281,3 +281,38 @@ warn.no_channels: チャンネルが設定されていません
 warn.no_providers: モデルプロバイダが設定されていません
 warn.state_missing: "ステートディレクトリ '%{path}' はまだ存在しません"
 warn.whatsapp_no_secret: WhatsAppチャンネルに app_secret が設定されていません。受信Webhookの署名が検証されません
+audit.secrets.ref_shadowed: "チャンネル '%{channel}' に '%{inline_key}' と '%{env_key}' の両方が設定されています — インライン値が環境変数参照を上書きしています"
+audit.secrets.ref_shadowed_fix: "インラインフィールド '%{inline_key}' を削除し、環境変数参照のみを残してください"
+audit.secrets.plaintext_env: "ファイル '%{file}' に %{key} の平文シークレットが含まれています"
+audit.secrets.plaintext_env_fix: "シークレットを '%{file}' からシークレットマネージャーまたは暗号化されたボルトに移動してください"
+audit.secrets.legacy_file: "レガシー認証情報ファイルが見つかりました: %{file}"
+audit.secrets.legacy_file_fix: レガシーファイルを削除し、代わりに環境変数参照を使用してください
+login.copilot.starting: GitHub Copilot認証を開始しています...
+login.copilot.open_url: "ブラウザでこのURLを開いてください: %{url}"
+login.copilot.enter_code: "このコードを入力してください: %{code}"
+login.copilot.waiting: 認可を待機中...
+login.copilot.success: "GitHub Copilotトークンを保存しました: %{path}"
+login.copilot.next_steps: "設定に追加してください: { \"id\": \"copilot\", \"api\": \"github-copilot\", \"models\": [\"gpt-4o\"] }"
+login.unsupported: "サポートされていないログインプロバイダ '%{provider}'。対応プロバイダ: github-copilot"
+plugin.list_title: 検出されたプラグイン
+plugin.none_found: プラグインが見つかりません。
+plugin.enabled: 有効
+plugin.disabled: 無効
+plugin.enabled_msg: "プラグイン '%{id}' を有効にしました。"
+plugin.disabled_msg: "プラグイン '%{id}' を無効にしました。"
+plugin.not_found: "プラグイン '%{id}' が見つかりません。"
+plugin.info_id: ID
+plugin.info_name: 名前
+plugin.info_version: バージョン
+plugin.info_description: 説明
+plugin.info_path: パス
+plugin.info_status: ステータス
+plugin.info_channels: チャンネル
+plugin.info_tools: ツール
+tui.status_idle: 待機中
+tui.status_streaming: ストリーミング中
+tui.status_error: エラー
+tui.input_placeholder: メッセージを入力...
+acp.starting: ACPサーバーを起動しています（JSON-RPC 2.0 over NDJSON）...
+acp.ready: ACPサーバー準備完了。標準入力から読み取り中。
+acp.error: "ACPエラー: %{error}"

@@ -109,7 +109,10 @@ mod tests {
             .map(|_| retry_backoff_delay(1).as_millis())
             .sum::<u128>()
             / 100;
-        assert!(avg_1 > avg_0, "attempt 1 avg ({avg_1}) should be > attempt 0 avg ({avg_0})");
+        assert!(
+            avg_1 > avg_0,
+            "attempt 1 avg ({avg_1}) should be > attempt 0 avg ({avg_0})"
+        );
     }
 
     #[test]

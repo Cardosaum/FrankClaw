@@ -4,14 +4,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
+    Router,
     body::Bytes,
-    extract::{
-        ConnectInfo, Json, Path, Query, State, WebSocketUpgrade,
-    },
+    extract::{ConnectInfo, Json, Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Router,
 };
 use tower_http::{
     compression::CompressionLayer,
@@ -22,9 +20,7 @@ use tracing::info;
 
 use frankclaw_core::channel::{InboundMessage, OutboundMessage};
 use frankclaw_core::config::{BindMode, ChannelDmPolicy, FrankClawConfig};
-use frankclaw_core::error::{
-    ConfigValidation, InvalidRequest, RequestTooLarge, SessionStorage,
-};
+use frankclaw_core::error::{ConfigValidation, InvalidRequest, RequestTooLarge, SessionStorage};
 use frankclaw_core::session::SessionStore;
 use frankclaw_core::types::MediaId;
 use frankclaw_cron::{CronJob, CronService};
@@ -32,9 +28,12 @@ use frankclaw_media::MediaStore;
 use frankclaw_runtime::Runtime;
 use frankclaw_sessions::SqliteSessionStore;
 
-use crate::auth::{authenticate, validate_bind_auth, AuthCredential};
 use crate::audit::{log_event, log_failure};
-use crate::delivery::{DeliveryRecord, StoredReplyChunk, StoredReplyMetadata, deliver_outbound_message, set_last_reply_in_metadata};
+use crate::auth::{AuthCredential, authenticate, validate_bind_auth};
+use crate::delivery::{
+    DeliveryRecord, StoredReplyChunk, StoredReplyMetadata, deliver_outbound_message,
+    set_last_reply_in_metadata,
+};
 use crate::pairing::PairingStore;
 use crate::rate_limit::AuthRateLimiter;
 use crate::state::GatewayState;
@@ -58,11 +57,20 @@ pub async fn run(
     let rate_limiter = Arc::new(AuthRateLimiter::new(config.gateway.rate_limit.clone()));
     let bind_addr = resolve_bind_addr(&config.gateway.bind, config.gateway.port);
     let channels = Arc::new(frankclaw_channels::load_from_config(&config)?);
-    let state = GatewayState::new(config, sessions, runtime, channels, pairing, media);
+    let state = GatewayState::with_cron(
+        config,
+        sessions,
+        runtime,
+        channels,
+        pairing,
+        media,
+        Some(cron.clone()),
+    );
     log_loaded_skills(&state);
     start_config_watcher(state.clone(), config_path);
     start_channel_runtime(state.clone());
     start_session_maintenance(state.clone());
+    crate::health_monitor::start_health_monitor(state.clone());
     start_cron_runtime(state.clone(), cron).await?;
 
     let app = build_router(state.clone(), rate_limiter);
@@ -81,10 +89,7 @@ pub async fn run(
     Ok(())
 }
 
-fn build_router(
-    state: Arc<GatewayState>,
-    rate_limiter: Arc<AuthRateLimiter>,
-) -> Router {
+fn build_router(state: Arc<GatewayState>, rate_limiter: Arc<AuthRateLimiter>) -> Router {
     Router::new()
         .route("/", get(crate::ui::index))
         // WebSocket endpoint.
@@ -104,6 +109,17 @@ fn build_router(
         .route("/api/pairing/pending", get(pairing_pending_handler))
         .route("/api/pairing/approve", post(pairing_approve_handler))
         .route("/hooks/{mapping_id}", post(webhook_handler))
+        // OpenAI-compatible API (uses Arc<GatewayState> directly).
+        .nest(
+            "/v1",
+            Router::new()
+                .route(
+                    "/chat/completions",
+                    post(crate::openai_api::chat_completions_handler),
+                )
+                .route("/models", get(crate::openai_api::models_handler))
+                .with_state(state.clone()),
+        )
         // State.
         .with_state(AppState {
             gateway: state,
@@ -180,7 +196,8 @@ async fn ws_handler(
                     "reason": e.to_string(),
                 }),
             );
-            let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (status, e.to_string()).into_response()
         }
     }
@@ -195,46 +212,40 @@ fn extract_credential(
     match mode {
         frankclaw_core::auth::AuthMode::Token { .. } => {
             if let Some(token) = query.and_then(|query| query.token.as_deref()) {
-                return AuthCredential::BearerToken(secrecy::SecretString::from(
-                    token.to_string(),
-                ));
+                return AuthCredential::BearerToken(secrecy::SecretString::from(token.to_string()));
             }
             if let Some(auth) = headers.get("authorization")
                 && let Ok(value) = auth.to_str()
-                    && let Some(token) = value.strip_prefix("Bearer ") {
-                        return AuthCredential::BearerToken(secrecy::SecretString::from(
-                            token.to_string(),
-                        ));
-                    }
+                && let Some(token) = value.strip_prefix("Bearer ")
+            {
+                return AuthCredential::BearerToken(secrecy::SecretString::from(token.to_string()));
+            }
         }
         frankclaw_core::auth::AuthMode::Password { .. } => {
             if let Some(password) = query.and_then(|query| query.password.as_deref()) {
-                return AuthCredential::Password(secrecy::SecretString::from(
-                    password.to_string(),
-                ));
+                return AuthCredential::Password(secrecy::SecretString::from(password.to_string()));
             }
             if let Some(password) = headers.get("x-frankclaw-password")
-                && let Ok(value) = password.to_str() {
-                    return AuthCredential::Password(secrecy::SecretString::from(
-                        value.to_string(),
-                    ));
-                }
+                && let Ok(value) = password.to_str()
+            {
+                return AuthCredential::Password(secrecy::SecretString::from(value.to_string()));
+            }
             if let Some(auth) = headers.get("authorization")
                 && let Ok(value) = auth.to_str()
-                    && let Some(password) = value.strip_prefix("Password ") {
-                        return AuthCredential::Password(secrecy::SecretString::from(
-                            password.to_string(),
-                        ));
-                    }
+                && let Some(password) = value.strip_prefix("Password ")
+            {
+                return AuthCredential::Password(secrecy::SecretString::from(password.to_string()));
+            }
         }
         frankclaw_core::auth::AuthMode::TrustedProxy { identity_header } => {
             if let Some(identity) = query.and_then(|query| query.identity.as_deref()) {
                 return AuthCredential::ProxyIdentity(identity.to_string());
             }
             if let Some(identity) = headers.get(identity_header.as_str())
-                && let Ok(value) = identity.to_str() {
-                    return AuthCredential::ProxyIdentity(value.to_string());
-                }
+                && let Ok(value) = identity.to_str()
+            {
+                return AuthCredential::ProxyIdentity(value.to_string());
+            }
         }
         frankclaw_core::auth::AuthMode::Tailscale => {
             for header_name in [
@@ -243,9 +254,10 @@ fn extract_credential(
                 "x-tailscale-user-login",
             ] {
                 if let Some(identity) = headers.get(header_name)
-                    && let Ok(value) = identity.to_str() {
-                        return AuthCredential::TailscaleIdentity(value.to_string());
-                    }
+                    && let Ok(value) = identity.to_str()
+                {
+                    return AuthCredential::TailscaleIdentity(value.to_string());
+                }
             }
         }
         frankclaw_core::auth::AuthMode::None => {}
@@ -352,13 +364,8 @@ async fn web_inbound_handler(
         .session_key
         .map(frankclaw_core::types::SessionKey::from_raw);
 
-    match process_inbound_message_with_target(
-        state.gateway.clone(),
-        inbound,
-        agent_id,
-        session_key,
-    )
-    .await
+    match process_inbound_message_with_target(state.gateway.clone(), inbound, agent_id, session_key)
+        .await
     {
         Ok(Some(result)) => (
             StatusCode::ACCEPTED,
@@ -441,7 +448,12 @@ async fn media_upload_handler(
         .filter(|value| !value.is_empty())
         .unwrap_or("upload.bin");
 
-    match state.gateway.media.store(filename, content_type, &body).await {
+    match state
+        .gateway
+        .media
+        .store(filename, content_type, &body)
+        .await
+    {
         Ok(media) => (
             StatusCode::CREATED,
             Json(serde_json::json!({
@@ -486,10 +498,9 @@ async fn media_download_handler(
             if let Ok(value) = HeaderValue::from_str(&media.mime_type) {
                 response_headers.insert(axum::http::header::CONTENT_TYPE, value);
             }
-            if let Ok(value) = HeaderValue::from_str(&format!(
-                "inline; filename=\"{}\"",
-                media.filename
-            )) {
+            if let Ok(value) =
+                HeaderValue::from_str(&format!("inline; filename=\"{}\"", media.filename))
+            {
                 response_headers.insert(axum::http::header::CONTENT_DISPOSITION, value);
             }
 
@@ -538,7 +549,10 @@ fn web_inbound_text_or_placeholder(
 }
 
 #[derive(Debug, serde::Deserialize)]
-#[expect(clippy::struct_field_names, reason = "field names match the external API query parameter names (hub.mode, hub.challenge, hub.verify_token)")]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names match the external API query parameter names (hub.mode, hub.challenge, hub.verify_token)"
+)]
 struct WhatsAppVerifyQuery {
     #[serde(rename = "hub.mode")]
     hub_mode: Option<String>,
@@ -644,7 +658,9 @@ async fn whatsapp_webhook_inbound_handler(
             );
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("invalid whatsapp webhook JSON: {err}") })),
+                Json(
+                    serde_json::json!({ "error": format!("invalid whatsapp webhook JSON: {err}") }),
+                ),
             )
                 .into_response();
         }
@@ -669,7 +685,8 @@ async fn whatsapp_webhook_inbound_handler(
                 }),
             );
             return (
-                StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                StatusCode::from_u16(err.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 Json(serde_json::json!({ "error": err.to_string() })),
             )
                 .into_response();
@@ -745,7 +762,10 @@ async fn pairing_approve_handler(
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "webhook dispatch with channel-specific validation")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "webhook dispatch with channel-specific validation"
+)]
 async fn webhook_handler(
     State(state): State<AppState>,
     Path(mapping_id): Path<String>,
@@ -828,7 +848,7 @@ async fn webhook_handler(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": format!("invalid webhook JSON: {err}") })),
             )
-                .into_response()
+                .into_response();
         }
     };
     let resolved = match crate::webhooks::resolve_request(&config, &mapping_id, &payload) {
@@ -879,7 +899,8 @@ async fn webhook_handler(
                 }),
             );
             (
-                StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                StatusCode::from_u16(err.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 Json(serde_json::json!({ "error": err.to_string() })),
             )
                 .into_response()
@@ -905,7 +926,10 @@ async fn shutdown_signal(token: tokio_util::sync::CancellationToken) {
     }
 }
 
-#[expect(clippy::result_large_err, reason = "axum::Response must be returned as-is for HTTP error responses")]
+#[expect(
+    clippy::result_large_err,
+    reason = "axum::Response must be returned as-is for HTTP error responses"
+)]
 fn require_http_auth(
     state: &AppState,
     addr: SocketAddr,
@@ -1036,7 +1060,9 @@ async fn send_error_reply(
         frankclaw_core::error::FrankClawError::RequestTooLarge { .. } => {
             "Your message is too long. Please shorten it and try again.".to_string()
         }
-        frankclaw_core::error::FrankClawError::RateLimited { retry_after_secs, .. } => {
+        frankclaw_core::error::FrankClawError::RateLimited {
+            retry_after_secs, ..
+        } => {
             format!("Too many requests. Please wait {retry_after_secs} seconds and try again.")
         }
         _ => "Sorry, I encountered an error processing your message. Please try again later."
@@ -1068,7 +1094,10 @@ struct InboundProcessResult {
     session_key: frankclaw_core::types::SessionKey,
 }
 
-#[expect(clippy::too_many_lines, reason = "inbound message processing pipeline with streaming and delivery")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "inbound message processing pipeline with streaming and delivery"
+)]
 async fn process_inbound_message_with_target(
     state: Arc<GatewayState>,
     inbound: InboundMessage,
@@ -1090,9 +1119,12 @@ async fn process_inbound_message_with_target(
         .as_deref()
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .ok_or_else(|| InvalidRequest {
-            msg: "inbound message text is required",
-        }.build())?;
+        .ok_or_else(|| {
+            InvalidRequest {
+                msg: "inbound message text is required",
+            }
+            .build()
+        })?;
 
     let max_message_bytes = policy
         .max_message_bytes
@@ -1101,7 +1133,8 @@ async fn process_inbound_message_with_target(
     if text.len() > max_message_bytes {
         return RequestTooLarge {
             max_bytes: max_message_bytes,
-        }.fail();
+        }
+        .fail();
     }
 
     if inbound.is_group && policy.require_mention_for_groups && !inbound.is_mention {
@@ -1194,9 +1227,9 @@ async fn process_inbound_message_with_target(
             // Send initial "thinking" placeholder.
             let send_result = channel.send(outbound_base).await;
             let draft_id = match send_result {
-                Ok(frankclaw_core::channel::SendResult::Sent { platform_message_id }) => {
-                    Some(platform_message_id)
-                }
+                Ok(frankclaw_core::channel::SendResult::Sent {
+                    platform_message_id,
+                }) => Some(platform_message_id),
                 _ => None,
             };
 
@@ -1209,16 +1242,17 @@ async fn process_inbound_message_with_target(
                     accumulated.push_str(&text);
                     // Throttle edits to avoid rate limits.
                     if last_edit.elapsed() >= edit_interval
-                        && let Some(ref msg_id) = draft_id {
-                            let target = frankclaw_core::channel::EditMessageTarget {
-                                account_id: String::new(), // filled below
-                                to: String::new(),
-                                thread_id: None,
-                                platform_message_id: msg_id.clone(),
-                            };
-                            let _ = channel.edit_message(&target, &accumulated).await;
-                            last_edit = tokio::time::Instant::now();
-                        }
+                        && let Some(ref msg_id) = draft_id
+                    {
+                        let target = frankclaw_core::channel::EditMessageTarget {
+                            account_id: String::new(), // filled below
+                            to: String::new(),
+                            thread_id: None,
+                            platform_message_id: msg_id.clone(),
+                        };
+                        let _ = channel.edit_message(&target, &accumulated).await;
+                        last_edit = tokio::time::Instant::now();
+                    }
                 }
             }
             draft_id
@@ -1226,6 +1260,17 @@ async fn process_inbound_message_with_target(
     } else {
         None
     };
+
+    // Send typing indicator to the channel before starting the model call.
+    if let Some(ref channel) = channel_for_stream {
+        let _ = channel
+            .send_typing_indicator(
+                &inbound.account_id,
+                &inbound.sender_id,
+                inbound.thread_id.as_deref(),
+            )
+            .await;
+    }
 
     let response = state
         .runtime
@@ -1241,21 +1286,25 @@ async fn process_inbound_message_with_target(
             thinking_budget: None,
             channel_id: Some(inbound.channel.clone()),
             channel_capabilities: channel_for_stream.as_ref().map(|ch| ch.capabilities()),
+            canvas: Some(state.canvas.clone()),
+            cancel_token: None,
+            approval_tx: None,
         })
         .await?;
 
     // If we had a streaming draft, wait for the background task and edit with final content.
     if let Some(handle) = stream_handle {
         if let Ok(Some(draft_id)) = handle.await
-            && let Some(ref channel) = channel_for_stream {
-                let target = frankclaw_core::channel::EditMessageTarget {
-                    account_id: inbound.account_id.clone(),
-                    to: inbound.sender_id.clone(),
-                    thread_id: inbound.thread_id.clone(),
-                    platform_message_id: draft_id,
-                };
-                let _ = channel.edit_message(&target, &response.content).await;
-            }
+            && let Some(ref channel) = channel_for_stream
+        {
+            let target = frankclaw_core::channel::EditMessageTarget {
+                account_id: inbound.account_id.clone(),
+                to: inbound.sender_id.clone(),
+                thread_id: inbound.thread_id.clone(),
+                platform_message_id: draft_id,
+            };
+            let _ = channel.edit_message(&target, &response.content).await;
+        }
         // Skip normal delivery — message was already sent and edited in place.
     } else if let Some(channel) = channel_for_stream {
         let outbound = OutboundMessage {
@@ -1267,7 +1316,8 @@ async fn process_inbound_message_with_target(
             attachments: Vec::new(),
             reply_to: inbound.platform_message_id.clone(),
         };
-        let delivery = deliver_outbound_message(channel, outbound, Some(state.media.as_ref())).await?;
+        let delivery =
+            deliver_outbound_message(channel, outbound, Some(state.media.as_ref())).await?;
         persist_delivery_metadata(
             state.sessions.as_ref(),
             &session_key,
@@ -1280,17 +1330,15 @@ async fn process_inbound_message_with_target(
         // stream_handle was None and no streaming channel — delivery handled elsewhere.
     }
 
-    let event = frankclaw_core::protocol::Frame::Event(
-        frankclaw_core::protocol::EventFrame {
-            event: frankclaw_core::protocol::EventType::ChatComplete,
-            payload: serde_json::json!({
-                "channel": inbound.channel.as_str(),
-                "account_id": inbound.account_id,
-                "session_key": session_key.as_str(),
-                "content": response.content,
-            }),
-        },
-    );
+    let event = frankclaw_core::protocol::Frame::Event(frankclaw_core::protocol::EventFrame {
+        event: frankclaw_core::protocol::EventType::ChatComplete,
+        payload: serde_json::json!({
+            "channel": inbound.channel.as_str(),
+            "account_id": inbound.account_id,
+            "session_key": session_key.as_str(),
+            "content": response.content,
+        }),
+    });
     if let Ok(json) = serde_json::to_string(&event) {
         let _ = state.broadcast.send(json);
     }
@@ -1403,10 +1451,7 @@ fn config_file_stamp(path: &FsPath) -> Option<(u64, std::time::SystemTime)> {
     Some((metadata.len(), modified))
 }
 
-fn restart_sensitive_config_changed(
-    current: &FrankClawConfig,
-    next: &FrankClawConfig,
-) -> bool {
+fn restart_sensitive_config_changed(current: &FrankClawConfig, next: &FrankClawConfig) -> bool {
     config_restart_fingerprint(current) != config_restart_fingerprint(next)
 }
 
@@ -1422,10 +1467,7 @@ fn config_restart_fingerprint(config: &FrankClawConfig) -> serde_json::Value {
     })
 }
 
-fn merge_reloadable_config(
-    current: &FrankClawConfig,
-    next: &FrankClawConfig,
-) -> FrankClawConfig {
+fn merge_reloadable_config(current: &FrankClawConfig, next: &FrankClawConfig) -> FrankClawConfig {
     let mut merged = current.clone();
     merged.gateway = next.gateway.clone();
     merged.hooks = next.hooks.clone();
@@ -1478,10 +1520,12 @@ async fn persist_delivery_metadata(
             .collect::<Vec<_>>(),
         recorded_at: chrono::Utc::now(),
     };
-    set_last_reply_in_metadata(&mut entry.metadata, &delivery_metadata)
-        .map_err(|e| SessionStorage {
+    set_last_reply_in_metadata(&mut entry.metadata, &delivery_metadata).map_err(|e| {
+        SessionStorage {
             msg: format!("failed to serialize delivery metadata: {e}"),
-        }.build())?;
+        }
+        .build()
+    })?;
 
     entry.thread_id = inbound.thread_id.clone();
     entry.last_message_at = Some(chrono::Utc::now());
@@ -1529,6 +1573,9 @@ async fn start_cron_runtime(
                         thinking_budget: None,
                         channel_id: None,
                         channel_capabilities: None,
+                        canvas: Some(state.canvas.clone()),
+                        cancel_token: None,
+                        approval_tx: None,
                     })
                     .await
                 {
@@ -1572,7 +1619,8 @@ async fn start_cron_runtime(
                         Err(err)
                     }
                 }
-            }) as Pin<Box<dyn Future<Output = frankclaw_core::error::Result<()>> + Send>>
+            })
+                as Pin<Box<dyn Future<Output = frankclaw_core::error::Result<()>> + Send>>
         })
     };
     cron.start(runner).await;
@@ -1595,7 +1643,8 @@ fn parse_cron_jobs(config: &FrankClawConfig) -> frankclaw_core::error::Result<Ve
             let parsed = serde_json::from_value::<CronJob>(value).map_err(|err| {
                 ConfigValidation {
                     msg: format!("invalid cron job configuration: {err}"),
-                }.build()
+                }
+                .build()
             })?;
             validate_cron_job(&parsed)?;
             Ok(parsed)
@@ -1607,27 +1656,29 @@ fn validate_cron_job(job: &CronJob) -> frankclaw_core::error::Result<()> {
     if job.id.trim().is_empty() {
         return ConfigValidation {
             msg: "cron job id cannot be empty",
-        }.fail();
+        }
+        .fail();
     }
     if job.prompt.trim().is_empty() {
         return ConfigValidation {
             msg: format!("cron job '{}' prompt cannot be empty", job.id),
-        }.fail();
+        }
+        .fail();
     }
     let Some((session_agent_id, _, _)) = job.session_key.parse() else {
         return ConfigValidation {
             msg: format!("cron job '{}' has an invalid session key", job.id),
-        }.fail();
+        }
+        .fail();
     };
     if session_agent_id.as_str() != job.agent_id.as_str() {
         return ConfigValidation {
             msg: format!(
                 "cron job '{}' session key agent '{}' does not match '{}'",
-                job.id,
-                session_agent_id,
-                job.agent_id
+                job.id, session_agent_id, job.agent_id
             ),
-        }.fail();
+        }
+        .fail();
     }
     Ok(())
 }
@@ -1643,9 +1694,11 @@ fn sender_allowed(
         .any(|entry| entry == "*" || entry == &inbound.sender_id);
 
     explicit
-        || state
-            .pairing
-            .is_approved(inbound.channel.as_str(), &inbound.account_id, &inbound.sender_id)
+        || state.pairing.is_approved(
+            inbound.channel.as_str(),
+            &inbound.account_id,
+            &inbound.sender_id,
+        )
 }
 
 fn group_allowed(
@@ -1668,27 +1721,27 @@ fn group_allowed(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use super::*;
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use axum::body::{to_bytes, Body};
-    use axum::http::{HeaderMap, HeaderValue};
+    use axum::body::{Body, to_bytes};
     use axum::http::Request;
+    use axum::http::{HeaderMap, HeaderValue};
     use frankclaw_channels::{ChannelSet, whatsapp::WhatsAppChannel};
     use frankclaw_core::channel::{ChannelPlugin, SendResult};
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
     use frankclaw_core::error::{FrankClawError, Provider};
     use frankclaw_core::model::{
-        CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi,
-        ModelCompat, ModelCost, ModelDef, ModelProvider,
+        CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi, ModelCompat,
+        ModelCost, ModelDef, ModelProvider,
     };
     use frankclaw_core::session::SessionStore;
     use frankclaw_core::types::Role;
-    use frankclaw_sessions::SqliteSessionStore;
     use frankclaw_media::MediaStore;
+    use frankclaw_sessions::SqliteSessionStore;
     use secrecy::{ExposeSecret, SecretString};
     use tower::ServiceExt;
 
@@ -1886,10 +1939,7 @@ mod tests {
             frankclaw_core::channel::HealthStatus::Connected
         }
 
-        async fn send(
-            &self,
-            msg: OutboundMessage,
-        ) -> frankclaw_core::error::Result<SendResult> {
+        async fn send(&self, msg: OutboundMessage) -> frankclaw_core::error::Result<SendResult> {
             self.sent.lock().await.push(msg);
             Ok(SendResult::Sent {
                 platform_message_id: "captured-message".into(),
@@ -1909,8 +1959,7 @@ mod tests {
                 .expect("sessions should open"),
         );
         let pairing = Arc::new(
-            PairingStore::open(&temp_dir.join("pairings.json"))
-                .expect("pairings should open"),
+            PairingStore::open(&temp_dir.join("pairings.json")).expect("pairings should open"),
         );
         let media = Arc::new(
             MediaStore::new(temp_dir.join("media"), 1024 * 1024, 1)
@@ -2003,10 +2052,8 @@ mod tests {
 
     #[tokio::test]
     async fn web_inbound_roundtrip_persists_reply_and_metadata() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("frankclaw-gateway-test-{}", uuid::Uuid::new_v4()));
         let mut config = FrankClawConfig::default();
         config.channels.insert(
             frankclaw_core::types::ChannelId::new("web"),
@@ -2018,9 +2065,8 @@ mod tests {
                 }),
             },
         );
-        let channels = Arc::new(
-            frankclaw_channels::load_from_config(&config).expect("channels should load"),
-        );
+        let channels =
+            Arc::new(frankclaw_channels::load_from_config(&config).expect("channels should load"));
         let (state, sessions) = build_test_state(&temp_dir, config, channels).await;
 
         let inbound = InboundMessage {
@@ -2103,13 +2149,15 @@ mod tests {
                 }),
             },
         );
-        let channels = Arc::new(
-            frankclaw_channels::load_from_config(&config).expect("channels should load"),
-        );
+        let channels =
+            Arc::new(frankclaw_channels::load_from_config(&config).expect("channels should load"));
         let (state, _sessions) = build_test_state(&temp_dir, config, channels).await;
-        let app = build_router(state.clone(), Arc::new(AuthRateLimiter::new(
-            state.current_config().gateway.rate_limit.clone(),
-        )));
+        let app = build_router(
+            state.clone(),
+            Arc::new(AuthRateLimiter::new(
+                state.current_config().gateway.rate_limit.clone(),
+            )),
+        );
 
         let mut upload_request = Request::post("/api/media/upload?token=super-secret")
             .header("content-type", "text/plain")
@@ -2141,9 +2189,10 @@ mod tests {
             .as_str()
             .expect("media id should be present");
 
-        let mut download_request = Request::get(format!("/api/media/{media_id}?token=super-secret"))
-            .body(Body::empty())
-            .expect("request should build");
+        let mut download_request =
+            Request::get(format!("/api/media/{media_id}?token=super-secret"))
+                .body(Body::empty())
+                .expect("request should build");
         download_request
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
@@ -2154,7 +2203,10 @@ mod tests {
             .expect("download request should succeed");
         assert_eq!(download.status(), StatusCode::OK);
         assert_eq!(
-            download.headers().get("content-type").and_then(|value| value.to_str().ok()),
+            download
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
             Some("text/plain")
         );
         let download_body = to_bytes(download.into_body(), usize::MAX)
@@ -2182,9 +2234,8 @@ mod tests {
                 }),
             },
         );
-        let channels = Arc::new(
-            frankclaw_channels::load_from_config(&config).expect("channels should load"),
-        );
+        let channels =
+            Arc::new(frankclaw_channels::load_from_config(&config).expect("channels should load"));
         let (state, sessions) = build_test_state(&temp_dir, config, channels).await;
 
         let inbound = InboundMessage {
@@ -2241,13 +2292,15 @@ mod tests {
                 }),
             },
         );
-        let channels = Arc::new(
-            frankclaw_channels::load_from_config(&config).expect("channels should load"),
-        );
+        let channels =
+            Arc::new(frankclaw_channels::load_from_config(&config).expect("channels should load"));
         let (state, sessions) = build_test_state(&temp_dir, config, channels).await;
-        let app = build_router(state.clone(), Arc::new(AuthRateLimiter::new(
-            state.current_config().gateway.rate_limit.clone(),
-        )));
+        let app = build_router(
+            state.clone(),
+            Arc::new(AuthRateLimiter::new(
+                state.current_config().gateway.rate_limit.clone(),
+            )),
+        );
         let session_key = frankclaw_core::types::SessionKey::from_raw("default:web:console-demo");
 
         let mut request = Request::post("/api/web/inbound?token=super-secret")
@@ -2310,8 +2363,8 @@ mod tests {
 
         let mut outbound_request =
             Request::get("/api/web/outbound?token=super-secret&recipient_id=console-browser")
-            .body(Body::empty())
-            .expect("request should build");
+                .body(Body::empty())
+                .expect("request should build");
         outbound_request
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
@@ -2325,7 +2378,10 @@ mod tests {
             .expect("outbound body should read");
         let outbound_json: serde_json::Value =
             serde_json::from_slice(&outbound_body).expect("outbound response should be json");
-        assert_eq!(outbound_json["messages"][0]["text"], serde_json::json!("mock reply"));
+        assert_eq!(
+            outbound_json["messages"][0]["text"],
+            serde_json::json!("mock reply")
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -2350,9 +2406,8 @@ mod tests {
                 }),
             },
         );
-        let channels = Arc::new(
-            frankclaw_channels::load_from_config(&config).expect("channels should load"),
-        );
+        let channels =
+            Arc::new(frankclaw_channels::load_from_config(&config).expect("channels should load"));
         let (state, _sessions) = build_test_state(&temp_dir, config, channels).await;
         let web = state.web_channel().expect("web channel should exist");
         web.send(OutboundMessage {
@@ -2384,9 +2439,12 @@ mod tests {
         .await
         .expect("send should succeed");
 
-        let app = build_router(state.clone(), Arc::new(AuthRateLimiter::new(
-            state.current_config().gateway.rate_limit.clone(),
-        )));
+        let app = build_router(
+            state.clone(),
+            Arc::new(AuthRateLimiter::new(
+                state.current_config().gateway.rate_limit.clone(),
+            )),
+        );
 
         let mut request =
             Request::get("/api/web/outbound?token=super-secret&recipient_id=browser-a")
@@ -2395,7 +2453,11 @@ mod tests {
         request
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
-        let response = app.clone().oneshot(request).await.expect("request should succeed");
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -2403,7 +2465,10 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be json");
         assert_eq!(json["messages"].as_array().map(Vec::len), Some(1));
-        assert_eq!(json["messages"][0]["text"], serde_json::json!("reply for a"));
+        assert_eq!(
+            json["messages"][0]["text"],
+            serde_json::json!("reply for a")
+        );
 
         let mut other_request =
             Request::get("/api/web/outbound?token=super-secret&recipient_id=browser-b")
@@ -2423,7 +2488,10 @@ mod tests {
         let other_json: serde_json::Value =
             serde_json::from_slice(&other_body).expect("response should be json");
         assert_eq!(other_json["messages"].as_array().map(Vec::len), Some(1));
-        assert_eq!(other_json["messages"][0]["text"], serde_json::json!("reply for b"));
+        assert_eq!(
+            other_json["messages"][0]["text"],
+            serde_json::json!("reply for b")
+        );
         assert_eq!(
             other_json["messages"][0]["attachments"][0]["filename"],
             serde_json::json!("photo.png")
@@ -2888,7 +2956,11 @@ mod tests {
         assert_eq!(payload["content"], serde_json::json!("mock reply"));
 
         let transcript = sessions
-            .get_transcript(&frankclaw_core::types::SessionKey::from_raw("default:web:hook-control"), 10, None)
+            .get_transcript(
+                &frankclaw_core::types::SessionKey::from_raw("default:web:hook-control"),
+                10,
+                None,
+            )
             .await
             .expect("transcript should load");
         assert_eq!(transcript.len(), 2);
@@ -2923,12 +2995,15 @@ mod tests {
         );
 
         let capture = Arc::new(CaptureChannel::new("whatsapp", "WhatsApp"));
-        let whatsapp = Arc::new(WhatsAppChannel::new(
-            secrecy::SecretString::from("test-token".to_string()),
-            "12345".into(),
-            secrecy::SecretString::from("verify-me".to_string()),
-            None,
-        ).expect("whatsapp channel should build"));
+        let whatsapp = Arc::new(
+            WhatsAppChannel::new(
+                secrecy::SecretString::from("test-token".to_string()),
+                "12345".into(),
+                secrecy::SecretString::from("verify-me".to_string()),
+                None,
+            )
+            .expect("whatsapp channel should build"),
+        );
         let mut map: HashMap<
             frankclaw_core::types::ChannelId,
             Arc<dyn frankclaw_core::channel::ChannelPlugin>,
@@ -3040,12 +3115,15 @@ mod tests {
         );
 
         let capture = Arc::new(CaptureChannel::new("whatsapp", "WhatsApp"));
-        let whatsapp = Arc::new(WhatsAppChannel::new(
-            secrecy::SecretString::from("test-token".to_string()),
-            "12345".into(),
-            secrecy::SecretString::from("verify-me".to_string()),
-            Some(secrecy::SecretString::from("app-secret".to_string())),
-        ).expect("whatsapp channel should build"));
+        let whatsapp = Arc::new(
+            WhatsAppChannel::new(
+                secrecy::SecretString::from("test-token".to_string()),
+                "12345".into(),
+                secrecy::SecretString::from("verify-me".to_string()),
+                Some(secrecy::SecretString::from("app-secret".to_string())),
+            )
+            .expect("whatsapp channel should build"),
+        );
         let mut map: HashMap<
             frankclaw_core::types::ChannelId,
             Arc<dyn frankclaw_core::channel::ChannelPlugin>,
@@ -3125,7 +3203,8 @@ mod tests {
         ) -> frankclaw_core::error::Result<CompletionResponse> {
             Provider {
                 msg: "simulated provider failure",
-            }.fail()
+            }
+            .fail()
         }
 
         async fn list_models(&self) -> frankclaw_core::error::Result<Vec<ModelDef>> {

@@ -34,9 +34,10 @@ impl AuthRateLimiter {
         let attempts = self.attempts.lock().expect("rate limiter poisoned");
         if let Some(entry) = attempts.get(ip)
             && let Some(locked_until) = entry.locked_until
-                && Instant::now() < locked_until {
-                    return Some(locked_until - Instant::now());
-                }
+            && Instant::now() < locked_until
+        {
+            return Some(locked_until - Instant::now());
+        }
         None
     }
 
@@ -62,8 +63,7 @@ impl AuthRateLimiter {
         entry.count += 1;
 
         if entry.count >= self.config.max_attempts {
-            entry.locked_until =
-                Some(now + Duration::from_secs(self.config.lockout_secs));
+            entry.locked_until = Some(now + Duration::from_secs(self.config.lockout_secs));
             tracing::warn!(%ip, lockout_secs = self.config.lockout_secs, "IP locked out after too many auth failures");
         }
     }
@@ -86,8 +86,8 @@ impl AuthRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::{fixture, rstest};
     use std::net::Ipv4Addr;
-    use rstest::{rstest, fixture};
 
     #[fixture]
     fn limiter() -> AuthRateLimiter {

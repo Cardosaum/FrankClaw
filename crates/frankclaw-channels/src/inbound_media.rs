@@ -5,9 +5,7 @@ pub fn infer_inbound_mime_type(
     filename: Option<&str>,
     url: Option<&str>,
 ) -> String {
-    let explicit = explicit
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let explicit = explicit.map(str::trim).filter(|value| !value.is_empty());
     if let Some(explicit) = explicit {
         return explicit.to_string();
     }
@@ -58,7 +56,11 @@ mod tests {
     #[test]
     fn infers_from_url_when_filename_is_missing() {
         assert_eq!(
-            infer_inbound_mime_type(None, None, Some("https://cdn.example.test/path/report.pdf?sig=1")),
+            infer_inbound_mime_type(
+                None,
+                None,
+                Some("https://cdn.example.test/path/report.pdf?sig=1")
+            ),
             "application/pdf"
         );
     }

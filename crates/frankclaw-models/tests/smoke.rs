@@ -56,7 +56,10 @@ async fn openai_health_check() {
 
     let provider = OpenAiProvider::new("openai-smoke", &base, key, vec![model])
         .expect("failed to build provider");
-    assert!(provider.health().await, "OpenAI-compatible health check should pass");
+    assert!(
+        provider.health().await,
+        "OpenAI-compatible health check should pass"
+    );
 }
 
 #[tokio::test]
@@ -95,8 +98,14 @@ async fn openai_simple_completion() {
         "response should contain 'pong', got: {}",
         response.content
     );
-    assert!(response.usage.input_tokens > 0, "should report input tokens");
-    assert!(response.usage.output_tokens > 0, "should report output tokens");
+    assert!(
+        response.usage.input_tokens > 0,
+        "should report input tokens"
+    );
+    assert!(
+        response.usage.output_tokens > 0,
+        "should report output tokens"
+    );
 }
 
 #[tokio::test]
@@ -147,7 +156,10 @@ async fn anthropic_health_check() {
     )
     .expect("failed to build provider");
 
-    assert!(provider.health().await, "Anthropic health check should pass");
+    assert!(
+        provider.health().await,
+        "Anthropic health check should pass"
+    );
 }
 
 #[tokio::test]
@@ -191,8 +203,14 @@ async fn anthropic_simple_completion() {
         "response should contain 'pong', got: {}",
         response.content
     );
-    assert!(response.usage.input_tokens > 0, "should report input tokens");
-    assert!(response.usage.output_tokens > 0, "should report output tokens");
+    assert!(
+        response.usage.input_tokens > 0,
+        "should report input tokens"
+    );
+    assert!(
+        response.usage.output_tokens > 0,
+        "should report output tokens"
+    );
 }
 
 #[tokio::test]
@@ -245,7 +263,10 @@ async fn anthropic_system_prompt() {
 
     let request = CompletionRequest {
         model_id: "claude-haiku-4-5-20251001".into(),
-        messages: vec![CompletionMessage::text(Role::User, "What is the secret word?")],
+        messages: vec![CompletionMessage::text(
+            Role::User,
+            "What is the secret word?",
+        )],
         max_tokens: Some(20),
         temperature: Some(0.0),
         system: Some("The secret word is 'banana'. Always reply with only the secret word.".into()),
@@ -281,8 +302,8 @@ async fn ollama_health_check() {
         return;
     }
 
-    let provider = OllamaProvider::new("ollama-smoke", None::<String>)
-        .expect("failed to build provider");
+    let provider =
+        OllamaProvider::new("ollama-smoke", None::<String>).expect("failed to build provider");
     assert!(provider.health().await, "Ollama health check should pass");
 }
 
@@ -294,8 +315,8 @@ async fn ollama_list_models() {
         return;
     }
 
-    let provider = OllamaProvider::new("ollama-smoke", None::<String>)
-        .expect("failed to build provider");
+    let provider =
+        OllamaProvider::new("ollama-smoke", None::<String>).expect("failed to build provider");
     let models = provider.list_models().await.expect("should list models");
     // Ollama may have zero models if none are pulled — that's OK
     eprintln!("Ollama reports {} model(s)", models.len());
@@ -309,8 +330,8 @@ async fn ollama_simple_completion() {
         return;
     }
 
-    let provider = OllamaProvider::new("ollama-smoke", None::<String>)
-        .expect("failed to build provider");
+    let provider =
+        OllamaProvider::new("ollama-smoke", None::<String>).expect("failed to build provider");
     let models = provider.list_models().await.expect("should list models");
     if models.is_empty() {
         eprintln!("SKIP: No Ollama models pulled");
@@ -318,7 +339,10 @@ async fn ollama_simple_completion() {
     }
 
     let model_id = &models[0].id;
-    let request = simple_request(model_id, "Reply with exactly the word 'pong'. Nothing else.");
+    let request = simple_request(
+        model_id,
+        "Reply with exactly the word 'pong'. Nothing else.",
+    );
     let response = provider
         .complete(request, None)
         .await
@@ -338,19 +362,16 @@ async fn failover_chain_tries_providers_in_order() {
     let mut providers: Vec<Arc<dyn ModelProvider>> = Vec::new();
 
     if let Some(key) = openai_key() {
-        providers.push(Arc::new(OpenAiProvider::new(
-            "openai",
-            &openai_base_url(),
-            key,
-            vec![openai_model()],
-        ).expect("failed to build provider")));
+        providers.push(Arc::new(
+            OpenAiProvider::new("openai", &openai_base_url(), key, vec![openai_model()])
+                .expect("failed to build provider"),
+        ));
     }
     if let Some(key) = anthropic_key() {
-        providers.push(Arc::new(AnthropicProvider::new(
-            "anthropic",
-            key,
-            vec!["claude-haiku-4-5-20251001".into()],
-        ).expect("failed to build provider")));
+        providers.push(Arc::new(
+            AnthropicProvider::new("anthropic", key, vec!["claude-haiku-4-5-20251001".into()])
+                .expect("failed to build provider"),
+        ));
     }
 
     assert!(
@@ -392,8 +413,12 @@ async fn openai_invalid_key_returns_auth_error() {
 
     let msg = err.to_string().to_lowercase();
     assert!(
-        msg.contains("auth") || msg.contains("401") || msg.contains("invalid") || msg.contains("key")
-            || msg.contains("error") || msg.contains("denied"),
+        msg.contains("auth")
+            || msg.contains("401")
+            || msg.contains("invalid")
+            || msg.contains("key")
+            || msg.contains("error")
+            || msg.contains("denied"),
         "error should indicate auth failure, got: {}",
         msg
     );
@@ -417,7 +442,10 @@ async fn anthropic_invalid_key_returns_auth_error() {
 
     let msg = err.to_string().to_lowercase();
     assert!(
-        msg.contains("auth") || msg.contains("401") || msg.contains("invalid") || msg.contains("key"),
+        msg.contains("auth")
+            || msg.contains("401")
+            || msg.contains("invalid")
+            || msg.contains("key"),
         "error should mention auth failure, got: {}",
         msg
     );

@@ -207,6 +207,21 @@ pub enum FrankClawError {
         location: snafu::Location,
     },
 
+    // ── Memory ──────────────────────────────────────────
+    #[snafu(display("memory store error: {msg}"))]
+    MemoryStore {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("embedding provider error: {msg}"))]
+    EmbeddingProvider {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
     // ── Internal ─────────────────────────────────────────
     #[snafu(display("internal error: {msg}"))]
     Internal {
@@ -253,6 +268,8 @@ impl FrankClawError {
             | Self::UnsupportedMediaType { location, .. }
             | Self::MalwareDetected { location, .. }
             | Self::Crypto { location, .. }
+            | Self::MemoryStore { location, .. }
+            | Self::EmbeddingProvider { location, .. }
             | Self::Internal { location, .. }
             | Self::ShuttingDown { location, .. } => location,
         }
@@ -289,7 +306,8 @@ impl FrankClawError {
             | Self::Channel { .. }
             | Self::ChannelDisabled { .. }
             | Self::AgentRuntime { .. }
-            | Self::TurnCancelled { .. }
+            | Self::MemoryStore { .. }
+            | Self::EmbeddingProvider { .. }
             | Self::Sandbox { .. }
             | Self::ProviderError { .. }
             | Self::AllProvidersFailed { .. }
@@ -298,6 +316,7 @@ impl FrankClawError {
             | Self::Crypto { .. }
             | Self::Internal { .. }
             | Self::ShuttingDown { .. } => 500,
+            Self::TurnCancelled { .. } => 499,
         }
     }
 }
@@ -306,8 +325,6 @@ pub type Result<T> = std::result::Result<T, FrankClawError>;
 
 #[cfg(test)]
 mod tests {
-    use rstest::rstest;
-
     use super::*;
     use crate::types::{AgentId, ChannelId, SessionKey};
 
@@ -316,31 +333,216 @@ mod tests {
         vec![
             (AuthRequired.build(), "authentication required", 401, false),
             (AuthFailed.build(), "authentication failed", 401, false),
-            (RateLimited { retry_after_secs: 30_u64 }.build(), "rate limited (retry after 30s)", 429, true),
-            (Forbidden { method: "chat_send" }.build(), "insufficient permissions for method chat_send", 403, false),
-            (SessionNotFound { key: SessionKey::from_raw("a:b:c") }.build(), "session not found: a:b:c", 404, false),
-            (SessionStorage { msg: "disk full" }.build(), "session storage error: disk full", 500, false),
-            (Channel { channel: ChannelId::new("discord"), msg: "timeout" }.build(), "channel discord error: timeout", 500, false),
-            (ChannelNotConfigured { channel: ChannelId::new("slack") }.build(), "channel slack not configured", 404, false),
-            (ChannelDisabled { channel: ChannelId::new("telegram") }.build(), "channel telegram is disabled", 500, false),
-            (SenderBlocked { channel: ChannelId::new("signal") }.build(), "sender blocked by policy on channel signal", 403, false),
-            (AgentNotFound { agent_id: AgentId::new("missing") }.build(), "agent missing not found", 404, false),
-            (AgentRuntime { msg: "oom" }.build(), "agent runtime error: oom", 500, false),
-            (TurnCancelled.build(), "agent turn cancelled", 500, false),
-            (Sandbox { msg: "denied" }.build(), "sandbox error: denied", 500, false),
-            (Provider { msg: "rate limit" }.build(), "model provider error: rate limit", 500, true),
-            (AllProvidersFailed.build(), "all model providers failed", 500, true),
-            (ModelNotFound { model_id: "gpt-5" }.build(), "model not found: gpt-5", 404, false),
-            (ConfigValidation { msg: "bad port" }.build(), "config validation error: bad port", 422, false),
-            (ConfigIo { msg: "not found" }.build(), "config I/O error: not found", 500, false),
-            (InvalidRequest { msg: "missing field" }.build(), "invalid request: missing field", 400, false),
-            (UnknownMethod { method: "foo" }.build(), "unknown method: foo", 400, false),
-            (RequestTooLarge { max_bytes: 4096_usize }.build(), "request too large (max 4096 bytes)", 413, false),
-            (MediaTooLarge { max_bytes: 1024_u64 }.build(), "media file too large (max 1024 bytes)", 413, false),
-            (MediaFetchBlocked { reason: "private ip" }.build(), "media fetch blocked: private ip", 403, false),
-            (UnsupportedMediaType { mime: "video/avi" }.build(), "unsupported media type: video/avi", 500, false),
-            (MalwareDetected { filename: "bad.exe", detail: "trojan" }.build(), "malware detected in file 'bad.exe': trojan", 403, false),
-            (Internal { msg: "unexpected" }.build(), "internal error: unexpected", 500, true),
+            (
+                RateLimited {
+                    retry_after_secs: 30_u64,
+                }
+                .build(),
+                "rate limited (retry after 30s)",
+                429,
+                true,
+            ),
+            (
+                Forbidden {
+                    method: "chat_send",
+                }
+                .build(),
+                "insufficient permissions for method chat_send",
+                403,
+                false,
+            ),
+            (
+                SessionNotFound {
+                    key: SessionKey::from_raw("a:b:c"),
+                }
+                .build(),
+                "session not found: a:b:c",
+                404,
+                false,
+            ),
+            (
+                SessionStorage { msg: "disk full" }.build(),
+                "session storage error: disk full",
+                500,
+                false,
+            ),
+            (
+                Channel {
+                    channel: ChannelId::new("discord"),
+                    msg: "timeout",
+                }
+                .build(),
+                "channel discord error: timeout",
+                500,
+                false,
+            ),
+            (
+                ChannelNotConfigured {
+                    channel: ChannelId::new("slack"),
+                }
+                .build(),
+                "channel slack not configured",
+                404,
+                false,
+            ),
+            (
+                ChannelDisabled {
+                    channel: ChannelId::new("telegram"),
+                }
+                .build(),
+                "channel telegram is disabled",
+                500,
+                false,
+            ),
+            (
+                SenderBlocked {
+                    channel: ChannelId::new("signal"),
+                }
+                .build(),
+                "sender blocked by policy on channel signal",
+                403,
+                false,
+            ),
+            (
+                AgentNotFound {
+                    agent_id: AgentId::new("missing"),
+                }
+                .build(),
+                "agent missing not found",
+                404,
+                false,
+            ),
+            (
+                AgentRuntime { msg: "oom" }.build(),
+                "agent runtime error: oom",
+                500,
+                false,
+            ),
+            (TurnCancelled.build(), "agent turn cancelled", 499, false),
+            (
+                Sandbox { msg: "denied" }.build(),
+                "sandbox error: denied",
+                500,
+                false,
+            ),
+            (
+                Provider { msg: "rate limit" }.build(),
+                "model provider error: rate limit",
+                500,
+                true,
+            ),
+            (
+                AllProvidersFailed.build(),
+                "all model providers failed",
+                500,
+                true,
+            ),
+            (
+                ModelNotFound { model_id: "gpt-5" }.build(),
+                "model not found: gpt-5",
+                404,
+                false,
+            ),
+            (
+                ConfigValidation { msg: "bad port" }.build(),
+                "config validation error: bad port",
+                422,
+                false,
+            ),
+            (
+                ConfigIo { msg: "not found" }.build(),
+                "config I/O error: not found",
+                500,
+                false,
+            ),
+            (
+                InvalidRequest {
+                    msg: "missing field",
+                }
+                .build(),
+                "invalid request: missing field",
+                400,
+                false,
+            ),
+            (
+                UnknownMethod { method: "foo" }.build(),
+                "unknown method: foo",
+                400,
+                false,
+            ),
+            (
+                RequestTooLarge {
+                    max_bytes: 4096_usize,
+                }
+                .build(),
+                "request too large (max 4096 bytes)",
+                413,
+                false,
+            ),
+            (
+                MediaTooLarge {
+                    max_bytes: 1024_u64,
+                }
+                .build(),
+                "media file too large (max 1024 bytes)",
+                413,
+                false,
+            ),
+            (
+                MediaFetchBlocked {
+                    reason: "private ip",
+                }
+                .build(),
+                "media fetch blocked: private ip",
+                403,
+                false,
+            ),
+            (
+                UnsupportedMediaType { mime: "video/avi" }.build(),
+                "unsupported media type: video/avi",
+                500,
+                false,
+            ),
+            (
+                MalwareDetected {
+                    filename: "bad.exe",
+                    detail: "trojan",
+                }
+                .build(),
+                "malware detected in file 'bad.exe': trojan",
+                403,
+                false,
+            ),
+            (
+                Crypto {
+                    source: frankclaw_crypto::CryptoError::EncryptionFailed,
+                }
+                .build(),
+                "cryptographic operation failed",
+                500,
+                false,
+            ),
+            (
+                MemoryStore { msg: "sqlite busy" }.build(),
+                "memory store error: sqlite busy",
+                500,
+                false,
+            ),
+            (
+                EmbeddingProvider {
+                    msg: "quota exceeded",
+                }
+                .build(),
+                "embedding provider error: quota exceeded",
+                500,
+                false,
+            ),
+            (
+                Internal { msg: "unexpected" }.build(),
+                "internal error: unexpected",
+                500,
+                true,
+            ),
             (ShuttingDown.build(), "shutdown in progress", 500, false),
         ]
     }
@@ -351,124 +553,40 @@ mod tests {
         // and the display/status/retryable tests below will miss it.
         assert_eq!(
             error_cases().len(),
-            28,
-            "error_cases() should cover all 28 FrankClawError variants"
+            31,
+            "error_cases() should cover all 31 FrankClawError variants"
         );
     }
 
-    #[rstest]
-    #[case(0)]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(5)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
-    #[case(9)]
-    #[case(10)]
-    #[case(11)]
-    #[case(12)]
-    #[case(13)]
-    #[case(14)]
-    #[case(15)]
-    #[case(16)]
-    #[case(17)]
-    #[case(18)]
-    #[case(19)]
-    #[case(20)]
-    #[case(21)]
-    #[case(22)]
-    #[case(23)]
-    #[case(24)]
-    #[case(25)]
-    #[case(26)]
-    #[case(27)]
-    fn display_message(#[case] idx: usize) {
-        let cases = error_cases();
-        let (error, expected, _, _) = &cases[idx];
-        assert_eq!(error.to_string(), *expected, "variant index {idx}");
+    #[test]
+    fn display_message() {
+        for (idx, (error, expected, _, _)) in error_cases().iter().enumerate() {
+            assert_eq!(error.to_string(), *expected, "variant index {idx}");
+        }
     }
 
-    #[rstest]
-    #[case(0)]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(5)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
-    #[case(9)]
-    #[case(10)]
-    #[case(11)]
-    #[case(12)]
-    #[case(13)]
-    #[case(14)]
-    #[case(15)]
-    #[case(16)]
-    #[case(17)]
-    #[case(18)]
-    #[case(19)]
-    #[case(20)]
-    #[case(21)]
-    #[case(22)]
-    #[case(23)]
-    #[case(24)]
-    #[case(25)]
-    #[case(26)]
-    #[case(27)]
-    fn status_code(#[case] idx: usize) {
-        let cases = error_cases();
-        let (error, _, expected_status, _) = &cases[idx];
-        assert_eq!(
-            error.status_code(),
-            *expected_status,
-            "status_code for '{}' (index {idx})",
-            error
-        );
+    #[test]
+    fn status_code() {
+        for (idx, (error, _, expected_status, _)) in error_cases().iter().enumerate() {
+            assert_eq!(
+                error.status_code(),
+                *expected_status,
+                "status_code for '{}' (index {idx})",
+                error
+            );
+        }
     }
 
-    #[rstest]
-    #[case(0)]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(5)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
-    #[case(9)]
-    #[case(10)]
-    #[case(11)]
-    #[case(12)]
-    #[case(13)]
-    #[case(14)]
-    #[case(15)]
-    #[case(16)]
-    #[case(17)]
-    #[case(18)]
-    #[case(19)]
-    #[case(20)]
-    #[case(21)]
-    #[case(22)]
-    #[case(23)]
-    #[case(24)]
-    #[case(25)]
-    #[case(26)]
-    #[case(27)]
-    fn retryable(#[case] idx: usize) {
-        let cases = error_cases();
-        let (error, _, _, expected_retry) = &cases[idx];
-        assert_eq!(
-            error.is_retryable(),
-            *expected_retry,
-            "is_retryable for '{}' (index {idx})",
-            error
-        );
+    #[test]
+    fn retryable() {
+        for (idx, (error, _, _, expected_retry)) in error_cases().iter().enumerate() {
+            assert_eq!(
+                error.is_retryable(),
+                *expected_retry,
+                "is_retryable for '{}' (index {idx})",
+                error
+            );
+        }
     }
 
     #[test]

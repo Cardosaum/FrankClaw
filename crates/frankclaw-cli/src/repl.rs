@@ -12,7 +12,7 @@ use std::sync::Arc;
 use rust_i18n::t;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
-use rustyline::{Editor, Config, EditMode};
+use rustyline::{Config, EditMode, Editor};
 use tokio::sync::mpsc;
 
 use frankclaw_core::model::StreamDelta;
@@ -43,7 +43,10 @@ pub struct ReplConfig {
 /// Reads lines from stdin using rustyline, sends each to the runtime, and
 /// streams the response to stdout. Returns when the user types /quit, /exit,
 /// Ctrl-D, or Ctrl-C.
-#[expect(clippy::too_many_lines, reason = "REPL event loop with input handling and streaming output")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "REPL event loop with input handling and streaming output"
+)]
 pub async fn run_repl(runtime: Arc<Runtime>, config: ReplConfig) -> anyhow::Result<()> {
     use std::io::Write;
 
@@ -71,7 +74,11 @@ pub async fn run_repl(runtime: Arc<Runtime>, config: ReplConfig) -> anyhow::Resu
     println!();
 
     loop {
-        let prompt = if session_key.is_some() { "you> " } else { "you (new)> " };
+        let prompt = if session_key.is_some() {
+            "you> "
+        } else {
+            "you (new)> "
+        };
 
         let line = match editor.readline(prompt) {
             Ok(line) => line,
@@ -180,6 +187,9 @@ pub async fn run_repl(runtime: Arc<Runtime>, config: ReplConfig) -> anyhow::Resu
             thinking_budget,
             channel_id: None,
             channel_capabilities: None,
+            canvas: Some(frankclaw_gateway::canvas::CanvasStore::new()),
+            cancel_token: None,
+            approval_tx: None,
         };
 
         // Spawn the chat call so we can stream output concurrently.
@@ -220,9 +230,7 @@ pub async fn run_repl(runtime: Arc<Runtime>, config: ReplConfig) -> anyhow::Resu
                 session_key = Some(response.session_key);
                 println!(
                     "\n[{}: {} in / {} out]",
-                    response.model_id,
-                    response.usage.input_tokens,
-                    response.usage.output_tokens,
+                    response.model_id, response.usage.input_tokens, response.usage.output_tokens,
                 );
             }
             Ok(Err(err)) => {
@@ -249,9 +257,7 @@ fn history_file_path() -> Option<std::path::PathBuf> {
     let state_dir = std::env::var("FRANKCLAW_STATE_DIR")
         .map(std::path::PathBuf::from)
         .ok()
-        .or_else(|| {
-            dirs::data_local_dir().map(|d| d.join("frankclaw"))
-        })?;
+        .or_else(|| dirs::data_local_dir().map(|d| d.join("frankclaw")))?;
     Some(state_dir.join("repl_history.txt"))
 }
 

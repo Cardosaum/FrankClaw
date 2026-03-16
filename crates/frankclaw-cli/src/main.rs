@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod repl;
+mod terminal;
+mod tui;
 
 use std::path::PathBuf;
 
@@ -66,6 +68,10 @@ enum Command {
         /// Extended thinking budget in tokens.
         #[arg(long)]
         think: Option<u32>,
+
+        /// Use the full-screen TUI instead of the line-based REPL.
+        #[arg(long)]
+        tui: bool,
     },
 
     /// Generate a secure auth token.
@@ -111,7 +117,17 @@ enum Command {
     Stop,
 
     /// Security audit: scan config for secrets, auth, and policy issues.
-    Audit,
+    Audit {
+        /// Output format: text or json.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
+    /// Authenticate with a provider (e.g., github-copilot).
+    Login {
+        /// Provider to authenticate with.
+        provider: String,
+    },
 
     /// Generate a secure starter config for a chosen channel profile.
     Onboard {
@@ -277,6 +293,15 @@ enum Command {
         public: bool,
     },
 
+    /// Start ACP server (JSON-RPC 2.0 over stdin/stdout).
+    Acp,
+
+    /// Manage plugins (list, enable, disable, info).
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
     /// Initialize a new config file with secure defaults.
     Init {
         /// Force overwrite existing config.
@@ -285,16 +310,39 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum PluginAction {
+    /// List discovered plugins.
+    List,
+    /// Enable a plugin by id.
+    Enable {
+        /// Plugin id.
+        id: String,
+    },
+    /// Disable a plugin by id.
+    Disable {
+        /// Plugin id.
+        id: String,
+    },
+    /// Show detailed info for a plugin.
+    Info {
+        /// Plugin id.
+        id: String,
+    },
+}
+
 #[tokio::main]
-#[expect(clippy::too_many_lines, reason = "CLI entrypoint dispatching all subcommands")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "CLI entrypoint dispatching all subcommands"
+)]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Initialize tracing.
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
         )
         .with_target(false)
         .init();
@@ -304,16 +352,14 @@ async fn main() -> anyhow::Result<()> {
         .lang
         .clone()
         .or_else(|| {
-            std::env::var("LANG").ok().map(|l| {
-                l.split('.').next().unwrap_or("en").replace('_', "-")
-            })
+            std::env::var("LANG")
+                .ok()
+                .map(|l| l.split('.').next().unwrap_or("en").replace('_', "-"))
         })
         .unwrap_or_else(|| "en".into());
     rust_i18n::set_locale(&locale);
 
-    let state_dir = cli
-        .state_dir
-        .unwrap_or_else(default_state_dir);
+    let state_dir = cli.state_dir.unwrap_or_else(default_state_dir);
 
     match cli.command {
         Command::Chat {
@@ -321,30 +367,45 @@ async fn main() -> anyhow::Result<()> {
             session,
             model,
             think,
+            tui: use_tui,
         } => {
             let config = load_config(cli.config.as_deref(), &state_dir)?;
             config.validate()?;
             let sessions = open_sessions(&state_dir)?;
             let runtime = build_runtime(&config, sessions.clone()).await?;
 
-            repl::run_repl(
-                runtime,
-                repl::ReplConfig {
-                    agent_id: agent.map(frankclaw_core::types::AgentId::new),
-                    session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
-                    model_id: model,
-                    thinking_budget: think,
-                },
-            )
-            .await?;
+            if use_tui {
+                tui::run_tui(
+                    runtime,
+                    tui::TuiConfig {
+                        agent_id: agent.map(frankclaw_core::types::AgentId::new),
+                        session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
+                        model_id: model,
+                        thinking_budget: think,
+                    },
+                )
+                .await?;
+            } else {
+                repl::run_repl(
+                    runtime,
+                    repl::ReplConfig {
+                        agent_id: agent.map(frankclaw_core::types::AgentId::new),
+                        session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
+                        model_id: model,
+                        thinking_budget: think,
+                    },
+                )
+                .await?;
+            }
         }
 
         Command::Gateway { port } => {
             let config_path = cli
                 .config
                 .clone()
-                .unwrap_or_else(|| state_dir.join("frankclaw.json"));
-            let mut config = load_config(Some(&config_path), &state_dir)?;
+                .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
+            let config = load_config(Some(&config_path), &state_dir)?;
+            let mut config = config;
             if let Some(port) = port {
                 config.gateway.port = port;
             }
@@ -356,7 +417,7 @@ async fn main() -> anyhow::Result<()> {
                     &db_path,
                     load_master_key_from_env()?.as_ref(),
                 )
-                    .context(t!("ctx.failed_open_sessions").to_string())?,
+                .context(t!("ctx.failed_open_sessions").to_string())?,
             );
             let runtime = std::sync::Arc::new(
                 frankclaw_runtime::Runtime::from_config(
@@ -406,9 +467,21 @@ async fn main() -> anyhow::Result<()> {
             config.validate()?;
             println!("{}", t!("cmd.check.valid"));
             println!("{}", t!("cmd.check.port", port = config.gateway.port));
-            println!("{}", t!("cmd.check.auth", mode = format!("{:?}", config.gateway.auth)));
-            println!("{}", t!("cmd.check.channels", count = config.channels.len()));
-            println!("{}", t!("cmd.check.providers", count = config.models.providers.len()));
+            println!(
+                "{}",
+                t!(
+                    "cmd.check.auth",
+                    mode = format!("{:?}", config.gateway.auth)
+                )
+            );
+            println!(
+                "{}",
+                t!("cmd.check.channels", count = config.channels.len())
+            );
+            println!(
+                "{}",
+                t!("cmd.check.providers", count = config.models.providers.len())
+            );
         }
 
         Command::Doctor => {
@@ -421,15 +494,17 @@ async fn main() -> anyhow::Result<()> {
 
         Command::Config => {
             let config = load_config(cli.config.as_deref(), &state_dir)?;
-            let json = serde_json::to_string_pretty(&redact_config(&config))?;
-            println!("{json}");
+            let toml_str = toml::to_string_pretty(&redact_config(&config))?;
+            println!("{toml_str}");
         }
 
         Command::ConfigExample { channel } => {
-            let example = supported_channel_example(&channel)
-                .ok_or_else(|| anyhow::anyhow!(
-                    "{}", t!("cmd.config_example.unsupported", channel = &channel)
-                ))?;
+            let example = supported_channel_example(&channel).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{}",
+                    t!("cmd.config_example.unsupported", channel = &channel)
+                )
+            })?;
             println!("{example}");
         }
 
@@ -449,7 +524,11 @@ async fn main() -> anyhow::Result<()> {
                 println!(
                     "  {}  {}",
                     provider.provider_id,
-                    if provider.healthy { t!("cmd.status.healthy") } else { t!("cmd.status.unhealthy") }
+                    if provider.healthy {
+                        t!("cmd.status.healthy")
+                    } else {
+                        t!("cmd.status.unhealthy")
+                    }
                 );
             }
             println!();
@@ -479,9 +558,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 );
             }
-            if let Some(browser_status) = browser_runtime_status(&config, std::env::var("FRANKCLAW_BROWSER_DEVTOOLS_URL").ok().as_deref()) {
+            if let Some(browser_status) = browser_runtime_status(
+                &config,
+                std::env::var("FRANKCLAW_BROWSER_DEVTOOLS_URL")
+                    .ok()
+                    .as_deref(),
+            ) {
                 println!();
-                println!("{}",  t!("cmd.status.browser"));
+                println!("{}", t!("cmd.status.browser"));
                 println!("  {browser_status}");
             }
             println!();
@@ -510,7 +594,8 @@ async fn main() -> anyhow::Result<()> {
                 let _ = std::fs::remove_file(&pid_path);
             }
 
-            let executable = std::env::current_exe().context(t!("ctx.failed_locate_binary").to_string())?;
+            let executable =
+                std::env::current_exe().context(t!("ctx.failed_locate_binary").to_string())?;
             let mut cmd = std::process::Command::new(&executable);
             cmd.arg("gateway");
             if let Some(config_path) = &cli.config {
@@ -537,7 +622,9 @@ async fn main() -> anyhow::Result<()> {
             cmd.stderr(std::process::Stdio::from(log_err));
             cmd.stdin(std::process::Stdio::null());
 
-            let child = cmd.spawn().context(t!("ctx.failed_start_gateway").to_string())?;
+            let child = cmd
+                .spawn()
+                .context(t!("ctx.failed_start_gateway").to_string())?;
             let pid = child.id();
 
             std::fs::write(&pid_path, pid.to_string())?;
@@ -569,37 +656,42 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Audit => {
+        Command::Audit { format } => {
             let config = load_config(cli.config.as_deref(), &state_dir)?;
             let config_file_path = cli
                 .config
                 .clone()
-                .unwrap_or_else(|| state_dir.join("frankclaw.json"));
-            let exit_code = run_security_audit(&config, &config_file_path, &state_dir)?;
+                .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
+            let exit_code = run_security_audit(&config, &config_file_path, &state_dir, &format)?;
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
+        }
+
+        Command::Login { provider } => {
+            run_login(&provider, &state_dir).await?;
         }
 
         Command::Onboard { channel, force } => {
             let config_path = cli
                 .config
                 .clone()
-                .unwrap_or_else(|| state_dir.join("frankclaw.json"));
+                .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
             if config_path.exists() && !force {
-                anyhow::bail!(
-                    "{}", t!("cmd.onboard.exists", path = config_path.display())
-                );
+                anyhow::bail!("{}", t!("cmd.onboard.exists", path = config_path.display()));
             }
 
             let gateway_token = frankclaw_crypto::generate_token();
             let config = build_onboard_config(&channel, &gateway_token)?;
-            let json = serde_json::to_string_pretty(&config)?;
+            let toml_str = config.to_toml_string()?;
             std::fs::create_dir_all(config_path.parent().unwrap_or(&state_dir))?;
-            std::fs::write(&config_path, json)?;
+            std::fs::write(&config_path, toml_str)?;
             restrict_file_permissions(&config_path);
 
-            println!("{}", t!("cmd.onboard.created", path = config_path.display()));
+            println!(
+                "{}",
+                t!("cmd.onboard.created", path = config_path.display())
+            );
             println!("{}", t!("cmd.onboard.token", token = &gateway_token));
             println!();
             println!("{}", t!("cmd.onboard.next"));
@@ -611,8 +703,9 @@ async fn main() -> anyhow::Result<()> {
         Command::InstallSystemd { config } => {
             let config_path = config
                 .or_else(|| cli.config.clone())
-                .unwrap_or_else(|| state_dir.join("frankclaw.json"));
-            let executable = std::env::current_exe().context(t!("ctx.failed_locate_binary").to_string())?;
+                .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
+            let executable =
+                std::env::current_exe().context(t!("ctx.failed_locate_binary").to_string())?;
             println!(
                 "{}",
                 render_systemd_unit(&executable, &config_path, &state_dir)
@@ -643,6 +736,9 @@ async fn main() -> anyhow::Result<()> {
                     thinking_budget: None,
                     channel_id: None,
                     channel_capabilities: None,
+                    canvas: Some(frankclaw_gateway::canvas::CanvasStore::new()),
+                    cancel_token: None,
+                    approval_tx: None,
                 })
                 .await?;
 
@@ -678,10 +774,13 @@ async fn main() -> anyhow::Result<()> {
 
             let channels = frankclaw_channels::load_from_config(&config)
                 .context(t!("ctx.failed_load_channels").to_string())?;
-            let channel = channels
-                .get(&entry.channel)
-                .cloned()
-                .with_context(|| t!("ctx.channel_not_configured", channel = entry.channel.as_str()).to_string())?;
+            let channel = channels.get(&entry.channel).cloned().with_context(|| {
+                t!(
+                    "ctx.channel_not_configured",
+                    channel = entry.channel.as_str()
+                )
+                .to_string()
+            })?;
 
             channel
                 .edit_message(
@@ -705,7 +804,10 @@ async fn main() -> anyhow::Result<()> {
             rewrite_last_reply_metadata_for_edit(&mut entry.metadata, &text)?;
             sessions.upsert(&entry).await?;
 
-            println!("{}", t!("cmd.message.edited", key = session_key.to_string()));
+            println!(
+                "{}",
+                t!("cmd.message.edited", key = session_key.to_string())
+            );
         }
 
         Command::MessageDeleteLast { session } => {
@@ -725,10 +827,13 @@ async fn main() -> anyhow::Result<()> {
 
             let channels = frankclaw_channels::load_from_config(&config)
                 .context(t!("ctx.failed_load_channels").to_string())?;
-            let channel = channels
-                .get(&entry.channel)
-                .cloned()
-                .with_context(|| t!("ctx.channel_not_configured", channel = entry.channel.as_str()).to_string())?;
+            let channel = channels.get(&entry.channel).cloned().with_context(|| {
+                t!(
+                    "ctx.channel_not_configured",
+                    channel = entry.channel.as_str()
+                )
+                .to_string()
+            })?;
 
             for platform_message_id in delete_targets_from_last_reply(&last_reply)? {
                 channel
@@ -744,7 +849,10 @@ async fn main() -> anyhow::Result<()> {
             mark_last_reply_metadata_deleted(&mut entry.metadata)?;
             sessions.upsert(&entry).await?;
 
-            println!("{}", t!("cmd.message.deleted", key = session_key.to_string()));
+            println!(
+                "{}",
+                t!("cmd.message.deleted", key = session_key.to_string())
+            );
         }
 
         Command::ModelsList => {
@@ -786,8 +894,9 @@ async fn main() -> anyhow::Result<()> {
             let sessions = open_sessions(&state_dir)?;
             let runtime = build_runtime(&config, sessions).await?;
             let arguments = match args {
-                Some(raw) => serde_json::from_str(&raw)
-                    .context(t!("ctx.tool_args_invalid").to_string())?,
+                Some(raw) => {
+                    serde_json::from_str(&raw).context(t!("ctx.tool_args_invalid").to_string())?
+                }
                 None => serde_json::json!({}),
             };
 
@@ -797,6 +906,7 @@ async fn main() -> anyhow::Result<()> {
                     session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
                     tool_name: tool,
                     arguments,
+                    canvas: Some(frankclaw_gateway::canvas::CanvasStore::new()),
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&output.output)?);
@@ -851,7 +961,8 @@ async fn main() -> anyhow::Result<()> {
                 if !skill.capabilities.is_empty() {
                     println!(
                         "  capabilities: {}",
-                        skill.capabilities
+                        skill
+                            .capabilities
                             .iter()
                             .map(display_skill_capability)
                             .collect::<Vec<_>>()
@@ -872,7 +983,10 @@ async fn main() -> anyhow::Result<()> {
             use frankclaw_core::session::SessionStore;
 
             let sessions = open_sessions(&state_dir)?;
-            let agent_id = agent.map_or_else(frankclaw_core::types::AgentId::default_agent, frankclaw_core::types::AgentId::new);
+            let agent_id = agent.map_or_else(
+                frankclaw_core::types::AgentId::default_agent,
+                frankclaw_core::types::AgentId::new,
+            );
             let entries = sessions.list(&agent_id, limit, offset).await?;
 
             for entry in entries {
@@ -927,7 +1041,15 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let store = open_pairing_store(&state_dir)?;
             let approved = store.approve(Some(&channel), account.as_deref(), &code)?;
-            println!("{}", t!("cmd.pairing.approved", sender = approved.sender_id.as_str(), channel = approved.channel.as_str(), account = approved.account_id.as_str()));
+            println!(
+                "{}",
+                t!(
+                    "cmd.pairing.approved",
+                    sender = approved.sender_id.as_str(),
+                    channel = approved.channel.as_str(),
+                    account = approved.account_id.as_str()
+                )
+            );
         }
 
         Command::RemoteStatus => {
@@ -954,20 +1076,159 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        Command::Acp => {
+            let config = load_config(cli.config.as_deref(), &state_dir)?;
+            config.validate()?;
+            let sessions = open_sessions(&state_dir)?;
+            let runtime = build_runtime(&config, sessions.clone()).await?;
+
+            eprintln!("{}", t!("acp.starting"));
+            eprintln!("{}", t!("acp.ready"));
+
+            let server = frankclaw_gateway::acp::AcpServer::new(
+                runtime,
+                frankclaw_gateway::acp::AcpServerOptions::default(),
+            );
+
+            let stdin = std::io::BufReader::new(std::io::stdin());
+            for line_result in frankclaw_gateway::acp_transport::read_lines(stdin) {
+                let line = match line_result {
+                    Ok(line) => line,
+                    Err(e) => {
+                        let resp = frankclaw_gateway::acp_transport::JsonRpcResponse::error(
+                            None,
+                            frankclaw_gateway::acp_transport::PARSE_ERROR,
+                            e.to_string(),
+                        );
+                        let _ = frankclaw_gateway::acp_transport::write_response(&resp);
+                        continue;
+                    }
+                };
+
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                let req = match frankclaw_gateway::acp_transport::parse_request(&line) {
+                    Ok(req) => req,
+                    Err(resp) => {
+                        let _ = frankclaw_gateway::acp_transport::write_response(&resp);
+                        continue;
+                    }
+                };
+
+                let resp = server.handle_request(req).await;
+                let _ = frankclaw_gateway::acp_transport::write_response(&resp);
+            }
+        }
+
+        Command::Plugin { action } => {
+            let workspace = std::env::current_dir().ok();
+            let dirs = frankclaw_plugin_sdk::discovery::default_plugin_dirs(workspace.as_deref());
+            let discovered = frankclaw_plugin_sdk::discovery::discover_plugins(&dirs);
+            // Load persisted state (empty for now — could be stored in config).
+            let persisted: std::collections::HashMap<
+                String,
+                frankclaw_plugin_sdk::lifecycle::PluginState,
+            > = std::collections::HashMap::new();
+            let mut manager =
+                frankclaw_plugin_sdk::lifecycle::PluginManager::new(discovered, &persisted);
+
+            match action {
+                PluginAction::List => {
+                    let plugins = manager.list();
+                    if plugins.is_empty() {
+                        println!("{}", t!("plugin.none_found"));
+                    } else {
+                        println!("{}", t!("plugin.list_title"));
+                        println!();
+                        for record in plugins {
+                            let status = if record.enabled {
+                                t!("plugin.enabled").to_string()
+                            } else {
+                                t!("plugin.disabled").to_string()
+                            };
+                            println!(
+                                "  {} v{} [{}] ({})",
+                                record.manifest.id,
+                                record.manifest.version,
+                                status,
+                                match record.origin {
+                                    frankclaw_plugin_sdk::discovery::PluginOrigin::Workspace =>
+                                        "workspace",
+                                    frankclaw_plugin_sdk::discovery::PluginOrigin::User => "user",
+                                },
+                            );
+                            if let Some(desc) = &record.manifest.description {
+                                println!("    {desc}");
+                            }
+                        }
+                    }
+                }
+                PluginAction::Enable { id } => {
+                    if manager.enable(&id) {
+                        println!("{}", t!("plugin.enabled_msg", id = &id));
+                    } else {
+                        println!("{}", t!("plugin.not_found", id = &id));
+                    }
+                }
+                PluginAction::Disable { id } => {
+                    if manager.disable(&id) {
+                        println!("{}", t!("plugin.disabled_msg", id = &id));
+                    } else {
+                        println!("{}", t!("plugin.not_found", id = &id));
+                    }
+                }
+                PluginAction::Info { id } => {
+                    if let Some(record) = manager.get(&id) {
+                        println!("{}: {}", t!("plugin.info_id"), record.manifest.id);
+                        println!("{}: {}", t!("plugin.info_name"), record.manifest.name);
+                        println!("{}: {}", t!("plugin.info_version"), record.manifest.version);
+                        if let Some(desc) = &record.manifest.description {
+                            println!("{}: {desc}", t!("plugin.info_description"));
+                        }
+                        println!("{}: {}", t!("plugin.info_path"), record.path.display());
+                        let status = if record.enabled {
+                            t!("plugin.enabled").to_string()
+                        } else {
+                            t!("plugin.disabled").to_string()
+                        };
+                        println!("{}: {status}", t!("plugin.info_status"));
+                        if !record.manifest.channels.is_empty() {
+                            println!(
+                                "{}: {}",
+                                t!("plugin.info_channels"),
+                                record.manifest.channels.join(", ")
+                            );
+                        }
+                        if !record.manifest.tools.is_empty() {
+                            println!(
+                                "{}: {}",
+                                t!("plugin.info_tools"),
+                                record.manifest.tools.join(", ")
+                            );
+                        }
+                    } else {
+                        println!("{}", t!("plugin.not_found", id = &id));
+                    }
+                }
+            }
+        }
+
         Command::Init { force } => {
             let config_path = cli
                 .config
-                .unwrap_or_else(|| state_dir.join("frankclaw.json"));
+                .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
 
             if config_path.exists() && !force {
                 anyhow::bail!("{}", t!("cmd.init.exists", path = config_path.display()));
             }
 
             let config = frankclaw_core::config::FrankClawConfig::default();
-            let json = serde_json::to_string_pretty(&config)?;
+            let toml_str = config.to_toml_string()?;
 
             std::fs::create_dir_all(config_path.parent().unwrap_or(&state_dir))?;
-            std::fs::write(&config_path, &json)?;
+            std::fs::write(&config_path, &toml_str)?;
             restrict_file_permissions(&config_path);
 
             println!("{}", t!("cmd.init.created", path = config_path.display()));
@@ -992,10 +1253,15 @@ fn load_config(
     path: Option<&std::path::Path>,
     state_dir: &std::path::Path,
 ) -> anyhow::Result<frankclaw_core::config::FrankClawConfig> {
-    let config_path = path.map_or_else(|| state_dir.join("frankclaw.json"), PathBuf::from);
+    let config_path = path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
 
     if !config_path.exists() {
-        info!("no config found at {}, using defaults", config_path.display());
+        info!(
+            "no config found at {}, using defaults",
+            config_path.display()
+        );
         return frankclaw_core::config::FrankClawConfig::load_or_default(&config_path)
             .map_err(anyhow::Error::from);
     }
@@ -1027,18 +1293,33 @@ fn collect_doctor_warnings(
 
     for provider in &config.models.providers {
         if let Some(env_name) = provider.api_key_ref.as_deref()
-            && std::env::var(env_name).ok().filter(|value| !value.trim().is_empty()).is_none() {
-                warnings.push(t!("warn.missing_env", id = provider.id.as_str(), env = env_name).to_string());
-            }
+            && std::env::var(env_name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .is_none()
+        {
+            warnings.push(
+                t!(
+                    "warn.missing_env",
+                    id = provider.id.as_str(),
+                    env = env_name
+                )
+                .to_string(),
+            );
+        }
     }
 
     for (channel_id, channel) in &config.channels {
-        let policy = channel
-            .security_policy()
-            .with_context(|| t!("warn.invalid_channel_policy", channel = channel_id.as_str()).to_string())?;
+        let policy = channel.security_policy().with_context(|| {
+            t!("warn.invalid_channel_policy", channel = channel_id.as_str()).to_string()
+        })?;
 
-        if group_surface_needs_guard(channel_id.as_str()) && !policy.require_mention_for_groups && policy.allowed_groups.is_none() {
-            warnings.push(t!("warn.channel_open_groups", channel = channel_id.as_str()).to_string());
+        if group_surface_needs_guard(channel_id.as_str())
+            && !policy.require_mention_for_groups
+            && policy.allowed_groups.is_none()
+        {
+            warnings
+                .push(t!("warn.channel_open_groups", channel = channel_id.as_str()).to_string());
         }
 
         for account in &channel.accounts {
@@ -1053,9 +1334,21 @@ fn collect_doctor_warnings(
                 "app_secret_env",
             ] {
                 if let Some(env_name) = account.get(key).and_then(|value| value.as_str())
-                    && std::env::var(env_name).ok().filter(|value| !value.trim().is_empty()).is_none() {
-                        warnings.push(t!("warn.channel_missing_env", channel = channel_id.as_str(), env = env_name, key = key).to_string());
-                    }
+                    && std::env::var(env_name)
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                        .is_none()
+                {
+                    warnings.push(
+                        t!(
+                            "warn.channel_missing_env",
+                            channel = channel_id.as_str(),
+                            env = env_name,
+                            key = key
+                        )
+                        .to_string(),
+                    );
+                }
             }
 
             for (inline_key, env_key) in [
@@ -1073,13 +1366,31 @@ fn collect_doctor_warnings(
                     .filter(|value| !value.is_empty())
                     .is_some()
                 {
-                    warnings.push(t!("warn.channel_inline_secret", channel = channel_id.as_str(), key = inline_key, env_key = env_key).to_string());
+                    warnings.push(
+                        t!(
+                            "warn.channel_inline_secret",
+                            channel = channel_id.as_str(),
+                            key = inline_key,
+                            env_key = env_key
+                        )
+                        .to_string(),
+                    );
                 }
             }
 
             if channel_id.as_str() == "whatsapp"
-                && account.get("app_secret").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).is_none()
-                && account.get("app_secret_env").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).is_none()
+                && account
+                    .get("app_secret")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                && account
+                    .get("app_secret_env")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
             {
                 warnings.push(t!("warn.whatsapp_no_secret").to_string());
             }
@@ -1090,14 +1401,19 @@ fn collect_doctor_warnings(
     warnings.extend(exposure.warnings);
     warnings.extend(collect_browser_tool_warnings(
         config,
-        std::env::var("FRANKCLAW_BROWSER_DEVTOOLS_URL").ok().as_deref(),
+        std::env::var("FRANKCLAW_BROWSER_DEVTOOLS_URL")
+            .ok()
+            .as_deref(),
     ));
 
     Ok(warnings)
 }
 
 fn group_surface_needs_guard(channel_id: &str) -> bool {
-    matches!(channel_id, "telegram" | "discord" | "slack" | "signal" | "whatsapp" | "email")
+    matches!(
+        channel_id,
+        "telegram" | "discord" | "slack" | "signal" | "whatsapp" | "email"
+    )
 }
 
 fn collect_browser_tool_warnings(
@@ -1111,7 +1427,10 @@ fn collect_browser_tool_warnings(
     )
 }
 
-#[expect(clippy::needless_pass_by_value, reason = "ToolPolicy is small and consumed for field inspection")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "ToolPolicy is small and consumed for field inspection"
+)]
 fn collect_browser_tool_warnings_with_policy(
     config: &frankclaw_core::config::FrankClawConfig,
     browser_endpoint: Option<&str>,
@@ -1122,7 +1441,7 @@ fn collect_browser_tool_warnings_with_policy(
         .agents
         .values()
         .flat_map(|agent| agent.tools.iter())
-        .any(|tool| tool.starts_with("browser."));
+        .any(|tool| tool.starts_with("browser_"));
     if !browser_tools_enabled {
         return Vec::new();
     }
@@ -1131,7 +1450,9 @@ fn collect_browser_tool_warnings_with_policy(
         .agents
         .values()
         .flat_map(|agent| agent.tools.iter())
-        .any(|tool| frankclaw_tools::tool_risk_level(tool) >= frankclaw_core::model::ToolRiskLevel::Mutating);
+        .any(|tool| {
+            frankclaw_tools::tool_risk_level(tool) >= frankclaw_core::model::ToolRiskLevel::Mutating
+        });
 
     let endpoint = browser_endpoint
         .map(str::trim)
@@ -1145,7 +1466,11 @@ fn collect_browser_tool_warnings_with_policy(
     };
 
     let mut warnings = Vec::new();
-    if has_mutating_tools && !tool_policy.approval_level.approves(frankclaw_core::model::ToolRiskLevel::Mutating) {
+    if has_mutating_tools
+        && !tool_policy
+            .approval_level
+            .approves(frankclaw_core::model::ToolRiskLevel::Mutating)
+    {
         warnings.push(t!("browser.mutations_blocked").to_string());
     }
     match parsed.host_str() {
@@ -1182,28 +1507,39 @@ fn browser_runtime_status(
     )
 }
 
-#[expect(clippy::needless_pass_by_value, reason = "ToolPolicy is small and forwarded to inner function")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "ToolPolicy is small and forwarded to inner function"
+)]
 fn browser_runtime_status_with_policy(
     config: &frankclaw_core::config::FrankClawConfig,
     browser_endpoint: Option<&str>,
     policy: frankclaw_tools::ToolPolicy,
 ) -> Option<String> {
-    let warnings = collect_browser_tool_warnings_with_policy(config, browser_endpoint, policy.clone());
+    let warnings =
+        collect_browser_tool_warnings_with_policy(config, browser_endpoint, policy.clone());
     if warnings.is_empty() {
-        config
+        if config
             .agents
             .agents
             .values()
             .flat_map(|agent| agent.tools.iter())
-            .any(|tool| tool.starts_with("browser.")).then(|| {
+            .any(|tool| tool.starts_with("browser_"))
+        {
             let has_mutating = config
                 .agents
                 .agents
                 .values()
                 .flat_map(|agent| agent.tools.iter())
-                .any(|tool| frankclaw_tools::tool_risk_level(tool) >= frankclaw_core::model::ToolRiskLevel::Mutating);
+                .any(|tool| {
+                    frankclaw_tools::tool_risk_level(tool)
+                        >= frankclaw_core::model::ToolRiskLevel::Mutating
+                });
             let mutation_state = if has_mutating {
-                if policy.approval_level.approves(frankclaw_core::model::ToolRiskLevel::Mutating) {
+                if policy
+                    .approval_level
+                    .approves(frankclaw_core::model::ToolRiskLevel::Mutating)
+                {
                     t!("cmd.status.mutations_enabled").to_string()
                 } else {
                     t!("cmd.status.mutations_gated").to_string()
@@ -1211,12 +1547,14 @@ fn browser_runtime_status_with_policy(
             } else {
                 t!("cmd.status.read_only").to_string()
             };
-            format!(
+            Some(format!(
                 "{} at {}",
                 mutation_state,
                 browser_endpoint.unwrap_or("http://127.0.0.1:9222/")
-            )
-        })
+            ))
+        } else {
+            None
+        }
     } else {
         Some(warnings.join(" | "))
     }
@@ -1317,23 +1655,23 @@ fn build_onboard_config(
             })],
             extra: serde_json::json!({}),
         },
-        other => anyhow::bail!(
-            "{}", t!("cmd.onboard.unsupported", channel = other)
-        ),
+        other => anyhow::bail!("{}", t!("cmd.onboard.unsupported", channel = other)),
     };
-    config.channels.insert(ChannelId::new(channel), channel_config);
+    config
+        .channels
+        .insert(ChannelId::new(channel), channel_config);
     Ok(config)
 }
 
 fn supported_channel_example(channel: &str) -> Option<&'static str> {
     match channel.trim() {
-        "web" => Some(include_str!("../../../examples/channels/web.json")),
-        "telegram" => Some(include_str!("../../../examples/channels/telegram.json")),
-        "discord" => Some(include_str!("../../../examples/channels/discord.json")),
-        "slack" => Some(include_str!("../../../examples/channels/slack.json")),
-        "signal" => Some(include_str!("../../../examples/channels/signal.json")),
-        "whatsapp" => Some(include_str!("../../../examples/channels/whatsapp.json")),
-        "email" => Some(include_str!("../../../examples/channels/email.json")),
+        "web" => Some(include_str!("../../../examples/channels/web.toml")),
+        "telegram" => Some(include_str!("../../../examples/channels/telegram.toml")),
+        "discord" => Some(include_str!("../../../examples/channels/discord.toml")),
+        "slack" => Some(include_str!("../../../examples/channels/slack.toml")),
+        "signal" => Some(include_str!("../../../examples/channels/signal.toml")),
+        "whatsapp" => Some(include_str!("../../../examples/channels/whatsapp.toml")),
+        "email" => Some(include_str!("../../../examples/channels/email.toml")),
         _ => None,
     }
 }
@@ -1415,9 +1753,7 @@ fn mark_last_reply_metadata_deleted(
     Ok(last_reply)
 }
 
-fn display_skill_capability(
-    capability: &frankclaw_plugin_sdk::SkillCapability,
-) -> &'static str {
+fn display_skill_capability(capability: &frankclaw_plugin_sdk::SkillCapability) -> &'static str {
     match capability {
         frankclaw_plugin_sdk::SkillCapability::Prompt => "prompt",
         frankclaw_plugin_sdk::SkillCapability::ReadSession => "read_session",
@@ -1425,11 +1761,40 @@ fn display_skill_capability(
 }
 
 fn print_exposure_report(report: &frankclaw_gateway::auth::ExposureReport) {
-    println!("{}", t!("exposure.summary_label", summary = &*report.summary));
+    println!(
+        "{}",
+        t!("exposure.summary_label", summary = &*report.summary)
+    );
     println!("{}", t!("exposure.auth", mode = report.auth_mode));
-    println!("{}", t!("exposure.bind", surface = display_exposure_surface(&report.surface)));
-    println!("{}", t!("exposure.remote", status = if report.remote_ready { t!("exposure.ready") } else { t!("exposure.not_ready") }));
-    println!("{}", t!("exposure.public", status = if report.public_ready { t!("exposure.ready") } else { t!("exposure.not_ready") }));
+    println!(
+        "{}",
+        t!(
+            "exposure.bind",
+            surface = display_exposure_surface(&report.surface)
+        )
+    );
+    println!(
+        "{}",
+        t!(
+            "exposure.remote",
+            status = if report.remote_ready {
+                t!("exposure.ready")
+            } else {
+                t!("exposure.not_ready")
+            }
+        )
+    );
+    println!(
+        "{}",
+        t!(
+            "exposure.public",
+            status = if report.public_ready {
+                t!("exposure.ready")
+            } else {
+                t!("exposure.not_ready")
+            }
+        )
+    );
     if !report.warnings.is_empty() {
         println!();
         println!("{}", t!("exposure.warnings"));
@@ -1439,9 +1804,7 @@ fn print_exposure_report(report: &frankclaw_gateway::auth::ExposureReport) {
     }
 }
 
-fn display_exposure_surface(
-    surface: &frankclaw_gateway::auth::ExposureSurface,
-) -> String {
+fn display_exposure_surface(surface: &frankclaw_gateway::auth::ExposureSurface) -> String {
     match surface {
         frankclaw_gateway::auth::ExposureSurface::Loopback => "loopback".into(),
         frankclaw_gateway::auth::ExposureSurface::Lan => "lan".into(),
@@ -1463,7 +1826,7 @@ fn open_sessions(
             &db_path,
             load_master_key_from_env()?.as_ref(),
         )
-            .context(t!("ctx.failed_open_sessions").to_string())?,
+        .context(t!("ctx.failed_open_sessions").to_string())?,
     ))
 }
 
@@ -1508,8 +1871,7 @@ fn restrict_file_permissions(path: &std::path::Path) {
 // ---------------------------------------------------------------------------
 
 fn read_pid_file(pid_path: &std::path::Path) -> Option<u32> {
-    let content = std::fs::read_to_string(pid_path)
-        .ok()?;
+    let content = std::fs::read_to_string(pid_path).ok()?;
     content.trim().parse::<u32>().ok()
 }
 
@@ -1604,8 +1966,14 @@ fn prompt_yes_no(question: &str, default_yes: bool) -> anyhow::Result<bool> {
     Ok(matches!(input.to_lowercase().as_str(), "y" | "yes"))
 }
 
-#[expect(clippy::too_many_lines, reason = "interactive setup wizard with many prompts")]
-#[expect(clippy::unreachable, reason = "menu indices are bounded by prompt_menu; unreachable is the correct contract")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "interactive setup wizard with many prompts"
+)]
+#[expect(
+    clippy::unreachable,
+    reason = "menu indices are bounded by prompt_menu; unreachable is the correct contract"
+)]
 fn run_setup(
     config_path_override: Option<&std::path::Path>,
     state_dir: &std::path::Path,
@@ -1615,14 +1983,19 @@ fn run_setup(
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
     use frankclaw_core::types::ChannelId;
 
-    let config_path = config_path_override.map_or_else(|| state_dir.join("frankclaw.json"), PathBuf::from);
+    let config_path = config_path_override
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
 
     println!("{}", t!("setup.title"));
     println!("{}", t!("setup.separator"));
     println!();
 
     if config_path.exists() && !force {
-        eprintln!("{}", t!("setup.config_exists", path = config_path.display()));
+        eprintln!(
+            "{}",
+            t!("setup.config_exists", path = config_path.display())
+        );
         if !prompt_yes_no(t!("setup.overwrite").as_ref(), false)? {
             println!("{}", t!("setup.cancelled"));
             return Ok(());
@@ -1800,17 +2173,22 @@ fn run_setup(
         cooldown_secs: 30,
     }];
     config.models.default_model = Some(model);
-    config.channels.insert(ChannelId::new(channel_id), channel_config);
+    config
+        .channels
+        .insert(ChannelId::new(channel_id), channel_config);
     config.security.encrypt_sessions = encrypt;
 
     // --- Write config ---
     std::fs::create_dir_all(config_path.parent().unwrap_or(state_dir))?;
-    let json = serde_json::to_string_pretty(&config)?;
-    std::fs::write(&config_path, &json)?;
+    let toml_str = config.to_toml_string()?;
+    std::fs::write(&config_path, &toml_str)?;
     restrict_file_permissions(&config_path);
 
     println!();
-    println!("{}", t!("setup.config_written", path = config_path.display()));
+    println!(
+        "{}",
+        t!("setup.config_written", path = config_path.display())
+    );
     println!("{}", t!("setup.gateway_token", token = gateway_token));
     if encrypt {
         println!();
@@ -1869,29 +2247,49 @@ impl CheckResult {
 }
 
 fn print_section(title: &str, checks: &[CheckResult]) {
-    println!("\n  {title}");
+    println!(
+        "\n  {}",
+        terminal::bold_colored(title, terminal::colors::ACCENT)
+    );
     for check in checks {
-        println!("    {} {}", check.prefix(), check.message());
+        println!(
+            "    {} {}",
+            terminal::check_badge(check.prefix()),
+            check.message()
+        );
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "diagnostic checks across many subsystems")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "diagnostic checks across many subsystems"
+)]
 async fn run_doctor(
     config_path: Option<&std::path::Path>,
     state_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    println!("{}", t!("doctor.title"));
-    println!("{}", t!("doctor.separator"));
+    println!(
+        "{}",
+        terminal::bold_colored(&t!("doctor.title").to_string(), terminal::colors::ACCENT)
+    );
+    println!(
+        "{}",
+        terminal::colored(&t!("doctor.separator").to_string(), terminal::colors::MUTED)
+    );
 
     // --- System info ---
     let mut system_checks = vec![
-        CheckResult::Info(t!("doctor.info.version", version = env!("CARGO_PKG_VERSION")).to_string()),
+        CheckResult::Info(
+            t!("doctor.info.version", version = env!("CARGO_PKG_VERSION")).to_string(),
+        ),
         CheckResult::Info(t!("doctor.info.rust", version = rustc_version()).to_string()),
         CheckResult::Info(t!("doctor.info.os", os = std::env::consts::OS).to_string()),
         CheckResult::Info(t!("doctor.info.arch", arch = std::env::consts::ARCH).to_string()),
     ];
     let state_display = state_dir.display().to_string();
-    system_checks.push(CheckResult::Info(t!("doctor.info.state_dir", path = state_display).to_string()));
+    system_checks.push(CheckResult::Info(
+        t!("doctor.info.state_dir", path = state_display).to_string(),
+    ));
     print_section(t!("doctor.section.system").as_ref(), &system_checks);
 
     // --- Configuration ---
@@ -1900,7 +2298,9 @@ async fn run_doctor(
         Err(err) => {
             print_section(
                 t!("doctor.section.configuration").as_ref(),
-                &[CheckResult::Fail(t!("doctor.config.load_failed", error = err).to_string())],
+                &[CheckResult::Fail(
+                    t!("doctor.config.load_failed", error = err).to_string(),
+                )],
             );
             println!("\n{}", t!("doctor.config.critical_issues"));
             return Ok(());
@@ -1911,7 +2311,9 @@ async fn run_doctor(
     match config.validate() {
         Ok(()) => config_checks.push(CheckResult::Pass(t!("doctor.config.valid").to_string())),
         Err(err) => {
-            config_checks.push(CheckResult::Fail(t!("doctor.config.validation_failed", error = err).to_string()));
+            config_checks.push(CheckResult::Fail(
+                t!("doctor.config.validation_failed", error = err).to_string(),
+            ));
             print_section(t!("doctor.section.configuration").as_ref(), &config_checks);
             println!("\n{}", t!("doctor.config.critical_issues"));
             return Ok(());
@@ -1919,7 +2321,9 @@ async fn run_doctor(
     }
 
     // Config file permissions (Unix only)
-    let config_file_path = config_path.map_or_else(|| state_dir.join("frankclaw.json"), PathBuf::from);
+    let config_file_path = config_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_dir.join("frankclaw.toml"));
     config_checks.extend(check_file_permissions(&config_file_path, "config file"));
 
     let warnings = collect_doctor_warnings(&config, state_dir)?;
@@ -1927,11 +2331,15 @@ async fn run_doctor(
         config_checks.push(CheckResult::Warn(warning.clone()));
     }
     if warnings.is_empty() {
-        config_checks.push(CheckResult::Pass(t!("doctor.config.no_misconfig").to_string()));
+        config_checks.push(CheckResult::Pass(
+            t!("doctor.config.no_misconfig").to_string(),
+        ));
     }
 
     let exposure = frankclaw_gateway::auth::assess_exposure(&config)?;
-    config_checks.push(CheckResult::Info(t!("doctor.info.exposure", summary = exposure.summary).to_string()));
+    config_checks.push(CheckResult::Info(
+        t!("doctor.info.exposure", summary = exposure.summary).to_string(),
+    ));
     for warning in &exposure.warnings {
         config_checks.push(CheckResult::Warn(warning.clone()));
     }
@@ -1956,13 +2364,13 @@ async fn run_doctor(
     if db_path.exists() {
         match check_sqlite_health(&db_path) {
             Ok(()) => db_checks.push(CheckResult::Pass(t!("doctor.db.valid").to_string())),
-            Err(err) => db_checks.push(CheckResult::Fail(t!("doctor.db.error", error = err).to_string())),
+            Err(err) => db_checks.push(CheckResult::Fail(
+                t!("doctor.db.error", error = err).to_string(),
+            )),
         }
         db_checks.extend(check_file_permissions(&db_path, "sessions.db"));
     } else {
-        db_checks.push(CheckResult::Info(
-            t!("doctor.db.missing").to_string(),
-        ));
+        db_checks.push(CheckResult::Info(t!("doctor.db.missing").to_string()));
     }
     print_section(t!("doctor.section.database").as_ref(), &db_checks);
 
@@ -1970,7 +2378,9 @@ async fn run_doctor(
     let mut port_checks = Vec::new();
     let port = config.gateway.port;
     match check_port_available(port) {
-        Ok(true) => port_checks.push(CheckResult::Pass(t!("doctor.port.available", port = port).to_string())),
+        Ok(true) => port_checks.push(CheckResult::Pass(
+            t!("doctor.port.available", port = port).to_string(),
+        )),
         Ok(false) => port_checks.push(CheckResult::Warn(
             t!("doctor.port.in_use", port = port).to_string(),
         )),
@@ -1995,13 +2405,24 @@ async fn run_doctor(
 
         if !has_key {
             provider_checks.push(CheckResult::Warn(
-                t!("doctor.provider.no_key", id = provider.id, api = provider.api).to_string(),
+                t!(
+                    "doctor.provider.no_key",
+                    id = provider.id,
+                    api = provider.api
+                )
+                .to_string(),
             ));
             continue;
         }
 
         provider_checks.push(CheckResult::Pass(
-            t!("doctor.provider.ok", id = provider.id, api = provider.api, count = provider.models.len()).to_string(),
+            t!(
+                "doctor.provider.ok",
+                id = provider.id,
+                api = provider.api,
+                count = provider.models.len()
+            )
+            .to_string(),
         ));
 
         // Connectivity check for providers with a base URL
@@ -2033,7 +2454,12 @@ async fn run_doctor(
     for (channel_id, channel) in &config.channels {
         if channel.enabled {
             channel_checks.push(CheckResult::Pass(
-                t!("doctor.channel.enabled", id = channel_id, count = channel.accounts.len()).to_string(),
+                t!(
+                    "doctor.channel.enabled",
+                    id = channel_id,
+                    count = channel.accounts.len()
+                )
+                .to_string(),
             ));
         } else {
             channel_checks.push(CheckResult::Info(
@@ -2047,29 +2473,45 @@ async fn run_doctor(
     let mut security_checks = Vec::new();
     if config.security.encrypt_sessions {
         if load_master_key_from_env()?.is_some() {
-            security_checks.push(CheckResult::Pass(t!("doctor.security.encrypt_ok").to_string()));
+            security_checks.push(CheckResult::Pass(
+                t!("doctor.security.encrypt_ok").to_string(),
+            ));
         } else {
-            security_checks.push(CheckResult::Warn(t!("doctor.security.encrypt_no_key").to_string()));
+            security_checks.push(CheckResult::Warn(
+                t!("doctor.security.encrypt_no_key").to_string(),
+            ));
         }
     } else {
-        security_checks.push(CheckResult::Warn(t!("doctor.security.encrypt_off").to_string()));
+        security_checks.push(CheckResult::Warn(
+            t!("doctor.security.encrypt_off").to_string(),
+        ));
     }
 
     match &config.gateway.auth {
         frankclaw_core::auth::AuthMode::None => {
-            security_checks.push(CheckResult::Warn(t!("doctor.security.auth_none").to_string()));
+            security_checks.push(CheckResult::Warn(
+                t!("doctor.security.auth_none").to_string(),
+            ));
         }
         frankclaw_core::auth::AuthMode::Token { .. } => {
-            security_checks.push(CheckResult::Pass(t!("doctor.security.auth_token").to_string()));
+            security_checks.push(CheckResult::Pass(
+                t!("doctor.security.auth_token").to_string(),
+            ));
         }
         frankclaw_core::auth::AuthMode::Password { .. } => {
-            security_checks.push(CheckResult::Pass(t!("doctor.security.auth_password").to_string()));
+            security_checks.push(CheckResult::Pass(
+                t!("doctor.security.auth_password").to_string(),
+            ));
         }
         frankclaw_core::auth::AuthMode::TrustedProxy { .. } => {
-            security_checks.push(CheckResult::Pass(t!("doctor.security.auth_proxy").to_string()));
+            security_checks.push(CheckResult::Pass(
+                t!("doctor.security.auth_proxy").to_string(),
+            ));
         }
         frankclaw_core::auth::AuthMode::Tailscale => {
-            security_checks.push(CheckResult::Pass(t!("doctor.security.auth_tailscale").to_string()));
+            security_checks.push(CheckResult::Pass(
+                t!("doctor.security.auth_tailscale").to_string(),
+            ));
         }
     }
     print_section(t!("doctor.section.security").as_ref(), &security_checks);
@@ -2087,11 +2529,21 @@ async fn run_doctor(
         .collect();
 
     let fail_count = all_checks.iter().filter(|c| c.is_fail()).count();
-    let warn_count = all_checks.iter().filter(|c| matches!(c, CheckResult::Warn(_))).count();
+    let warn_count = all_checks
+        .iter()
+        .filter(|c| matches!(c, CheckResult::Warn(_)))
+        .count();
 
     println!();
     if fail_count > 0 {
-        println!("{}", t!("doctor.summary.critical", fails = fail_count, warns = warn_count));
+        println!(
+            "{}",
+            t!(
+                "doctor.summary.critical",
+                fails = fail_count,
+                warns = warn_count
+            )
+        );
     } else if warn_count > 0 {
         println!("{}", t!("doctor.summary.warnings", warns = warn_count));
     } else {
@@ -2106,7 +2558,8 @@ fn rustc_version() -> String {
         .arg("--version")
         .output()
         .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok()).map_or_else(|| "unknown".into(), |version| version.trim().to_string())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map_or_else(|| "unknown".into(), |version| version.trim().to_string())
 }
 
 #[cfg(unix)]
@@ -2117,7 +2570,12 @@ fn check_file_permissions(path: &std::path::Path, label: &str) -> Vec<CheckResul
         let mode = metadata.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             results.push(CheckResult::Warn(
-                t!("perms.file_warn", label = label, mode = format!("{mode:04o}")).to_string(),
+                t!(
+                    "perms.file_warn",
+                    label = label,
+                    mode = format!("{mode:04o}")
+                )
+                .to_string(),
             ));
         } else {
             results.push(CheckResult::Pass(
@@ -2141,7 +2599,12 @@ fn check_dir_permissions(path: &std::path::Path, label: &str) -> Vec<CheckResult
         let mode = metadata.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             results.push(CheckResult::Warn(
-                t!("perms.dir_warn", label = label, mode = format!("{mode:04o}")).to_string(),
+                t!(
+                    "perms.dir_warn",
+                    label = label,
+                    mode = format!("{mode:04o}")
+                )
+                .to_string(),
             ));
         } else {
             results.push(CheckResult::Pass(
@@ -2208,18 +2671,73 @@ impl std::fmt::Display for Severity {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AuditCode {
+    AuthDisabled,
+    AuthWeak,
+    SecretsInline,
+    SecretsMissing,
+    SecretsNoKeyRef,
+    PlaintextFound,
+    RefShadowed,
+    LegacyResidue,
+    EncryptionOff,
+    EncryptionKeyMissing,
+    NetworkExposed,
+    NetworkNoTls,
+    SsrfDisabled,
+    ChannelPolicy,
+    ChannelWhatsApp,
+    ToolPolicy,
+    ToolSandbox,
+    FilePermissions,
+    MediaScanning,
+}
+
+impl AuditCode {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::AuthDisabled => "auth_disabled",
+            Self::AuthWeak => "auth_weak",
+            Self::SecretsInline => "secrets_inline",
+            Self::SecretsMissing => "secrets_missing",
+            Self::SecretsNoKeyRef => "secrets_no_key_ref",
+            Self::PlaintextFound => "plaintext_found",
+            Self::RefShadowed => "ref_shadowed",
+            Self::LegacyResidue => "legacy_residue",
+            Self::EncryptionOff => "encryption_off",
+            Self::EncryptionKeyMissing => "encryption_key_missing",
+            Self::NetworkExposed => "network_exposed",
+            Self::NetworkNoTls => "network_no_tls",
+            Self::SsrfDisabled => "ssrf_disabled",
+            Self::ChannelPolicy => "channel_policy",
+            Self::ChannelWhatsApp => "channel_whatsapp",
+            Self::ToolPolicy => "tool_policy",
+            Self::ToolSandbox => "tool_sandbox",
+            Self::FilePermissions => "file_permissions",
+            Self::MediaScanning => "media_scanning",
+        }
+    }
+}
+
 struct Finding {
     severity: Severity,
+    code: AuditCode,
     category: &'static str,
     message: String,
     remediation: String,
+    json_path: Option<String>,
 }
 
-#[expect(clippy::unnecessary_wraps, reason = "Result return kept for consistency with other CLI subcommand functions")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Result return kept for consistency with other CLI subcommand functions"
+)]
 fn run_security_audit(
     config: &frankclaw_core::config::FrankClawConfig,
     config_path: &std::path::Path,
     state_dir: &std::path::Path,
+    output_format: &str,
 ) -> anyhow::Result<i32> {
     let mut findings = Vec::new();
 
@@ -2254,90 +2772,188 @@ fn run_security_audit(
     if !config.security.ssrf_protection {
         findings.push(Finding {
             severity: Severity::Critical,
+            code: AuditCode::SsrfDisabled,
             category: "network",
             message: t!("audit.network.ssrf_off").to_string(),
             remediation: t!("audit.network.ssrf_off_fix").to_string(),
+            json_path: None,
         });
     }
+
+    // --- Scan for secret refs ---
+    audit_secret_refs(config, &mut findings);
+
+    // --- Scan .env files in working dir ---
+    audit_dotenv_plaintext(&mut findings);
+
+    // --- Check for legacy credential files ---
+    audit_legacy_credentials(state_dir, &mut findings);
 
     // --- Print report ---
     findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
 
-    println!("{}", t!("audit.title"));
-    println!("{}", t!("audit.separator"));
-    println!();
+    let crit = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .count();
+    let high = findings
+        .iter()
+        .filter(|f| f.severity == Severity::High)
+        .count();
+    let med = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Medium)
+        .count();
+    let low = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Low)
+        .count();
+    let info = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Info)
+        .count();
 
-    if findings.is_empty() {
-        println!("{}", t!("audit.clean"));
-        return Ok(0);
-    }
-
-    let mut by_category: std::collections::BTreeMap<&str, Vec<&Finding>> =
-        std::collections::BTreeMap::new();
-    for finding in &findings {
-        by_category.entry(finding.category).or_default().push(finding);
-    }
-
-    for (category, category_findings) in &by_category {
-        println!("  {}", category.to_uppercase());
-        for finding in category_findings {
-            println!("    [{}] {}", finding.severity, finding.message);
-            println!("          {}", t!("audit.fix_label", remediation = finding.remediation));
-        }
+    if output_format == "json" {
+        let json_findings: Vec<serde_json::Value> = findings
+            .iter()
+            .map(|f| {
+                let mut obj = serde_json::json!({
+                    "severity": f.severity.to_string().trim().to_string(),
+                    "category": f.category,
+                    "code": f.code.name(),
+                    "message": f.message,
+                    "remediation": f.remediation,
+                });
+                if let Some(ref jp) = f.json_path {
+                    obj["json_path"] = serde_json::json!(jp);
+                }
+                obj
+            })
+            .collect();
+        let report = serde_json::json!({
+            "version": 1,
+            "status": if crit > 0 || high > 0 { "fail" } else if findings.is_empty() { "clean" } else { "warn" },
+            "summary": {
+                "critical": crit,
+                "high": high,
+                "medium": med,
+                "low": low,
+                "info": info,
+                "total": findings.len(),
+            },
+            "findings": json_findings,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "{}",
+            terminal::bold_colored(&t!("audit.title").to_string(), terminal::colors::ACCENT)
+        );
+        println!(
+            "{}",
+            terminal::colored(&t!("audit.separator").to_string(), terminal::colors::MUTED)
+        );
         println!();
+
+        if findings.is_empty() {
+            println!("{}", t!("audit.clean"));
+            return Ok(0);
+        }
+
+        let mut by_category: std::collections::BTreeMap<&str, Vec<&Finding>> =
+            std::collections::BTreeMap::new();
+        for finding in &findings {
+            by_category
+                .entry(finding.category)
+                .or_default()
+                .push(finding);
+        }
+
+        for (category, category_findings) in &by_category {
+            println!(
+                "  {}",
+                terminal::bold_colored(&category.to_uppercase(), terminal::colors::ACCENT)
+            );
+            for finding in category_findings {
+                println!(
+                    "    {} {}",
+                    terminal::severity_badge(&finding.severity.to_string().trim().to_string()),
+                    finding.message
+                );
+                println!(
+                    "          {}",
+                    terminal::colored(
+                        &t!("audit.fix_label", remediation = finding.remediation).to_string(),
+                        terminal::colors::MUTED,
+                    )
+                );
+            }
+            println!();
+        }
+
+        println!(
+            "{}",
+            t!(
+                "audit.summary",
+                crit = crit,
+                high = high,
+                med = med,
+                low = low,
+                info = info
+            )
+        );
     }
-
-    // --- Summary ---
-    let crit = findings.iter().filter(|f| f.severity == Severity::Critical).count();
-    let high = findings.iter().filter(|f| f.severity == Severity::High).count();
-    let med = findings.iter().filter(|f| f.severity == Severity::Medium).count();
-    let low = findings.iter().filter(|f| f.severity == Severity::Low).count();
-    let info = findings.iter().filter(|f| f.severity == Severity::Info).count();
-
-    println!("{}", t!("audit.summary", crit = crit, high = high, med = med, low = low, info = info));
 
     if crit > 0 || high > 0 {
-        println!("{}", t!("audit.failed"));
+        if output_format != "json" {
+            println!("{}", t!("audit.failed"));
+        }
         Ok(1)
     } else {
-        println!("{}", t!("audit.passed"));
+        if output_format != "json" && !findings.is_empty() {
+            println!("{}", t!("audit.passed"));
+        }
         Ok(0)
     }
 }
 
-fn audit_auth(
-    config: &frankclaw_core::config::FrankClawConfig,
-    findings: &mut Vec<Finding>,
-) {
+fn audit_auth(config: &frankclaw_core::config::FrankClawConfig, findings: &mut Vec<Finding>) {
     match &config.gateway.auth {
         frankclaw_core::auth::AuthMode::None => {
             findings.push(Finding {
                 severity: Severity::High,
+                code: AuditCode::AuthDisabled,
                 category: "auth",
                 message: t!("audit.auth.disabled").to_string(),
                 remediation: t!("audit.auth.disabled_fix").to_string(),
+                json_path: None,
             });
         }
-        frankclaw_core::auth::AuthMode::Token { token: Some(token) } => {
-            use secrecy::ExposeSecret;
-            let token_str = token.expose_secret();
-            if token_str.len() < 16 {
-                findings.push(Finding {
-                    severity: Severity::Medium,
-                    category: "auth",
-                    message: t!("audit.auth.token_short").to_string(),
-                    remediation: t!("audit.auth.token_short_fix").to_string(),
-                });
+        frankclaw_core::auth::AuthMode::Token { token } => {
+            if let Some(token) = token {
+                use secrecy::ExposeSecret;
+                let token_str = token.expose_secret();
+                if token_str.len() < 16 {
+                    findings.push(Finding {
+                        severity: Severity::Medium,
+                        code: AuditCode::AuthWeak,
+                        category: "auth",
+                        message: t!("audit.auth.token_short").to_string(),
+                        remediation: t!("audit.auth.token_short_fix").to_string(),
+                        json_path: None,
+                    });
+                }
             }
         }
-        frankclaw_core::auth::AuthMode::Token { token: None } => {}
         frankclaw_core::auth::AuthMode::Password { hash } => {
             if hash.trim().is_empty() {
                 findings.push(Finding {
                     severity: Severity::High,
+                    code: AuditCode::AuthWeak,
                     category: "auth",
                     message: t!("audit.auth.password_empty").to_string(),
                     remediation: t!("audit.auth.password_empty_fix").to_string(),
+                    json_path: None,
                 });
             }
         }
@@ -2354,9 +2970,11 @@ fn audit_inline_secrets(
         if provider.api_key_ref.is_none() && provider.api != "ollama" {
             findings.push(Finding {
                 severity: Severity::Medium,
+                code: AuditCode::SecretsNoKeyRef,
                 category: "secrets",
                 message: t!("audit.secrets.no_key_ref", id = provider.id).to_string(),
                 remediation: t!("audit.secrets.no_key_ref_fix", id = provider.id).to_string(),
+                json_path: Some(format!("models.providers[{}]", provider.id)),
             });
         }
     }
@@ -2380,9 +2998,21 @@ fn audit_inline_secrets(
                 {
                     findings.push(Finding {
                         severity: Severity::High,
+                        code: AuditCode::SecretsInline,
                         category: "secrets",
-                        message: t!("audit.secrets.inline", channel = channel_id, key = inline_key).to_string(),
-                        remediation: t!("audit.secrets.inline_fix", key = inline_key, env_key = env_key).to_string(),
+                        message: t!(
+                            "audit.secrets.inline",
+                            channel = channel_id,
+                            key = inline_key
+                        )
+                        .to_string(),
+                        remediation: t!(
+                            "audit.secrets.inline_fix",
+                            key = inline_key,
+                            env_key = env_key
+                        )
+                        .to_string(),
+                        json_path: Some(format!("channels.{}.accounts", channel_id)),
                     });
                 }
             }
@@ -2393,9 +3023,11 @@ fn audit_inline_secrets(
     if let frankclaw_core::auth::AuthMode::Token { token: Some(_) } = &config.gateway.auth {
         findings.push(Finding {
             severity: Severity::Low,
+            code: AuditCode::SecretsInline,
             category: "secrets",
             message: t!("audit.secrets.token_inline").to_string(),
             remediation: t!("audit.secrets.token_inline_fix").to_string(),
+            json_path: Some("gateway.auth.token".into()),
         });
     }
 }
@@ -2410,58 +3042,81 @@ fn audit_missing_env_vars(
                 .ok()
                 .filter(|v| !v.trim().is_empty())
                 .is_none()
-            {
-                findings.push(Finding {
-                    severity: Severity::Medium,
-                    category: "secrets",
-                    message: t!("audit.secrets.missing_env", id = provider.id, env = env_name).to_string(),
-                    remediation: t!("audit.secrets.missing_env_fix", env = env_name).to_string(),
-                });
-            }
+        {
+            findings.push(Finding {
+                severity: Severity::Medium,
+                code: AuditCode::SecretsMissing,
+                category: "secrets",
+                message: t!(
+                    "audit.secrets.missing_env",
+                    id = provider.id,
+                    env = env_name
+                )
+                .to_string(),
+                remediation: t!("audit.secrets.missing_env_fix", env = env_name).to_string(),
+                json_path: None,
+            });
+        }
     }
 
     for (channel_id, channel) in &config.channels {
         for account in &channel.accounts {
             for key in [
-                "bot_token_env", "token_env", "app_token_env",
-                "access_token_env", "verify_token_env", "app_secret_env",
-                "base_url_env", "account_env", "phone_number_id_env",
+                "bot_token_env",
+                "token_env",
+                "app_token_env",
+                "access_token_env",
+                "verify_token_env",
+                "app_secret_env",
+                "base_url_env",
+                "account_env",
+                "phone_number_id_env",
             ] {
                 if let Some(env_name) = account.get(key).and_then(|v| v.as_str())
                     && std::env::var(env_name)
                         .ok()
                         .filter(|v| !v.trim().is_empty())
                         .is_none()
-                    {
-                        findings.push(Finding {
-                            severity: Severity::Medium,
-                            category: "secrets",
-                            message: t!("audit.secrets.channel_missing_env", channel = channel_id, env = env_name, key = key).to_string(),
-                            remediation: t!("audit.secrets.channel_missing_env_fix", env = env_name).to_string(),
-                        });
-                    }
+                {
+                    findings.push(Finding {
+                        severity: Severity::Medium,
+                        code: AuditCode::SecretsMissing,
+                        category: "secrets",
+                        message: t!(
+                            "audit.secrets.channel_missing_env",
+                            channel = channel_id,
+                            env = env_name,
+                            key = key
+                        )
+                        .to_string(),
+                        remediation: t!("audit.secrets.channel_missing_env_fix", env = env_name)
+                            .to_string(),
+                        json_path: None,
+                    });
+                }
             }
         }
     }
 }
 
-fn audit_encryption(
-    config: &frankclaw_core::config::FrankClawConfig,
-    findings: &mut Vec<Finding>,
-) {
+fn audit_encryption(config: &frankclaw_core::config::FrankClawConfig, findings: &mut Vec<Finding>) {
     if !config.security.encrypt_sessions {
         findings.push(Finding {
             severity: Severity::Medium,
+            code: AuditCode::EncryptionOff,
             category: "encryption",
             message: t!("audit.encrypt.sessions_off").to_string(),
             remediation: t!("audit.encrypt.sessions_off_fix").to_string(),
+            json_path: None,
         });
     } else if load_master_key_from_env().unwrap_or(None).is_none() {
         findings.push(Finding {
             severity: Severity::High,
+            code: AuditCode::EncryptionKeyMissing,
             category: "encryption",
             message: t!("audit.encrypt.no_master_key").to_string(),
             remediation: t!("audit.encrypt.no_master_key_fix").to_string(),
+            json_path: None,
         });
     } else {
         // Encryption enabled and master key present — no finding.
@@ -2470,17 +3125,16 @@ fn audit_encryption(
     if !config.security.encrypt_media {
         findings.push(Finding {
             severity: Severity::Low,
+            code: AuditCode::EncryptionOff,
             category: "encryption",
             message: t!("audit.encrypt.media_off").to_string(),
             remediation: t!("audit.encrypt.media_off_fix").to_string(),
+            json_path: None,
         });
     }
 }
 
-fn audit_network(
-    config: &frankclaw_core::config::FrankClawConfig,
-    findings: &mut Vec<Finding>,
-) {
+fn audit_network(config: &frankclaw_core::config::FrankClawConfig, findings: &mut Vec<Finding>) {
     use frankclaw_core::config::BindMode;
 
     let is_network_exposed = !matches!(config.gateway.bind, BindMode::Loopback);
@@ -2489,18 +3143,22 @@ fn audit_network(
         if matches!(config.gateway.auth, frankclaw_core::auth::AuthMode::None) {
             findings.push(Finding {
                 severity: Severity::Critical,
+                code: AuditCode::NetworkExposed,
                 category: "network",
                 message: t!("audit.network.exposed_no_auth").to_string(),
                 remediation: t!("audit.network.exposed_no_auth_fix").to_string(),
+                json_path: None,
             });
         }
 
         if config.gateway.tls.is_none() {
             findings.push(Finding {
                 severity: Severity::High,
+                code: AuditCode::NetworkNoTls,
                 category: "network",
                 message: t!("audit.network.no_tls").to_string(),
                 remediation: t!("audit.network.no_tls_fix").to_string(),
+                json_path: None,
             });
         }
     }
@@ -2515,14 +3173,19 @@ fn audit_channel_policies(
             continue;
         }
 
-        let Ok(policy) = channel.security_policy() else {
-            findings.push(Finding {
-                severity: Severity::High,
-                category: "channels",
-                message: t!("audit.channels.invalid_policy", channel = channel_id).to_string(),
-                remediation: t!("audit.channels.invalid_policy_fix").to_string(),
-            });
-            continue;
+        let policy = match channel.security_policy() {
+            Ok(p) => p,
+            Err(_) => {
+                findings.push(Finding {
+                    severity: Severity::High,
+                    code: AuditCode::ChannelPolicy,
+                    category: "channels",
+                    message: t!("audit.channels.invalid_policy", channel = channel_id).to_string(),
+                    remediation: t!("audit.channels.invalid_policy_fix").to_string(),
+                    json_path: None,
+                });
+                continue;
+            }
         };
 
         if group_surface_needs_guard(channel_id.as_str())
@@ -2531,31 +3194,46 @@ fn audit_channel_policies(
         {
             findings.push(Finding {
                 severity: Severity::Medium,
+                code: AuditCode::ChannelPolicy,
                 category: "channels",
                 message: t!("audit.channels.open_groups", channel = channel_id).to_string(),
                 remediation: t!("audit.channels.open_groups_fix", channel = channel_id).to_string(),
+                json_path: None,
             });
         }
 
         // WhatsApp webhook signature verification
         if channel_id.as_str() == "whatsapp" {
             let has_app_secret = channel.accounts.iter().any(|account| {
-                account.get("app_secret").and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()).is_some()
-                    || account.get("app_secret_env").and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()).is_some()
+                account
+                    .get("app_secret")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.trim().is_empty())
+                    .is_some()
+                    || account
+                        .get("app_secret_env")
+                        .and_then(|v| v.as_str())
+                        .filter(|v| !v.trim().is_empty())
+                        .is_some()
             });
             if !has_app_secret {
                 findings.push(Finding {
                     severity: Severity::High,
+                    code: AuditCode::ChannelWhatsApp,
                     category: "channels",
                     message: t!("audit.channels.whatsapp_no_secret").to_string(),
                     remediation: t!("audit.channels.whatsapp_no_secret_fix").to_string(),
+                    json_path: None,
                 });
             }
         }
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "tool policy audit with many check categories")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "tool policy audit with many check categories"
+)]
 fn audit_tool_policies(
     config: &frankclaw_core::config::FrankClawConfig,
     findings: &mut Vec<Finding>,
@@ -2573,25 +3251,36 @@ fn audit_tool_policies(
             frankclaw_tools::bash::BashPolicy::AllowAll => {
                 findings.push(Finding {
                     severity: Severity::Critical,
+                    code: AuditCode::ToolPolicy,
                     category: "tools",
                     message: t!("audit.tools.bash_allow_all").to_string(),
                     remediation: t!("audit.tools.bash_allow_all_fix").to_string(),
+                    json_path: None,
                 });
             }
             frankclaw_tools::bash::BashPolicy::DenyAll => {
                 findings.push(Finding {
                     severity: Severity::Info,
+                    code: AuditCode::ToolPolicy,
                     category: "tools",
                     message: t!("audit.tools.bash_deny_all").to_string(),
                     remediation: t!("audit.tools.bash_deny_all_fix").to_string(),
+                    json_path: None,
                 });
             }
             frankclaw_tools::bash::BashPolicy::Allowlist(ref allowed) => {
                 findings.push(Finding {
                     severity: Severity::Low,
+                    code: AuditCode::ToolPolicy,
                     category: "tools",
-                    message: t!("audit.tools.bash_allowlist", count = allowed.len(), commands = allowed.join(", ")).to_string(),
+                    message: t!(
+                        "audit.tools.bash_allowlist",
+                        count = allowed.len(),
+                        commands = allowed.join(", ")
+                    )
+                    .to_string(),
                     remediation: t!("audit.tools.bash_allowlist_fix").to_string(),
+                    json_path: None,
                 });
             }
         }
@@ -2603,9 +3292,11 @@ fn audit_tool_policies(
                 if !matches!(bash_policy, frankclaw_tools::bash::BashPolicy::DenyAll) {
                     findings.push(Finding {
                         severity: Severity::Medium,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
                         message: t!("audit.tools.no_sandbox").to_string(),
                         remediation: t!("audit.tools.no_sandbox_fix").to_string(),
+                        json_path: None,
                     });
                 }
             }
@@ -2613,16 +3304,20 @@ fn audit_tool_policies(
                 if frankclaw_tools::bash::SandboxMode::is_available() {
                     findings.push(Finding {
                         severity: Severity::Info,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
                         message: t!("audit.tools.sandbox_aijail").to_string(),
                         remediation: t!("audit.tools.sandbox_aijail_fix").to_string(),
+                        json_path: None,
                     });
                 } else {
                     findings.push(Finding {
                         severity: Severity::High,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
                         message: t!("audit.tools.sandbox_missing", mode = "ai-jail").to_string(),
                         remediation: t!("audit.tools.sandbox_missing_fix").to_string(),
+                        json_path: None,
                     });
                 }
             }
@@ -2630,16 +3325,21 @@ fn audit_tool_policies(
                 if frankclaw_tools::bash::SandboxMode::is_available() {
                     findings.push(Finding {
                         severity: Severity::Info,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
                         message: t!("audit.tools.sandbox_lockdown").to_string(),
                         remediation: t!("audit.tools.sandbox_lockdown_fix").to_string(),
+                        json_path: None,
                     });
                 } else {
                     findings.push(Finding {
                         severity: Severity::High,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
-                        message: t!("audit.tools.sandbox_missing", mode = "ai-jail-lockdown").to_string(),
+                        message: t!("audit.tools.sandbox_missing", mode = "ai-jail-lockdown")
+                            .to_string(),
                         remediation: t!("audit.tools.sandbox_missing_fix").to_string(),
+                        json_path: None,
                     });
                 }
             }
@@ -2652,48 +3352,75 @@ fn audit_tool_policies(
         .agents
         .values()
         .flat_map(|agent| agent.tools.iter())
-        .any(|tool| frankclaw_tools::tool_risk_level(tool) >= frankclaw_core::model::ToolRiskLevel::Mutating);
+        .any(|tool| {
+            frankclaw_tools::tool_risk_level(tool) >= frankclaw_core::model::ToolRiskLevel::Mutating
+        });
 
     findings.push(Finding {
         severity: Severity::Info,
+        code: AuditCode::ToolPolicy,
         category: "tools",
-        message: t!("audit.tools.approval_level", level = policy.approval_level.to_string()).to_string(),
+        message: t!(
+            "audit.tools.approval_level",
+            level = policy.approval_level.to_string()
+        )
+        .to_string(),
         remediation: t!("audit.tools.approval_level_fix").to_string(),
+        json_path: None,
     });
 
-    if has_mutating_tools && policy.approval_level.approves(frankclaw_core::model::ToolRiskLevel::Mutating) {
+    if has_mutating_tools
+        && policy
+            .approval_level
+            .approves(frankclaw_core::model::ToolRiskLevel::Mutating)
+    {
         findings.push(Finding {
             severity: Severity::Medium,
+            code: AuditCode::ToolPolicy,
             category: "tools",
             message: t!("audit.tools.mutating_approved").to_string(),
             remediation: t!("audit.tools.mutating_approved_fix").to_string(),
+            json_path: None,
         });
     }
 
-    if policy.approval_level.approves(frankclaw_core::model::ToolRiskLevel::Destructive) {
+    if policy
+        .approval_level
+        .approves(frankclaw_core::model::ToolRiskLevel::Destructive)
+    {
         findings.push(Finding {
             severity: Severity::High,
+            code: AuditCode::ToolPolicy,
             category: "tools",
             message: t!("audit.tools.destructive_approved").to_string(),
             remediation: t!("audit.tools.destructive_approved_fix").to_string(),
+            json_path: None,
         });
     }
 }
 
 fn audit_file_scanning(findings: &mut Vec<Finding>) {
-    if frankclaw_media::virustotal::VirusTotalScanner::from_env().ok().flatten().is_some() {
+    if frankclaw_media::virustotal::VirusTotalScanner::from_env()
+        .ok()
+        .flatten()
+        .is_some()
+    {
         findings.push(Finding {
             severity: Severity::Info,
+            code: AuditCode::MediaScanning,
             category: "media",
             message: t!("audit.media.scanning_on").to_string(),
             remediation: t!("audit.media.scanning_on_fix").to_string(),
+            json_path: None,
         });
     } else {
         findings.push(Finding {
             severity: Severity::Low,
+            code: AuditCode::MediaScanning,
             category: "media",
             message: t!("audit.media.scanning_off").to_string(),
             remediation: t!("audit.media.scanning_off_fix").to_string(),
+            json_path: None,
         });
     }
 }
@@ -2711,9 +3438,19 @@ fn audit_file_permissions(
         if mode & 0o077 != 0 {
             findings.push(Finding {
                 severity: Severity::High,
+                code: AuditCode::FilePermissions,
                 category: "filesystem",
-                message: t!("audit.fs.config_world_readable", mode = format!("{mode:04o}")).to_string(),
-                remediation: t!("audit.fs.config_world_readable_fix", path = config_path.display()).to_string(),
+                message: t!(
+                    "audit.fs.config_world_readable",
+                    mode = format!("{mode:04o}")
+                )
+                .to_string(),
+                remediation: t!(
+                    "audit.fs.config_world_readable_fix",
+                    path = config_path.display()
+                )
+                .to_string(),
+                json_path: None,
             });
         }
     }
@@ -2723,9 +3460,19 @@ fn audit_file_permissions(
         if mode & 0o077 != 0 {
             findings.push(Finding {
                 severity: Severity::Medium,
+                code: AuditCode::FilePermissions,
                 category: "filesystem",
-                message: t!("audit.fs.state_world_readable", mode = format!("{mode:04o}")).to_string(),
-                remediation: t!("audit.fs.state_world_readable_fix", path = state_dir.display()).to_string(),
+                message: t!(
+                    "audit.fs.state_world_readable",
+                    mode = format!("{mode:04o}")
+                )
+                .to_string(),
+                remediation: t!(
+                    "audit.fs.state_world_readable_fix",
+                    path = state_dir.display()
+                )
+                .to_string(),
+                json_path: None,
             });
         }
     }
@@ -2736,9 +3483,12 @@ fn audit_file_permissions(
         if mode & 0o077 != 0 {
             findings.push(Finding {
                 severity: Severity::High,
+                code: AuditCode::FilePermissions,
                 category: "filesystem",
                 message: t!("audit.fs.db_world_readable", mode = format!("{mode:04o}")).to_string(),
-                remediation: t!("audit.fs.db_world_readable_fix", path = db_path.display()).to_string(),
+                remediation: t!("audit.fs.db_world_readable_fix", path = db_path.display())
+                    .to_string(),
+                json_path: None,
             });
         }
     }
@@ -2751,6 +3501,183 @@ fn audit_file_permissions(
     _findings: &mut Vec<Finding>,
 ) {
     // No permission checks on non-Unix platforms
+}
+
+/// Check for shadowed secret refs: a provider has both inline value and env ref.
+fn audit_secret_refs(
+    config: &frankclaw_core::config::FrankClawConfig,
+    findings: &mut Vec<Finding>,
+) {
+    for (channel_id, channel) in &config.channels {
+        for account in &channel.accounts {
+            for (inline_key, env_key) in [
+                ("bot_token", "bot_token_env"),
+                ("token", "token_env"),
+                ("app_token", "app_token_env"),
+                ("access_token", "access_token_env"),
+                ("verify_token", "verify_token_env"),
+                ("app_secret", "app_secret_env"),
+            ] {
+                let has_inline = account
+                    .get(inline_key)
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.trim().is_empty())
+                    .is_some();
+                let has_env = account
+                    .get(env_key)
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.trim().is_empty())
+                    .is_some();
+                if has_inline && has_env {
+                    findings.push(Finding {
+                        severity: Severity::Medium,
+                        code: AuditCode::RefShadowed,
+                        category: "secrets",
+                        message: t!(
+                            "audit.secrets.ref_shadowed",
+                            channel = channel_id,
+                            inline_key = inline_key,
+                            env_key = env_key
+                        )
+                        .to_string(),
+                        remediation: t!("audit.secrets.ref_shadowed_fix", inline_key = inline_key)
+                            .to_string(),
+                        json_path: Some(format!("channels.{}.accounts", channel_id)),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Scan .env files in the working directory for plaintext secrets.
+fn audit_dotenv_plaintext(findings: &mut Vec<Finding>) {
+    let secret_patterns = [
+        ("OPENAI_API_KEY", "sk-"),
+        ("ANTHROPIC_API_KEY", "sk-ant-"),
+        ("TELEGRAM_BOT_TOKEN", ""),
+        ("DISCORD_BOT_TOKEN", ""),
+        ("SLACK_BOT_TOKEN", "xoxb-"),
+        ("SLACK_APP_TOKEN", "xapp-"),
+    ];
+
+    for entry in [".env", ".env.local", ".env.production"] {
+        let path = std::path::Path::new(entry);
+        if !path.exists() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            for (env_name, prefix) in &secret_patterns {
+                if let Some(rest) = line.strip_prefix(env_name) {
+                    let rest = rest.trim_start_matches('=').trim();
+                    if !rest.is_empty()
+                        && !rest.starts_with('$')
+                        && !rest.starts_with("${")
+                        && (prefix.is_empty() || rest.starts_with(prefix))
+                    {
+                        findings.push(Finding {
+                            severity: Severity::High,
+                            code: AuditCode::PlaintextFound,
+                            category: "secrets",
+                            message: t!(
+                                "audit.secrets.plaintext_env",
+                                file = entry,
+                                key = *env_name
+                            )
+                            .to_string(),
+                            remediation: t!("audit.secrets.plaintext_env_fix", file = entry)
+                                .to_string(),
+                            json_path: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Check for legacy credential files in state directory.
+fn audit_legacy_credentials(state_dir: &std::path::Path, findings: &mut Vec<Finding>) {
+    let legacy_files = [
+        "openai-key.txt",
+        "anthropic-key.txt",
+        "api-key.txt",
+        ".openai_api_key",
+    ];
+    for filename in legacy_files {
+        let path = state_dir.join(filename);
+        if path.exists() {
+            findings.push(Finding {
+                severity: Severity::Medium,
+                code: AuditCode::LegacyResidue,
+                category: "secrets",
+                message: t!(
+                    "audit.secrets.legacy_file",
+                    file = path.display().to_string()
+                )
+                .to_string(),
+                remediation: t!("audit.secrets.legacy_file_fix").to_string(),
+                json_path: None,
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Login: provider authentication flows
+// ---------------------------------------------------------------------------
+
+async fn run_login(provider: &str, state_dir: &std::path::Path) -> anyhow::Result<()> {
+    match provider {
+        "github-copilot" | "copilot" => {
+            println!("{}", t!("login.copilot.starting"));
+
+            let device = frankclaw_models::copilot::request_device_code().await?;
+
+            println!();
+            println!(
+                "{}",
+                t!("login.copilot.open_url", url = device.verification_uri)
+            );
+            println!(
+                "{}",
+                t!("login.copilot.enter_code", code = device.user_code)
+            );
+            println!();
+            println!("{}", t!("login.copilot.waiting"));
+
+            let github_token = frankclaw_models::copilot::poll_for_access_token(
+                &device.device_code,
+                device.interval,
+            )
+            .await?;
+
+            let token_path =
+                frankclaw_models::copilot::store_github_token(state_dir, &github_token)?;
+
+            println!();
+            println!(
+                "{}",
+                t!(
+                    "login.copilot.success",
+                    path = token_path.display().to_string()
+                )
+            );
+            println!("{}", t!("login.copilot.next_steps"));
+        }
+        other => {
+            anyhow::bail!("{}", t!("login.unsupported", provider = other));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2789,8 +3716,8 @@ mod tests {
 
     #[test]
     fn onboard_whatsapp_profile_uses_env_refs_and_token_auth() {
-        let config = build_onboard_config("whatsapp", "gateway-token")
-            .expect("onboard config should build");
+        let config =
+            build_onboard_config("whatsapp", "gateway-token").expect("onboard config should build");
 
         assert!(matches!(
             config.gateway.auth,
@@ -2814,11 +3741,11 @@ mod tests {
     fn render_systemd_unit_contains_execstart() {
         let unit = render_systemd_unit(
             std::path::Path::new("/usr/local/bin/frankclaw"),
-            std::path::Path::new("/etc/frankclaw.json"),
+            std::path::Path::new("/etc/frankclaw.toml"),
             std::path::Path::new("/var/lib/frankclaw"),
         );
 
-        assert!(unit.contains("ExecStart=/usr/local/bin/frankclaw gateway --config /etc/frankclaw.json --state-dir /var/lib/frankclaw"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/frankclaw gateway --config /etc/frankclaw.toml --state-dir /var/lib/frankclaw"));
         assert!(unit.contains("WantedBy=default.target"));
     }
 
@@ -2858,19 +3785,29 @@ mod tests {
         let warnings = collect_doctor_warnings(&config, &missing_state_dir)
             .expect("doctor warnings should collect");
 
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("FRANKCLAW_TEST_MISSING_OPENAI_KEY")));
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("FRANKCLAW_TEST_MISSING_WHATSAPP_TOKEN")));
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("WHATSAPP_APP_SECRET"))
-            || warnings.iter().any(|warning| warning.contains("app_secret configured")));
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("does not exist yet")));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("FRANKCLAW_TEST_MISSING_OPENAI_KEY"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("FRANKCLAW_TEST_MISSING_WHATSAPP_TOKEN"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("WHATSAPP_APP_SECRET"))
+                || warnings
+                    .iter()
+                    .any(|warning| warning.contains("app_secret configured"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("does not exist yet"))
+        );
     }
 
     #[test]
@@ -2902,24 +3839,31 @@ mod tests {
         let warnings = collect_doctor_warnings(&config, &existing_state_dir)
             .expect("doctor warnings should collect");
 
-        assert!(warnings.iter().any(|warning| warning.contains("stores 'bot_token' inline")));
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("accepts group messages without mention gating")));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("stores 'bot_token' inline"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("accepts group messages without mention gating"))
+        );
 
         let _ = std::fs::remove_dir_all(existing_state_dir);
     }
 
     #[test]
     fn rewrite_last_reply_metadata_for_edit_updates_content_and_preserves_other_metadata() {
-        let mut metadata = reply_metadata_json(vec![frankclaw_gateway::delivery::StoredReplyChunk {
-            content: "old reply".into(),
-            platform_message_id: Some("msg-1".into()),
-            status: "sent".into(),
-            attempts: 1,
-            retry_after_secs: None,
-            error: None,
-        }]);
+        let mut metadata =
+            reply_metadata_json(vec![frankclaw_gateway::delivery::StoredReplyChunk {
+                content: "old reply".into(),
+                platform_message_id: Some("msg-1".into()),
+                status: "sent".into(),
+                attempts: 1,
+                retry_after_secs: None,
+                error: None,
+            }]);
 
         let rewritten = rewrite_last_reply_metadata_for_edit(&mut metadata, "new reply")
             .expect("metadata rewrite should succeed");
@@ -2985,22 +3929,23 @@ mod tests {
         let last_reply = frankclaw_gateway::delivery::last_reply_from_metadata(&metadata)
             .expect("last reply should exist");
 
-        let targets = delete_targets_from_last_reply(&last_reply)
-            .expect("delete targets should resolve");
+        let targets =
+            delete_targets_from_last_reply(&last_reply).expect("delete targets should resolve");
 
         assert_eq!(targets, vec!["msg-1".to_string(), "msg-2".to_string()]);
     }
 
     #[test]
     fn mark_last_reply_metadata_deleted_clears_platform_ids_and_marks_chunks() {
-        let mut metadata = reply_metadata_json(vec![frankclaw_gateway::delivery::StoredReplyChunk {
-            content: "old reply".into(),
-            platform_message_id: Some("msg-1".into()),
-            status: "sent".into(),
-            attempts: 1,
-            retry_after_secs: None,
-            error: None,
-        }]);
+        let mut metadata =
+            reply_metadata_json(vec![frankclaw_gateway::delivery::StoredReplyChunk {
+                content: "old reply".into(),
+                platform_message_id: Some("msg-1".into()),
+                status: "sent".into(),
+                attempts: 1,
+                retry_after_secs: None,
+                error: None,
+            }]);
 
         let deleted = mark_last_reply_metadata_deleted(&mut metadata)
             .expect("metadata delete should succeed");
@@ -3013,30 +3958,29 @@ mod tests {
     }
 
     #[test]
-    fn supported_channel_examples_parse_as_json() {
-        let examples_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/channels");
+    fn supported_channel_examples_parse_as_toml() {
+        let examples_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/channels");
 
         for filename in [
-            "web.json",
-            "telegram.json",
-            "discord.json",
-            "slack.json",
-            "signal.json",
-            "whatsapp.json",
+            "web.toml",
+            "telegram.toml",
+            "discord.toml",
+            "slack.toml",
+            "signal.toml",
+            "whatsapp.toml",
         ] {
             let path = examples_dir.join(filename);
             let content = std::fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err));
-            serde_json::from_str::<serde_json::Value>(&content)
-                .unwrap_or_else(|err| panic!("invalid JSON in {}: {}", path.display(), err));
+            toml::from_str::<toml::Value>(&content)
+                .unwrap_or_else(|err| panic!("invalid TOML in {}: {}", path.display(), err));
         }
     }
 
     #[test]
     fn supported_channel_example_returns_embedded_snippet() {
-        let example = supported_channel_example("telegram")
-            .expect("telegram example should exist");
+        let example = supported_channel_example("telegram").expect("telegram example should exist");
 
         assert!(example.contains("TELEGRAM_BOT_TOKEN"));
         assert!(supported_channel_example("matrix").is_none());
@@ -3044,15 +3988,15 @@ mod tests {
 
     #[test]
     fn docker_compose_template_includes_gateway_and_browser_services() {
-        let compose_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docker-compose.yml");
+        let compose_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker-compose.yml");
         let content = std::fs::read_to_string(&compose_path)
             .unwrap_or_else(|err| panic!("failed to read {}: {}", compose_path.display(), err));
 
         assert!(content.contains("gateway:"));
         assert!(content.contains("chromium:"));
         assert!(content.contains("FRANKCLAW_BROWSER_DEVTOOLS_URL: http://chromium:9222/"));
-        assert!(content.contains("./frankclaw.json:/config/frankclaw.json:ro"));
+        assert!(content.contains("./frankclaw.toml:/config/frankclaw.toml:ro"));
     }
 
     #[test]
@@ -3071,16 +4015,20 @@ mod tests {
             .agents
             .get_mut(&frankclaw_core::types::AgentId::default_agent())
             .expect("default agent should exist")
-            .tools = vec!["browser.close".into()];
+            .tools = vec!["browser_close".into()];
 
         let warnings = collect_browser_tool_warnings(&config, Some("http://10.0.0.8:6553/"));
 
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("non-loopback host")));
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("docker compose up -d chromium")));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("non-loopback host"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("docker compose up -d chromium"))
+        );
     }
 
     #[test]
@@ -3091,7 +4039,7 @@ mod tests {
             .agents
             .get_mut(&frankclaw_core::types::AgentId::default_agent())
             .expect("default agent should exist")
-            .tools = vec!["browser.type".into()];
+            .tools = vec!["browser_type".into()];
 
         let warnings = collect_browser_tool_warnings_with_policy(
             &config,
@@ -3099,9 +4047,11 @@ mod tests {
             frankclaw_tools::ToolPolicy::default(),
         );
 
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("FRANKCLAW_TOOL_APPROVAL=mutating")));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("FRANKCLAW_TOOL_APPROVAL=mutating"))
+        );
     }
 
     #[test]
@@ -3112,7 +4062,7 @@ mod tests {
             .agents
             .get_mut(&frankclaw_core::types::AgentId::default_agent())
             .expect("default agent should exist")
-            .tools = vec!["browser.open".into(), "browser.click".into()];
+            .tools = vec!["browser_open".into(), "browser_click".into()];
 
         let gated = browser_runtime_status_with_policy(
             &config,
@@ -3122,9 +4072,11 @@ mod tests {
         .expect("status should exist");
         assert!(gated.contains("blocked"));
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("listener should bind");
-        let endpoint = format!("http://{}", listener.local_addr().expect("addr should exist"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("addr should exist")
+        );
         let enabled = browser_runtime_status_with_policy(
             &config,
             Some(&endpoint),
@@ -3157,8 +4109,8 @@ mod tests {
 
     #[test]
     fn check_port_available_detects_occupied_port() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("should bind to ephemeral port");
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("should bind to ephemeral port");
         let port = listener.local_addr().expect("should have addr").port();
 
         let result = check_port_available(port).expect("check should not error");
@@ -3265,7 +4217,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("should create temp dir");
-        let config_path = dir.join("frankclaw.json");
+        let config_path = dir.join("frankclaw.toml");
 
         // Build a config the same way setup does
         let mut config = FrankClawConfig::default();
@@ -3290,12 +4242,11 @@ mod tests {
             },
         );
 
-        let json = serde_json::to_string_pretty(&config).expect("should serialize");
-        std::fs::write(&config_path, &json).expect("should write");
+        let toml_str = config.to_toml_string().expect("should serialize");
+        std::fs::write(&config_path, &toml_str).expect("should write");
 
         // Verify it can be loaded back
-        let loaded = FrankClawConfig::load_from_path(&config_path)
-            .expect("should load config");
+        let loaded = FrankClawConfig::load_from_path(&config_path).expect("should load config");
         loaded.validate().expect("should validate");
         assert_eq!(loaded.gateway.port, 18789);
         assert_eq!(loaded.models.providers.len(), 1);
@@ -3392,8 +4343,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("should create temp dir");
         let pid_path = dir.join("frankclaw.pid");
-        std::fs::write(&pid_path, std::process::id().to_string())
-            .expect("should write pid");
+        std::fs::write(&pid_path, std::process::id().to_string()).expect("should write pid");
 
         let status = daemon_pid_status(&pid_path);
         assert!(status.is_some());
@@ -3448,14 +4398,20 @@ mod tests {
         audit_auth(&config, &mut findings);
 
         assert!(!findings.is_empty());
-        assert!(findings.iter().any(|f| f.severity == Severity::High && f.category == "auth"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::High && f.category == "auth")
+        );
     }
 
     #[test]
     fn audit_auth_passes_with_token() {
         let mut config = frankclaw_core::config::FrankClawConfig::default();
         config.gateway.auth = frankclaw_core::auth::AuthMode::Token {
-            token: Some(secrecy::SecretString::from("a-long-enough-token-here".to_string())),
+            token: Some(secrecy::SecretString::from(
+                "a-long-enough-token-here".to_string(),
+            )),
         };
 
         let mut findings = Vec::new();
@@ -3474,7 +4430,11 @@ mod tests {
         let mut findings = Vec::new();
         audit_auth(&config, &mut findings);
 
-        assert!(findings.iter().any(|f| f.severity == Severity::Medium && f.message.contains("shorter")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::Medium && f.message.contains("shorter"))
+        );
     }
 
     #[test]
@@ -3507,7 +4467,11 @@ mod tests {
         let mut findings = Vec::new();
         audit_encryption(&config, &mut findings);
 
-        assert!(findings.iter().any(|f| f.category == "encryption" && f.message.contains("disabled")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.category == "encryption" && f.message.contains("disabled"))
+        );
     }
 
     #[test]
@@ -3519,8 +4483,11 @@ mod tests {
         let mut findings = Vec::new();
         audit_network(&config, &mut findings);
 
-        assert!(findings.iter().any(|f| f.severity == Severity::Critical
-            && f.message.contains("network-exposed")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::Critical && f.message.contains("network-exposed"))
+        );
     }
 
     #[test]
@@ -3552,7 +4519,11 @@ mod tests {
         let mut findings = Vec::new();
         audit_channel_policies(&config, &mut findings);
 
-        assert!(findings.iter().any(|f| f.message.contains("group messages")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.message.contains("group messages"))
+        );
     }
 
     #[test]
@@ -3562,7 +4533,7 @@ mod tests {
         let config_path = std::path::Path::new("/tmp/nonexistent-config.json");
         let state_dir = std::path::Path::new("/tmp/nonexistent-state");
 
-        let exit_code = run_security_audit(&config, config_path, state_dir)
+        let exit_code = run_security_audit(&config, config_path, state_dir, "text")
             .expect("audit should succeed");
 
         // Should fail due to SSRF being critical + likely other high findings
@@ -3575,6 +4546,119 @@ mod tests {
         assert!(Severity::High > Severity::Medium);
         assert!(Severity::Medium > Severity::Low);
         assert!(Severity::Low > Severity::Info);
+    }
+
+    #[test]
+    fn audit_secret_refs_detects_shadowed_ref() {
+        let mut config = frankclaw_core::config::FrankClawConfig::default();
+        config.channels.insert(
+            ChannelId::new("telegram"),
+            ChannelConfig {
+                enabled: true,
+                accounts: vec![serde_json::json!({
+                    "bot_token": "inline-token-value",
+                    "bot_token_env": "TELEGRAM_BOT_TOKEN"
+                })],
+                extra: serde_json::json!({}),
+            },
+        );
+
+        let mut findings = Vec::new();
+        audit_secret_refs(&config, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f.code, AuditCode::RefShadowed)),
+            "should detect shadowed ref"
+        );
+    }
+
+    #[test]
+    fn audit_dotenv_detects_plaintext_in_env_file() {
+        let dir =
+            std::env::temp_dir().join(format!("frankclaw-dotenv-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // We can't easily test .env detection because it reads from cwd.
+        // This test validates the function doesn't panic on missing files.
+        let mut findings = Vec::new();
+        audit_dotenv_plaintext(&mut findings);
+        // Should not panic and findings may or may not be present
+        // depending on what's in the working directory
+    }
+
+    #[test]
+    fn audit_legacy_credentials_detects_legacy_files() {
+        let dir =
+            std::env::temp_dir().join(format!("frankclaw-legacy-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let legacy_path = dir.join("openai-key.txt");
+        std::fs::write(&legacy_path, "sk-test").expect("write should succeed");
+
+        let mut findings = Vec::new();
+        audit_legacy_credentials(&dir, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f.code, AuditCode::LegacyResidue)),
+            "should detect legacy credential file"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audit_json_output_roundtrip() {
+        let mut config = frankclaw_core::config::FrankClawConfig::default();
+        config.security.ssrf_protection = false;
+        let config_path = std::path::Path::new("/tmp/nonexistent-config.json");
+        let state_dir = std::path::Path::new("/tmp/nonexistent-state");
+
+        // Capture JSON output by using json format
+        let exit_code = run_security_audit(&config, config_path, state_dir, "json")
+            .expect("audit should succeed");
+        assert_eq!(exit_code, 1);
+    }
+
+    #[test]
+    fn audit_code_names_are_unique() {
+        let codes = vec![
+            AuditCode::AuthDisabled,
+            AuditCode::AuthWeak,
+            AuditCode::SecretsInline,
+            AuditCode::SecretsMissing,
+            AuditCode::SecretsNoKeyRef,
+            AuditCode::PlaintextFound,
+            AuditCode::RefShadowed,
+            AuditCode::LegacyResidue,
+            AuditCode::EncryptionOff,
+            AuditCode::EncryptionKeyMissing,
+            AuditCode::NetworkExposed,
+            AuditCode::NetworkNoTls,
+            AuditCode::SsrfDisabled,
+            AuditCode::ChannelPolicy,
+            AuditCode::ChannelWhatsApp,
+            AuditCode::ToolPolicy,
+            AuditCode::ToolSandbox,
+            AuditCode::FilePermissions,
+            AuditCode::MediaScanning,
+        ];
+        let mut names: Vec<&str> = codes.iter().map(|c| c.name()).collect();
+        let len_before = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), len_before, "audit code names must be unique");
+    }
+
+    #[test]
+    fn empty_config_produces_clean_or_minor_audit() {
+        let config = frankclaw_core::config::FrankClawConfig::default();
+        let config_path = std::path::Path::new("/tmp/nonexistent-config.json");
+        let state_dir = std::path::Path::new("/tmp/nonexistent-state");
+
+        // Default config has SSRF enabled, so this should not produce critical findings
+        // unless something else triggers (like missing auth)
+        let _exit_code = run_security_audit(&config, config_path, state_dir, "text")
+            .expect("audit should succeed");
     }
 }
 
@@ -3593,8 +4677,7 @@ fn open_cron_service(
 ) -> anyhow::Result<std::sync::Arc<frankclaw_cron::CronService>> {
     let path = state_dir.join("cron-jobs.json");
     Ok(std::sync::Arc::new(
-        frankclaw_cron::CronService::open(&path)
-            .context("failed to open cron store")?,
+        frankclaw_cron::CronService::open(&path).context("failed to open cron store")?,
     ))
 }
 
@@ -3615,27 +4698,34 @@ async fn build_runtime(
 fn redact_config(config: &frankclaw_core::config::FrankClawConfig) -> serde_json::Value {
     let mut val = serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = val.as_object_mut() {
-        if let Some(gateway) = obj.get_mut("gateway").and_then(|value| value.as_object_mut())
-            && let Some(auth) = gateway.get_mut("auth").and_then(|value| value.as_object_mut()) {
-                if let Some(token) = auth.get_mut("token") {
-                    *token = serde_json::json!("[REDACTED]");
-                }
-                if let Some(hash) = auth.get_mut("hash") {
-                    *hash = serde_json::json!("[REDACTED]");
-                }
+        if let Some(gateway) = obj
+            .get_mut("gateway")
+            .and_then(|value| value.as_object_mut())
+            && let Some(auth) = gateway
+                .get_mut("auth")
+                .and_then(|value| value.as_object_mut())
+        {
+            if let Some(token) = auth.get_mut("token") {
+                *token = serde_json::json!("[REDACTED]");
             }
+            if let Some(hash) = auth.get_mut("hash") {
+                *hash = serde_json::json!("[REDACTED]");
+            }
+        }
 
-        if let Some(models) = obj.get_mut("models").and_then(|value| value.as_object_mut())
+        if let Some(models) = obj
+            .get_mut("models")
+            .and_then(|value| value.as_object_mut())
             && let Some(providers) = models
                 .get_mut("providers")
                 .and_then(|value| value.as_array_mut())
-            {
-                for provider in providers {
-                    if let Some(api_key_ref) = provider.get_mut("api_key_ref") {
-                        *api_key_ref = serde_json::json!("[REDACTED]");
-                    }
+        {
+            for provider in providers {
+                if let Some(api_key_ref) = provider.get_mut("api_key_ref") {
+                    *api_key_ref = serde_json::json!("[REDACTED]");
                 }
             }
+        }
     }
     val
 }

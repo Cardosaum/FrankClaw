@@ -9,13 +9,16 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
-use frankclaw_core::channel::{ChannelPlugin, InboundMessage, OutboundMessage, SendResult, ChannelCapabilities, HealthStatus, EditMessageTarget, DeleteMessageTarget, InboundAttachment};
-use frankclaw_core::error::{FrankClawError, Result, Channel, RateLimited};
+use frankclaw_core::channel::{
+    ChannelCapabilities, ChannelPlugin, DeleteMessageTarget, EditMessageTarget, HealthStatus,
+    InboundAttachment, InboundMessage, OutboundMessage, SendResult,
+};
+use frankclaw_core::error::{Channel, FrankClawError, RateLimited, Result};
 use frankclaw_core::types::ChannelId;
 
 use crate::inbound_media::infer_inbound_mime_type;
 use crate::outbound_media::{attachment_bytes, attachment_filename};
-use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
+use crate::outbound_text::{OutboundTextFlavor, normalize_outbound_text};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const DISCORD_GATEWAY_VERSION: &str = "10";
@@ -57,11 +60,14 @@ impl DiscordChannel {
             .await
             .map_err(|e| self.channel_err(format!("gateway discovery failed: {e}")))?;
 
-        let body: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid gateway discovery response: {e}")))?;
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| self.channel_err(format!("invalid gateway discovery response: {e}")))?;
 
-        let url = body["url"]
-            .as_str()
-            .ok_or_else(|| self.channel_err("discord gateway discovery did not return a url".into()))?;
+        let url = body["url"].as_str().ok_or_else(|| {
+            self.channel_err("discord gateway discovery did not return a url".into())
+        })?;
 
         Ok(format!("{url}/?v={DISCORD_GATEWAY_VERSION}&encoding=json"))
     }
@@ -82,9 +88,9 @@ impl DiscordChannel {
         )
         .await
         .map_err(|_| self.channel_err("discord gateway HELLO timeout after 30s".into()))??;
-        let heartbeat_interval_ms = hello["d"]["heartbeat_interval"]
-            .as_u64()
-            .ok_or_else(|| self.channel_err("discord hello payload missing heartbeat interval".into()))?;
+        let heartbeat_interval_ms = hello["d"]["heartbeat_interval"].as_u64().ok_or_else(|| {
+            self.channel_err("discord hello payload missing heartbeat interval".into())
+        })?;
 
         ws_tx
             .send(Message::Text(
@@ -108,9 +114,8 @@ impl DiscordChannel {
 
         let seq = Arc::new(AtomicI64::new(-1));
         let heartbeat_seq = seq.clone();
-        let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(
-            heartbeat_interval_ms,
-        ));
+        let mut heartbeat =
+            tokio::time::interval(std::time::Duration::from_millis(heartbeat_interval_ms));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -184,8 +189,10 @@ impl DiscordChannel {
         .map_err(|e| self.channel_err(format!("send failed: {e}")))?;
 
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let body: serde_json::Value =
-                resp.json().await.map_err(|e| self.channel_err(format!("invalid rate limit response: {e}")))?;
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| self.channel_err(format!("invalid rate limit response: {e}")))?;
             return Ok(SendResult::RateLimited {
                 retry_after_secs: body["retry_after"]
                     .as_f64()
@@ -194,7 +201,10 @@ impl DiscordChannel {
         }
 
         let status = resp.status();
-        let body: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| self.channel_err(format!("invalid response: {e}")))?;
 
         if status.is_success() {
             Ok(SendResult::Sent {
@@ -239,10 +249,7 @@ impl ChannelPlugin for DiscordChannel {
         "Discord"
     }
 
-    async fn start(
-        &self,
-        inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>,
-    ) -> Result<()> {
+    async fn start(&self, inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>) -> Result<()> {
         info!("discord channel starting (gateway mode)");
         loop {
             match self.run_gateway(inbound_tx.clone()).await {
@@ -326,17 +333,27 @@ impl ChannelPlugin for DiscordChannel {
         if resp.status().is_success() {
             Ok(())
         } else {
-            let body: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid discord edit response: {e}")))?;
-            Err(self.channel_err(body["message"]
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| self.channel_err(format!("invalid discord edit response: {e}")))?;
+            Err(self.channel_err(
+                body["message"]
                     .as_str()
                     .unwrap_or("unknown discord edit failure")
-                    .to_string()))
+                    .to_string(),
+            ))
         }
     }
 
-    async fn stream_start(&self, msg: &OutboundMessage) -> Result<frankclaw_core::channel::StreamHandle> {
+    async fn stream_start(
+        &self,
+        msg: &OutboundMessage,
+    ) -> Result<frankclaw_core::channel::StreamHandle> {
         match self.send(msg.clone()).await? {
-            SendResult::Sent { platform_message_id } => Ok(frankclaw_core::channel::StreamHandle {
+            SendResult::Sent {
+                platform_message_id,
+            } => Ok(frankclaw_core::channel::StreamHandle {
                 channel: self.id(),
                 account_id: msg.account_id.clone(),
                 to: msg.to.clone(),
@@ -345,7 +362,8 @@ impl ChannelPlugin for DiscordChannel {
             }),
             SendResult::RateLimited { retry_after_secs } => RateLimited {
                 retry_after_secs: retry_after_secs.unwrap_or(1),
-            }.fail(),
+            }
+            .fail(),
             SendResult::Failed { reason } => Err(self.channel_err(reason)),
         }
     }
@@ -391,11 +409,16 @@ impl ChannelPlugin for DiscordChannel {
         if resp.status().is_success() {
             Ok(())
         } else {
-            let body: serde_json::Value = resp.json().await.map_err(|e| self.channel_err(format!("invalid discord delete response: {e}")))?;
-            Err(self.channel_err(body["message"]
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| self.channel_err(format!("invalid discord delete response: {e}")))?;
+            Err(self.channel_err(
+                body["message"]
                     .as_str()
                     .unwrap_or("unknown discord delete failure")
-                    .to_string()))
+                    .to_string(),
+            ))
         }
     }
 }
@@ -412,42 +435,57 @@ async fn next_json_frame(
         return Channel {
             channel: channel_id,
             msg: "discord gateway closed",
-        }.fail();
+        }
+        .fail();
     };
-    let frame = frame.map_err(|e| Channel {
-        channel: channel_id.clone(),
-        msg: format!("discord gateway read failed: {e}"),
-    }.build())?;
+    let frame = frame.map_err(|e| {
+        Channel {
+            channel: channel_id.clone(),
+            msg: format!("discord gateway read failed: {e}"),
+        }
+        .build()
+    })?;
     parse_gateway_message(channel_id, frame)
 }
 
 fn parse_gateway_message(channel_id: ChannelId, frame: Message) -> Result<serde_json::Value> {
     let text = match frame {
         Message::Text(text) => text,
-        Message::Binary(bytes) => String::from_utf8(bytes.to_vec()).map_err(|e| Channel {
-            channel: channel_id.clone(),
-            msg: format!("discord gateway sent invalid UTF-8: {e}"),
-        }.build())?.into(),
+        Message::Binary(bytes) => String::from_utf8(bytes.to_vec())
+            .map_err(|e| {
+                Channel {
+                    channel: channel_id.clone(),
+                    msg: format!("discord gateway sent invalid UTF-8: {e}"),
+                }
+                .build()
+            })?
+            .into(),
         Message::Close(close_frame) => {
-            let (code, reason) = close_frame
-                .map_or((0u16, String::new()), |cf| (cf.code.into(), cf.reason.to_string()));
+            let (code, reason) = close_frame.map_or((0u16, String::new()), |cf| {
+                (cf.code.into(), cf.reason.to_string())
+            });
             return Channel {
                 channel: channel_id,
                 msg: format!("discord gateway closed (code={code}, reason={reason})"),
-            }.fail();
+            }
+            .fail();
         }
         _ => {
             return Channel {
                 channel: channel_id,
                 msg: "discord gateway sent unexpected frame type",
-            }.fail();
+            }
+            .fail();
         }
     };
 
-    serde_json::from_str(text.as_ref()).map_err(|e| Channel {
-        channel: channel_id,
-        msg: format!("discord gateway sent invalid JSON: {e}"),
-    }.build())
+    serde_json::from_str(text.as_ref()).map_err(|e| {
+        Channel {
+            channel: channel_id,
+            msg: format!("discord gateway sent invalid JSON: {e}"),
+        }
+        .build()
+    })
 }
 
 fn parse_message_create(
@@ -484,13 +522,14 @@ fn parse_message_create(
         .unwrap_or_default();
     let timestamp = payload["timestamp"]
         .as_str()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok()).map_or_else(chrono::Utc::now, |value| value.with_timezone(&chrono::Utc));
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map_or_else(chrono::Utc::now, |value| value.with_timezone(&chrono::Utc));
     let is_mention = bot_user_id.is_some_and(|bot_user_id| {
-        payload["mentions"]
-            .as_array()
-            .is_some_and(|mentions| {
-                mentions.iter().any(|mention| mention["id"].as_str() == Some(bot_user_id))
-            })
+        payload["mentions"].as_array().is_some_and(|mentions| {
+            mentions
+                .iter()
+                .any(|mention| mention["id"].as_str() == Some(bot_user_id))
+        })
     });
 
     Some(InboundMessage {
@@ -515,8 +554,7 @@ fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
         "allowed_mentions": {
             "parse": []
         }
-    })
-    ;
+    });
     if let Some(reply_to) = &msg.reply_to {
         body["message_reference"] = serde_json::json!({
             "message_id": reply_to
@@ -532,10 +570,13 @@ fn build_send_form(msg: &OutboundMessage) -> Result<reqwest::multipart::Form> {
         let part = reqwest::multipart::Part::bytes(spec.bytes)
             .file_name(spec.filename)
             .mime_str(&spec.mime_type)
-            .map_err(|e| Channel {
-                channel: ChannelId::new("discord"),
-                msg: format!("invalid attachment mime type: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Channel {
+                    channel: ChannelId::new("discord"),
+                    msg: format!("invalid attachment mime type: {e}"),
+                }
+                .build()
+            })?;
         form = form.part(spec.field_name, part);
     }
     Ok(form)
@@ -578,7 +619,10 @@ fn build_send_attachment_payload(
 fn build_edit_request(target: &EditMessageTarget, new_text: &str) -> (String, serde_json::Value) {
     let text = normalize_outbound_text(new_text, OutboundTextFlavor::Plain);
     (
-        target.thread_id.clone().unwrap_or_else(|| target.to.clone()),
+        target
+            .thread_id
+            .clone()
+            .unwrap_or_else(|| target.to.clone()),
         serde_json::json!({ "content": text }),
     )
 }
@@ -799,7 +843,10 @@ mod tests {
                 { "id": 1, "filename": "report.pdf" }
             ])
         );
-        assert_eq!(payload["message_reference"]["message_id"], serde_json::json!("msg-42"));
+        assert_eq!(
+            payload["message_reference"]["message_id"],
+            serde_json::json!("msg-42")
+        );
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].field_name, "files[0]");
         assert_eq!(specs[1].field_name, "files[1]");
@@ -852,7 +899,10 @@ mod tests {
             platform_message_id: "msg-99".into(),
         };
 
-        assert_eq!(target.thread_id.as_deref().unwrap_or(&target.to), "thread-9");
+        assert_eq!(
+            target.thread_id.as_deref().unwrap_or(&target.to),
+            "thread-9"
+        );
     }
 
     #[test]
@@ -882,7 +932,10 @@ mod tests {
         .expect("message should parse");
 
         assert_eq!(inbound.attachments.len(), 1);
-        assert_eq!(inbound.attachments[0].filename.as_deref(), Some("image.png"));
+        assert_eq!(
+            inbound.attachments[0].filename.as_deref(),
+            Some("image.png")
+        );
         assert_eq!(inbound.attachments[0].mime_type, "image/png");
         assert_eq!(inbound.attachments[0].size_bytes, Some(1234));
     }
@@ -975,7 +1028,8 @@ mod tests {
         let err = Channel {
             channel: ChannelId::new("discord"),
             msg: "discord gateway closed (code=4014, reason=Disallowed intents)",
-        }.build();
+        }
+        .build();
         assert!(is_fatal_gateway_error(&err));
     }
 
@@ -984,7 +1038,8 @@ mod tests {
         let err = Channel {
             channel: ChannelId::new("discord"),
             msg: "discord gateway closed (code=4004, reason=Authentication failed)",
-        }.build();
+        }
+        .build();
         assert!(is_fatal_gateway_error(&err));
     }
 
@@ -993,7 +1048,8 @@ mod tests {
         let err = Channel {
             channel: ChannelId::new("discord"),
             msg: "discord gateway closed (code=4000, reason=Unknown error)",
-        }.build();
+        }
+        .build();
         assert!(!is_fatal_gateway_error(&err));
     }
 
@@ -1002,7 +1058,8 @@ mod tests {
         let err = Channel {
             channel: ChannelId::new("discord"),
             msg: "discord gateway HELLO timeout after 30s",
-        }.build();
+        }
+        .build();
         assert!(!is_fatal_gateway_error(&err));
     }
 }

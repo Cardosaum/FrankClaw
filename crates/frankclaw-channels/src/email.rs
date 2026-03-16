@@ -9,7 +9,9 @@ use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use frankclaw_core::channel::{ChannelPlugin, InboundMessage, ChannelCapabilities, HealthStatus, OutboundMessage, SendResult};
+use frankclaw_core::channel::{
+    ChannelCapabilities, ChannelPlugin, HealthStatus, InboundMessage, OutboundMessage, SendResult,
+};
 use frankclaw_core::error::Result;
 use frankclaw_core::types::ChannelId;
 
@@ -42,7 +44,10 @@ pub struct EmailChannel {
 }
 
 impl EmailChannel {
-    #[expect(clippy::too_many_arguments, reason = "email channel configuration requires many distinct parameters")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "email channel configuration requires many distinct parameters"
+    )]
     pub fn new(
         imap_server: String,
         imap_port: u16,
@@ -58,18 +63,31 @@ impl EmailChannel {
     ) -> Self {
         Self {
             imap_server,
-            imap_port: if imap_port == 0 { DEFAULT_IMAP_PORT } else { imap_port },
+            imap_port: if imap_port == 0 {
+                DEFAULT_IMAP_PORT
+            } else {
+                imap_port
+            },
             imap_user,
             imap_password,
             smtp_server,
-            smtp_port: if smtp_port == 0 { DEFAULT_SMTP_PORT } else { smtp_port },
+            smtp_port: if smtp_port == 0 {
+                DEFAULT_SMTP_PORT
+            } else {
+                smtp_port
+            },
             smtp_user,
             smtp_password,
             smtp_from,
-            poll_interval: Duration::from_secs(
-                if poll_interval_secs == 0 { DEFAULT_POLL_INTERVAL_SECS } else { poll_interval_secs },
-            ),
-            allowed_senders: allowed_senders.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+            poll_interval: Duration::from_secs(if poll_interval_secs == 0 {
+                DEFAULT_POLL_INTERVAL_SECS
+            } else {
+                poll_interval_secs
+            }),
+            allowed_senders: allowed_senders
+                .into_iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect(),
             cancel: Mutex::new(None),
         }
     }
@@ -85,9 +103,7 @@ impl EmailChannel {
 
     async fn connect_imap(
         &self,
-    ) -> Result<
-        async_imap::Session<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
-    > {
+    ) -> Result<async_imap::Session<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>> {
         let addr = format!("{}:{}", self.imap_server, self.imap_port);
         let tcp_stream = tokio::net::TcpStream::connect(&addr)
             .await
@@ -147,9 +163,15 @@ impl EmailChannel {
 
         let mut session = self.connect_imap().await?;
 
-        session.select("INBOX").await.map_err(|e| self.channel_err(format!("IMAP select INBOX failed: {e}")))?;
+        session
+            .select("INBOX")
+            .await
+            .map_err(|e| self.channel_err(format!("IMAP select INBOX failed: {e}")))?;
 
-        let unseen = session.search("UNSEEN").await.map_err(|e| self.channel_err(format!("IMAP search UNSEEN failed: {e}")))?;
+        let unseen = session
+            .search("UNSEEN")
+            .await
+            .map_err(|e| self.channel_err(format!("IMAP search UNSEEN failed: {e}")))?;
 
         if unseen.is_empty() {
             let _ = session.logout().await;
@@ -162,7 +184,10 @@ impl EmailChannel {
             .collect::<Vec<_>>()
             .join(",");
 
-        let mut fetch_stream = session.fetch(&seq_set, "RFC822").await.map_err(|e| self.channel_err(format!("IMAP fetch failed: {e}")))?;
+        let mut fetch_stream = session
+            .fetch(&seq_set, "RFC822")
+            .await
+            .map_err(|e| self.channel_err(format!("IMAP fetch failed: {e}")))?;
 
         let mut processed_seqs = Vec::new();
         while let Some(fetch_result) = fetch_stream.next().await {
@@ -252,11 +277,10 @@ impl EmailChannel {
             text: Some(text),
             attachments: Vec::new(),
             platform_message_id: parsed.message_id().map(str::to_string),
-            timestamp: parsed
-                .date().map_or_else(chrono::Utc::now, |d| {
-                    chrono::DateTime::from_timestamp(d.to_timestamp(), 0)
-                        .unwrap_or_else(chrono::Utc::now)
-                }),
+            timestamp: parsed.date().map_or_else(chrono::Utc::now, |d| {
+                chrono::DateTime::from_timestamp(d.to_timestamp(), 0)
+                    .unwrap_or_else(chrono::Utc::now)
+            }),
         })
     }
 }
@@ -351,10 +375,9 @@ impl ChannelPlugin for EmailChannel {
             .parse()
             .map_err(|e| self.channel_err(format!("invalid smtp_from address: {e}")))?;
 
-        let to: lettre::message::Mailbox = msg
-            .to
-            .parse()
-            .map_err(|e| self.channel_err(format!("invalid recipient address '{}': {e}", msg.to)))?;
+        let to: lettre::message::Mailbox = msg.to.parse().map_err(|e| {
+            self.channel_err(format!("invalid recipient address '{}': {e}", msg.to))
+        })?;
 
         let subject = msg
             .thread_id
@@ -382,7 +405,10 @@ impl ChannelPlugin for EmailChannel {
             .credentials(creds)
             .build();
 
-        let response = mailer.send(email).await.map_err(|e| self.channel_err(format!("SMTP send failed: {e}")))?;
+        let response = mailer
+            .send(email)
+            .await
+            .map_err(|e| self.channel_err(format!("SMTP send failed: {e}")))?;
 
         Ok(SendResult::Sent {
             platform_message_id: response.message().collect::<Vec<_>>().join(" "),

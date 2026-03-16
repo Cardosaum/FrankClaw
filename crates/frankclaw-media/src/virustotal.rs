@@ -42,9 +42,12 @@ impl VirusTotalScanner {
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
-            .map_err(|e| Internal {
-                msg: format!("failed to build HTTP client: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Internal {
+                    msg: format!("failed to build HTTP client: {e}"),
+                }
+                .build()
+            })?;
         Ok(Self { client, api_key })
     }
 
@@ -63,32 +66,39 @@ impl VirusTotalScanner {
 
     /// Upload a file and get the analysis ID.
     async fn upload_file(&self, filename: &str, data: &[u8]) -> Result<String> {
-        let form = reqwest::multipart::Form::new()
-            .part("file", reqwest::multipart::Part::bytes(data.to_vec())
-                .file_name(filename.to_string()));
+        let form = reqwest::multipart::Form::new().part(
+            "file",
+            reqwest::multipart::Part::bytes(data.to_vec()).file_name(filename.to_string()),
+        );
 
-        let response = self.client
+        let response = self
+            .client
             .post("https://www.virustotal.com/api/v3/files")
             .header("x-apikey", self.api_key.expose_secret())
             .multipart(form)
             .send()
             .await
-            .map_err(|e| Internal {
-                msg: format!("VirusTotal upload failed: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Internal {
+                    msg: format!("VirusTotal upload failed: {e}"),
+                }
+                .build()
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Internal {
                 msg: format!("VirusTotal upload returned {status}: {body}"),
-            }.fail();
+            }
+            .fail();
         }
 
         let upload: VtUploadResponse = response.json().await.map_err(|e| {
             Internal {
                 msg: format!("VirusTotal upload response parse failed: {e}"),
-            }.build()
+            }
+            .build()
         })?;
 
         Ok(upload.data.id)
@@ -103,30 +113,37 @@ impl VirusTotalScanner {
             if tokio::time::Instant::now() >= deadline {
                 return Internal {
                     msg: "VirusTotal analysis timed out",
-                }.fail();
+                }
+                .fail();
             }
 
-            let response = self.client
+            let response = self
+                .client
                 .get(&url)
                 .header("x-apikey", self.api_key.expose_secret())
                 .send()
                 .await
-                .map_err(|e| Internal {
-                    msg: format!("VirusTotal poll failed: {e}"),
-                }.build())?;
+                .map_err(|e| {
+                    Internal {
+                        msg: format!("VirusTotal poll failed: {e}"),
+                    }
+                    .build()
+                })?;
 
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
                 return Internal {
                     msg: format!("VirusTotal analysis returned {status}: {body}"),
-                }.fail();
+                }
+                .fail();
             }
 
             let analysis: VtAnalysisResponse = response.json().await.map_err(|e| {
                 Internal {
                     msg: format!("VirusTotal analysis response parse failed: {e}"),
-                }.build()
+                }
+                .build()
             })?;
 
             if analysis.data.attributes.status == "completed" {
@@ -175,7 +192,8 @@ impl FileScanService for VirusTotalScanner {
             + stats.harmless.unwrap_or(0)
             + stats.suspicious.unwrap_or(0);
 
-        let threat_names: Vec<String> = attrs.results
+        let threat_names: Vec<String> = attrs
+            .results
             .iter()
             .filter_map(|(_, result)| {
                 if result.category == "malicious" || result.category == "suspicious" {
@@ -197,11 +215,7 @@ impl FileScanService for VirusTotalScanner {
 
         debug!(
             filename,
-            malicious,
-            suspicious,
-            total,
-            safe,
-            "VirusTotal scan complete"
+            malicious, suspicious, total, safe, "VirusTotal scan complete"
         );
 
         Ok(ScanVerdict {
@@ -268,7 +282,11 @@ mod tests {
         // (If the test runner happens to have it set, this test is a no-op.)
         let key_was_set = std::env::var("VIRUSTOTAL_API_KEY").is_ok();
         if !key_was_set {
-            assert!(VirusTotalScanner::from_env().expect("should not error").is_none());
+            assert!(
+                VirusTotalScanner::from_env()
+                    .expect("should not error")
+                    .is_none()
+            );
         }
     }
 

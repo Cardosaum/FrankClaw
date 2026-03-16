@@ -123,11 +123,12 @@ fn hydrate_outbound_attachments(
         if attachment.has_inline_bytes() {
             continue;
         }
-        let stored = media
-            .read(&attachment.media_id)?
-            .ok_or_else(|| InvalidRequest {
+        let stored = media.read(&attachment.media_id)?.ok_or_else(|| {
+            InvalidRequest {
                 msg: format!("missing outbound media {}", attachment.media_id),
-            }.build())?;
+            }
+            .build()
+        })?;
         attachment.bytes = stored.bytes;
         if attachment.filename.is_none() {
             attachment.filename = Some(stored.filename);
@@ -157,7 +158,9 @@ async fn send_outbound_chunk(
     loop {
         attempts += 1;
         match channel.send(outbound.clone()).await {
-            Ok(SendResult::Sent { platform_message_id }) => {
+            Ok(SendResult::Sent {
+                platform_message_id,
+            }) => {
                 log_event(
                     "channel.send",
                     "success",
@@ -323,7 +326,10 @@ async fn send_streamed_chunk(
             });
         }
         if PSEUDO_STREAM_STEP_DELAY_MS > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(PSEUDO_STREAM_STEP_DELAY_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(
+                PSEUDO_STREAM_STEP_DELAY_MS,
+            ))
+            .await;
         }
     }
 
@@ -457,8 +463,7 @@ fn split_telegram_attachment_batches(
 
     for attachment in attachments {
         let attachment_kind = telegram_attachment_batch_kind(&attachment.mime_type);
-        let compatible = current_kind
-            .is_none_or(|kind| kind == attachment_kind);
+        let compatible = current_kind.is_none_or(|kind| kind == attachment_kind);
         if !compatible || current.len() >= 10 {
             if !current.is_empty() {
                 batches.push(std::mem::take(&mut current));
@@ -624,7 +629,10 @@ fn should_retry_send_failure(channel_id: &str, reason: &str) -> bool {
         "invalid token",
         "permission denied",
     ];
-    if permanent_markers.iter().any(|marker| normalized.contains(marker)) {
+    if permanent_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
         return false;
     }
 
@@ -639,7 +647,10 @@ fn should_retry_send_failure(channel_id: &str, reason: &str) -> bool {
         "rate limit",
         "try again",
     ];
-    if transient_markers.iter().any(|marker| normalized.contains(marker)) {
+    if transient_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
         return true;
     }
 
@@ -666,9 +677,10 @@ fn pseudo_stream_steps(text: &str) -> Vec<String> {
     for ratio in [1usize, 2usize] {
         let target = (total * ratio) / 3;
         if let Some(candidate) = preview_slice(text, target)
-            && steps.last() != Some(&candidate) {
-                steps.push(candidate);
-            }
+            && steps.last() != Some(&candidate)
+        {
+            steps.push(candidate);
+        }
     }
     if steps.last().map(std::string::String::as_str) != Some(text) {
         steps.push(text.to_string());
@@ -687,7 +699,9 @@ fn preview_slice(text: &str, target_chars: usize) -> Option<String> {
     for (idx, ch) in text.char_indices() {
         count += 1;
         fallback_end = idx + ch.len_utf8();
-        if count >= target_chars && (ch.is_whitespace() || matches!(ch, '.' | '!' | '?' | ',' | ';' | ':')) {
+        if count >= target_chars
+            && (ch.is_whitespace() || matches!(ch, '.' | '!' | '?' | ',' | ';' | ':'))
+        {
             boundary_end = Some(fallback_end);
             break;
         }
@@ -706,8 +720,8 @@ fn preview_slice(text: &str, target_chars: usize) -> Option<String> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use frankclaw_core::types::ChannelId;
     use frankclaw_core::channel::{ChannelCapabilities, EditMessageTarget, StreamHandle};
+    use frankclaw_core::types::ChannelId;
     use frankclaw_media::MediaStore;
     use std::collections::VecDeque;
 
@@ -771,7 +785,9 @@ mod tests {
     }
 
     struct SequenceChannel {
-        outcomes: tokio::sync::Mutex<VecDeque<std::result::Result<SendResult, frankclaw_core::error::FrankClawError>>>,
+        outcomes: tokio::sync::Mutex<
+            VecDeque<std::result::Result<SendResult, frankclaw_core::error::FrankClawError>>,
+        >,
         sent: tokio::sync::Mutex<Vec<OutboundMessage>>,
     }
 
@@ -817,13 +833,11 @@ mod tests {
 
         async fn send(&self, msg: OutboundMessage) -> Result<SendResult> {
             self.sent.lock().await.push(msg);
-            self.outcomes
-                .lock()
-                .await
-                .pop_front()
-                .unwrap_or_else(|| Ok(SendResult::Sent {
+            self.outcomes.lock().await.pop_front().unwrap_or_else(|| {
+                Ok(SendResult::Sent {
                     platform_message_id: "done".into(),
-                }))
+                })
+            })
         }
     }
 
@@ -1036,8 +1050,8 @@ mod tests {
         set_last_reply_in_metadata(&mut metadata, &reply)
             .expect("metadata update should serialize");
 
-        let loaded = last_reply_from_metadata(&metadata)
-            .expect("stored reply metadata should roundtrip");
+        let loaded =
+            last_reply_from_metadata(&metadata).expect("stored reply metadata should roundtrip");
         assert_eq!(loaded.content, "hello");
         assert_eq!(loaded.platform_message_id.as_deref(), Some("msg-1"));
         assert_eq!(metadata["other"]["keep"], serde_json::json!(true));
@@ -1045,12 +1059,10 @@ mod tests {
 
     #[tokio::test]
     async fn hydrate_outbound_attachments_loads_bytes_from_media_store() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-delivery-media-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let media = MediaStore::new(temp_dir.clone(), 1024 * 1024, 1)
-            .expect("media store should create");
+        let temp_dir =
+            std::env::temp_dir().join(format!("frankclaw-delivery-media-{}", uuid::Uuid::new_v4()));
+        let media =
+            MediaStore::new(temp_dir.clone(), 1024 * 1024, 1).expect("media store should create");
         let stored = media
             .store("report.pdf", "application/pdf", b"%PDF-1.4")
             .await
@@ -1078,10 +1090,16 @@ mod tests {
 
         assert_eq!(outbound.attachments.len(), 1);
         assert_eq!(outbound.attachments[0].bytes, b"%PDF-1.4");
-        assert_eq!(outbound.attachments[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(
+            outbound.attachments[0].filename.as_deref(),
+            Some("report.pdf")
+        );
         assert_eq!(outbound.attachments[0].mime_type, "application/pdf");
         let expected_url = format!("/api/media/{}", stored.id);
-        assert_eq!(outbound.attachments[0].url.as_deref(), Some(expected_url.as_str()));
+        assert_eq!(
+            outbound.attachments[0].url.as_deref(),
+            Some(expected_url.as_str())
+        );
     }
 
     #[tokio::test]
@@ -1105,7 +1123,10 @@ mod tests {
         assert!(sent.len() > 1);
         assert_eq!(delivery.status, "sent");
         assert_eq!(delivery.chunks.len(), sent.len());
-        assert!(sent.iter().all(|message| message.text.chars().count() <= 1900));
+        assert!(
+            sent.iter()
+                .all(|message| message.text.chars().count() <= 1900)
+        );
     }
 
     #[tokio::test]
@@ -1128,7 +1149,11 @@ mod tests {
 
         assert!(sent.len() > 1);
         assert_eq!(sent[0].reply_to.as_deref(), Some("incoming-42"));
-        assert!(sent.iter().skip(1).all(|message| message.reply_to.is_none()));
+        assert!(
+            sent.iter()
+                .skip(1)
+                .all(|message| message.reply_to.is_none())
+        );
     }
 
     #[tokio::test]
@@ -1154,7 +1179,10 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert!(sent[0].text.chars().count() < outbound.text.chars().count());
         assert!(updates.len() >= 2);
-        assert_eq!(updates.last().map(String::as_str), Some(outbound.text.as_str()));
+        assert_eq!(
+            updates.last().map(String::as_str),
+            Some(outbound.text.as_str())
+        );
     }
 
     #[tokio::test]
@@ -1289,9 +1317,6 @@ mod tests {
 
         assert_eq!(delivery.status, "sent");
         assert_eq!(delivery.attempts, 3);
-        assert_eq!(
-            delivery.platform_message_id.as_deref(),
-            Some("after-retry")
-        );
+        assert_eq!(delivery.platform_message_id.as_deref(), Some("after-retry"));
     }
 }

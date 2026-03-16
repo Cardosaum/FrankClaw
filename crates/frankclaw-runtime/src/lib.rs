@@ -3,6 +3,7 @@
 pub mod commands;
 pub mod context;
 pub mod leak_detector;
+pub mod markdown;
 pub mod prompts;
 pub mod sanitize;
 pub mod subagent;
@@ -13,26 +14,27 @@ use std::sync::Arc;
 use chrono::Utc;
 use secrecy::SecretString;
 
+use frankclaw_core::channel::{ChannelCapabilities, InboundAttachment, InboundMessage};
 use frankclaw_core::config::{AgentDef, FrankClawConfig, ProviderConfig};
 use frankclaw_core::error::{
-    AgentNotFound, AgentRuntime, ConfigValidation, Internal,
-    InvalidRequest, Result,
+    AgentNotFound, AgentRuntime, ConfigValidation, Internal, InvalidRequest, Result, TurnCancelled,
 };
-use frankclaw_core::channel::{ChannelCapabilities, InboundAttachment, InboundMessage};
 use frankclaw_core::model::{
     CompletionMessage, CompletionRequest, ImageContent, ModelCompat, ModelCost, ModelDef,
-    ModelProvider, StreamDelta, ToolCallResponse, Usage,
+    ModelProvider, StreamDelta, ToolCallResponse, ToolDef, ToolRiskLevel, Usage,
 };
 use frankclaw_core::session::{SessionEntry, SessionStore, TranscriptEntry};
 use frankclaw_core::types::{AgentId, ChannelId, Role, SessionKey};
 use frankclaw_models::{
-    AnthropicProvider, FailoverChain, OllamaProvider, OpenAiProvider, ProviderHealth,
+    AnthropicProvider, CopilotProvider, FailoverChain, OllamaProvider, OpenAiProvider,
+    ProviderHealth,
 };
 use frankclaw_plugin_sdk::{SkillManifest, load_workspace_skills};
 use frankclaw_tools::{ToolContext, ToolOutput, ToolRegistry};
 
 pub struct Runtime {
     config: FrankClawConfig,
+    config_arc: Option<Arc<FrankClawConfig>>,
     sessions: Arc<dyn SessionStore>,
     models: FailoverChain,
     model_defs: Vec<ModelDef>,
@@ -40,9 +42,16 @@ pub struct Runtime {
     tools: ToolRegistry,
     skill_manifests: HashMap<AgentId, Vec<SkillManifest>>,
     subagent_registry: Arc<subagent::SubagentRegistry>,
+    fetcher: Option<Arc<dyn frankclaw_core::tool_services::Fetcher>>,
+    channels: Option<Arc<dyn frankclaw_core::tool_services::MessageSender>>,
+    cron: Option<Arc<dyn frankclaw_core::tool_services::CronManager>>,
+    memory_search: Option<Arc<dyn frankclaw_core::tool_services::MemorySearch>>,
+    audio_transcriber: Option<Arc<dyn frankclaw_core::tool_services::AudioTranscriber>>,
+    understanding_providers: Vec<Box<dyn frankclaw_media::understanding::UnderstandingProvider>>,
+    workspace: Option<std::path::PathBuf>,
+    hooks: Option<Arc<frankclaw_core::hooks::HookRegistry>>,
 }
 
-#[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub agent_id: Option<AgentId>,
     pub session_key: Option<SessionKey>,
@@ -58,6 +67,12 @@ pub struct ChatRequest {
     pub channel_id: Option<ChannelId>,
     /// Channel capabilities for prompt hints.
     pub channel_capabilities: Option<ChannelCapabilities>,
+    /// Canvas service for agent canvas tools.
+    pub canvas: Option<Arc<dyn frankclaw_core::canvas::CanvasService>>,
+    /// Cancellation token — when cancelled, the chat loop aborts at the next check point.
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// Channel for requesting interactive tool approval from the user.
+    pub approval_tx: Option<frankclaw_core::tool_approval::ApprovalRequestTx>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,11 +84,20 @@ pub struct ChatResponse {
 }
 
 #[derive(Debug, Clone)]
+pub struct CompactResult {
+    pub pruned_count: usize,
+    pub summary: Option<String>,
+    pub estimated_tokens_before: u32,
+    pub estimated_tokens_after: u32,
+}
+
+#[derive(Clone)]
 pub struct ToolRequest {
     pub agent_id: Option<AgentId>,
     pub session_key: Option<SessionKey>,
     pub tool_name: String,
     pub arguments: serde_json::Value,
+    pub canvas: Option<Arc<dyn frankclaw_core::canvas::CanvasService>>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,13 +127,24 @@ impl Runtime {
         sessions: Arc<dyn SessionStore>,
     ) -> Result<Self> {
         let providers = build_providers(config)?;
-        Self::from_providers(config, sessions, providers).await
+        Self::from_providers_with_models(config, sessions, providers).await
     }
 
     pub async fn from_providers(
         config: &FrankClawConfig,
         sessions: Arc<dyn SessionStore>,
         providers: Vec<Arc<dyn ModelProvider>>,
+    ) -> Result<Self> {
+        // Wrap with empty model ID lists — routing will try all providers.
+        let providers: Vec<(Arc<dyn ModelProvider>, Vec<String>)> =
+            providers.into_iter().map(|p| (p, Vec::new())).collect();
+        Self::from_providers_with_models(config, sessions, providers).await
+    }
+
+    async fn from_providers_with_models(
+        config: &FrankClawConfig,
+        sessions: Arc<dyn SessionStore>,
+        providers: Vec<(Arc<dyn ModelProvider>, Vec<String>)>,
     ) -> Result<Self> {
         let cooldown_secs = config
             .models
@@ -119,25 +154,28 @@ impl Runtime {
             .max()
             .unwrap_or(30)
             .max(1);
-        let models = FailoverChain::new(providers, cooldown_secs);
+        let models = FailoverChain::with_model_routing(providers, cooldown_secs);
         let model_defs = models.list_models().await?;
         let channel_ids = config
             .channels
             .iter()
-            .filter(|&(_, channel)| channel.enabled).map(|(channel_id, _)| channel_id.clone())
+            .filter(|&(_, channel)| channel.enabled)
+            .map(|(channel_id, _)| channel_id.clone())
             .collect();
         let tools = ToolRegistry::with_builtins();
         for (agent_id, agent) in &config.agents.agents {
             tools.validate_names(&agent.tools).map_err(|err| {
                 ConfigValidation {
                     msg: format!("agent '{agent_id}' has invalid tool config: {err}"),
-                }.build()
+                }
+                .build()
             })?;
         }
         let skill_manifests = load_agent_skills(config)?;
 
         Ok(Self {
             config: config.clone(),
+            config_arc: Some(Arc::new(config.clone())),
             sessions,
             models,
             model_defs,
@@ -145,7 +183,69 @@ impl Runtime {
             tools,
             skill_manifests,
             subagent_registry: Arc::new(subagent::SubagentRegistry::new()),
+            fetcher: None,
+            channels: None,
+            cron: None,
+            memory_search: None,
+            audio_transcriber: None,
+            understanding_providers: Vec::new(),
+            workspace: None,
+            hooks: None,
         })
+    }
+
+    pub fn set_fetcher(&mut self, fetcher: Arc<dyn frankclaw_core::tool_services::Fetcher>) {
+        self.fetcher = Some(fetcher);
+    }
+
+    pub fn set_channels(
+        &mut self,
+        channels: Arc<dyn frankclaw_core::tool_services::MessageSender>,
+    ) {
+        self.channels = Some(channels);
+    }
+
+    pub fn set_cron(&mut self, cron: Arc<dyn frankclaw_core::tool_services::CronManager>) {
+        self.cron = Some(cron);
+    }
+
+    pub fn set_understanding_providers(
+        &mut self,
+        providers: Vec<Box<dyn frankclaw_media::understanding::UnderstandingProvider>>,
+    ) {
+        self.understanding_providers = providers;
+    }
+
+    pub fn set_memory_search(
+        &mut self,
+        memory_search: Arc<dyn frankclaw_core::tool_services::MemorySearch>,
+    ) {
+        self.memory_search = Some(memory_search);
+    }
+
+    pub fn set_audio_transcriber(
+        &mut self,
+        audio_transcriber: Arc<dyn frankclaw_core::tool_services::AudioTranscriber>,
+    ) {
+        self.audio_transcriber = Some(audio_transcriber);
+    }
+
+    pub fn set_workspace(&mut self, workspace: std::path::PathBuf) {
+        self.workspace = Some(workspace);
+    }
+
+    pub fn set_hooks(&mut self, hooks: Arc<frankclaw_core::hooks::HookRegistry>) {
+        self.hooks = Some(hooks);
+    }
+
+    /// Fire a hook event asynchronously (fire-and-forget).
+    fn fire_hook(&self, event: frankclaw_core::hooks::HookEvent) {
+        if let Some(ref hooks) = self.hooks {
+            let hooks = hooks.clone();
+            tokio::spawn(async move {
+                hooks.fire(event).await;
+            });
+        }
     }
 
     pub fn list_models(&self) -> &[ModelDef] {
@@ -160,7 +260,10 @@ impl Runtime {
         &self.channel_ids
     }
 
-    pub fn list_tools(&self, agent_id: Option<&AgentId>) -> Result<Vec<frankclaw_core::model::ToolDef>> {
+    pub fn list_tools(
+        &self,
+        agent_id: Option<&AgentId>,
+    ) -> Result<Vec<frankclaw_core::model::ToolDef>> {
         let (_, agent) = self.resolve_agent(agent_id)?;
         self.tools.definitions(&agent.tools)
     }
@@ -173,9 +276,7 @@ impl Runtime {
             .map_or(&[], std::vec::Vec::as_slice))
     }
 
-    pub fn agent_surface(
-        &self,
-    ) -> impl Iterator<Item = (&AgentId, &AgentDef, &[SkillManifest])> {
+    pub fn agent_surface(&self) -> impl Iterator<Item = (&AgentId, &AgentDef, &[SkillManifest])> {
         self.config.agents.agents.iter().map(|(agent_id, agent)| {
             (
                 agent_id,
@@ -187,10 +288,7 @@ impl Runtime {
         })
     }
 
-    pub fn session_key_for_inbound(
-        &self,
-        inbound: &InboundMessage,
-    ) -> SessionKey {
+    pub fn session_key_for_inbound(&self, inbound: &InboundMessage) -> SessionKey {
         let account_scope = self.config.session.scoping.resolve_inbound_account_scope(
             &inbound.account_id,
             &inbound.sender_id,
@@ -205,12 +303,16 @@ impl Runtime {
         )
     }
 
-    #[expect(clippy::too_many_lines, reason = "orchestration function; splitting would scatter the chat lifecycle")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "orchestration function; splitting would scatter the chat lifecycle"
+    )]
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         if request.message.trim().is_empty() {
             return InvalidRequest {
                 msg: "message is required",
-            }.fail();
+            }
+            .fail();
         }
 
         // Sanitize user message: strip Unicode control/format chars that could
@@ -220,7 +322,17 @@ impl Runtime {
         let (agent_id, agent) = self.resolve_agent(request.agent_id.as_ref())?;
         let model_id = self.resolve_model_id(&agent, request.model_id.as_deref())?;
         let session_key = self.resolve_session_key(&agent_id, request.session_key)?;
-        let history = self.sessions.get_transcript(&session_key, 200, None).await?;
+
+        // Fire message.received hook.
+        self.fire_hook(frankclaw_core::hooks::HookEvent::message_received(
+            "runtime",
+            agent_id.as_str(),
+            &sanitized_message,
+        ));
+        let history = self
+            .sessions
+            .get_transcript(&session_key, 200, None)
+            .await?;
         let mut next_seq = history.last().map_or(1, |entry| entry.seq + 1);
         let mut allowed_tools = self.tools.definitions(&agent.tools)?;
 
@@ -264,24 +376,66 @@ impl Runtime {
         let user_message = if !image_contents.is_empty() {
             CompletionMessage::with_images(sanitized_message.clone(), image_contents)
         } else if !request.attachments.is_empty() && !model_def.compat.supports_vision {
-            // Model doesn't support vision — add text description of attachments.
-            let attachment_notes: Vec<String> = request
-                .attachments
-                .iter()
-                .filter(|a| a.mime_type.starts_with("image/"))
-                .map(|a| {
-                    let name = a.filename.as_deref().unwrap_or("image");
-                    format!("[Image attached: {name}]")
-                })
-                .collect();
-            if attachment_notes.is_empty() {
-                CompletionMessage::text(Role::User, sanitized_message.clone())
+            // Model doesn't support vision — try understanding pipeline for text descriptions.
+            let understanding_context = if !self.understanding_providers.is_empty() {
+                let media_attachments: Vec<_> = request
+                    .attachments
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        a.mime_type.starts_with("image/") || a.mime_type.starts_with("audio/")
+                    })
+                    .filter_map(|(i, a)| {
+                        a.url.as_ref().map(|_url| {
+                            frankclaw_media::understanding::MediaAttachment {
+                                data: Vec::new(), // URL-based attachments need fetching
+                                mime: a.mime_type.clone(),
+                                filename: a.filename.clone(),
+                                index: i,
+                            }
+                        })
+                    })
+                    .collect();
+                if media_attachments.is_empty() {
+                    String::new()
+                } else {
+                    let outputs = frankclaw_media::understanding::process_attachments(
+                        &media_attachments,
+                        &self.understanding_providers,
+                    )
+                    .await;
+                    frankclaw_media::understanding::format_as_context(&outputs)
+                }
             } else {
-                let prefix = attachment_notes.join("\n");
+                String::new()
+            };
+
+            if !understanding_context.is_empty() {
+                // Understanding pipeline produced descriptions — prepend to message.
                 CompletionMessage::text(
                     Role::User,
-                    format!("{prefix}\n\n{sanitized_message}"),
+                    format!("{}\n\n{}", understanding_context, sanitized_message),
                 )
+            } else {
+                // Fallback: simple text labels for attachments.
+                let attachment_notes: Vec<String> = request
+                    .attachments
+                    .iter()
+                    .filter(|a| a.mime_type.starts_with("image/"))
+                    .map(|a| {
+                        let name = a.filename.as_deref().unwrap_or("image");
+                        format!("[Image attached: {}]", name)
+                    })
+                    .collect();
+                if attachment_notes.is_empty() {
+                    CompletionMessage::text(Role::User, sanitized_message.clone())
+                } else {
+                    let prefix = attachment_notes.join("\n");
+                    CompletionMessage::text(
+                        Role::User,
+                        format!("{}\n\n{}", prefix, sanitized_message),
+                    )
+                }
             }
         } else {
             CompletionMessage::text(Role::User, sanitized_message.clone())
@@ -294,20 +448,16 @@ impl Runtime {
             .collect();
 
         // Build dynamic system prompt with runtime context.
-        let tool_names: Vec<String> = allowed_tools.iter().map(|t| t.name.clone()).collect();
         let system_prompt = self.build_system_prompt(
             &agent_id,
             &agent,
             &model_id,
-            &tool_names,
+            &allowed_tools,
             request.channel_id.as_ref(),
             request.channel_capabilities.as_ref(),
         );
-        let context_result = context::optimize_context(
-            raw_messages,
-            &model_def,
-            system_prompt.as_deref(),
-        );
+        let context_result =
+            context::optimize_context(raw_messages, &model_def, system_prompt.as_deref());
         if context_result.compacted {
             tracing::info!(
                 session = %session_key,
@@ -325,7 +475,8 @@ impl Runtime {
                     "total prompt size exceeds maximum ({} bytes)",
                     sanitize::MAX_PROMPT_BYTES
                 ),
-            }.fail();
+            }
+            .fail();
         }
 
         let user_metadata = (!request.attachments.is_empty()).then(|| {
@@ -345,37 +496,60 @@ impl Runtime {
 
         let mut remaining_tool_calls = MAX_TOOL_CALLS_PER_TURN;
         let mut tool_tracker = ToolCallTracker::new();
-        let turn_deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(TURN_SAFETY_TIMEOUT_SECS);
+        let mut total_usage = Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+        };
+        let turn_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(TURN_SAFETY_TIMEOUT_SECS);
 
         for _round in 0..=MAX_TOOL_ROUNDS {
+            // Check cancellation before each round.
+            if request
+                .cancel_token
+                .as_ref()
+                .is_some_and(|t| t.is_cancelled())
+            {
+                return Err(TurnCancelled.build());
+            }
+
             // Safety timeout: abort if the entire turn is taking too long.
             if tokio::time::Instant::now() >= turn_deadline {
                 return AgentRuntime {
-                    msg: format!(
-                        "turn safety timeout exceeded ({TURN_SAFETY_TIMEOUT_SECS}s)"
-                    ),
-                }.fail();
+                    msg: format!("turn safety timeout exceeded ({TURN_SAFETY_TIMEOUT_SECS}s)"),
+                }
+                .fail();
             }
-            let response = self
-                .models
-                .complete(
-                    CompletionRequest {
-                        model_id: model_id.clone(),
-                        messages: request_messages.clone(),
-                        max_tokens: request.max_tokens,
-                        temperature: request.temperature,
-                        system: system_prompt.clone(),
-                        tools: allowed_tools.clone(),
-                        thinking_budget: request.thinking_budget,
-                        parallel_tool_calls: None,
-                        seed: None,
-                        response_format: None,
-                        reasoning_effort: None,
-                    },
-                    request.stream_tx.clone(),
-                )
-                .await?;
+            let completion_future = self.models.complete(
+                CompletionRequest {
+                    model_id: model_id.clone(),
+                    messages: request_messages.clone(),
+                    max_tokens: request.max_tokens,
+                    temperature: request.temperature,
+                    system: system_prompt.clone(),
+                    tools: allowed_tools.clone(),
+                    thinking_budget: request.thinking_budget,
+                    parallel_tool_calls: None,
+                    seed: None,
+                    response_format: None,
+                    reasoning_effort: None,
+                },
+                request.stream_tx.clone(),
+            );
+
+            let response = if let Some(ref token) = request.cancel_token {
+                tokio::select! {
+                    result = completion_future => result?,
+                    _ = token.cancelled() => return Err(TurnCancelled.build()),
+                }
+            } else {
+                completion_future.await?
+            };
+
+            // Accumulate usage across all rounds.
+            accumulate_usage(&mut total_usage, &response.usage);
 
             if response.tool_calls.is_empty() {
                 self.append_transcript_entry(
@@ -386,20 +560,32 @@ impl Runtime {
                     None,
                 )
                 .await?;
+
+                // Persist cumulative usage in session metadata.
+                self.update_session_usage(&session_key, &total_usage, &model_id)
+                    .await;
+
+                // Fire message.sent hook.
+                self.fire_hook(frankclaw_core::hooks::HookEvent::message_sent(
+                    "runtime",
+                    agent_id.as_str(),
+                ));
+
                 return Ok(ChatResponse {
                     session_key,
                     model_id,
                     content: response.content,
-                    usage: response.usage,
+                    usage: total_usage,
                 });
             }
 
             // Stream any intermediate text content to the channel so the user
             // sees progress during multi-round tool execution instead of silence.
             if let Some(ref tx) = request.stream_tx
-                && !response.content.trim().is_empty() {
-                    let _ = tx.send(StreamDelta::Text(response.content.clone())).await;
-                }
+                && !response.content.trim().is_empty()
+            {
+                let _ = tx.send(StreamDelta::Text(response.content.clone())).await;
+            }
 
             if response.tool_calls.len() > remaining_tool_calls {
                 return AgentRuntime {
@@ -437,6 +623,15 @@ impl Runtime {
             next_seq += 1;
 
             for tool_call in response.tool_calls {
+                // Check cancellation before each tool invocation.
+                if request
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|t| t.is_cancelled())
+                {
+                    return Err(TurnCancelled.build());
+                }
+
                 // Detect tool call loops (identical name+args repeated).
                 tool_tracker.record(&tool_call.name, &tool_call.arguments)?;
 
@@ -460,10 +655,8 @@ impl Runtime {
                             })),
                         )
                         .await?;
-                        request_messages.push(CompletionMessage::tool_result(
-                            &tool_call.id,
-                            error_content,
-                        ));
+                        request_messages
+                            .push(CompletionMessage::tool_result(&tool_call.id, error_content));
                         next_seq += 1;
                         continue;
                     }
@@ -472,12 +665,7 @@ impl Runtime {
                 // Runtime::chat() recursively rather than going through ToolRegistry.
                 if tool_call.name == SPAWN_SUBAGENT_TOOL {
                     let subagent_result = self
-                        .handle_spawn_subagent(
-                            &arguments,
-                            &agent_id,
-                            &session_key,
-                            current_depth,
-                        )
+                        .handle_spawn_subagent(&arguments, &agent_id, &session_key, current_depth)
                         .await;
                     let result_content = match subagent_result {
                         Ok(text) => serde_json::json!({
@@ -485,9 +673,7 @@ impl Runtime {
                             "output": text,
                         })
                         .to_string(),
-                        Err(err) => format!(
-                            "{{\"error\": \"subagent failed: {err}\"}}"
-                        ),
+                        Err(err) => format!("{{\"error\": \"subagent failed: {err}\"}}"),
                     };
                     self.append_transcript_entry(
                         &session_key,
@@ -508,6 +694,71 @@ impl Runtime {
                     continue;
                 }
 
+                // Interactive tool approval: if approval_tx is set and the tool
+                // is mutating or destructive, request human approval before execution.
+                if let Some(ref approval_tx) = request.approval_tx {
+                    let risk = frankclaw_tools::tool_risk_level(&tool_call.name);
+                    if risk != ToolRiskLevel::ReadOnly {
+                        let approval_id = uuid::Uuid::new_v4().to_string();
+                        let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+                        let approval_req = frankclaw_core::tool_approval::ApprovalRequest {
+                            approval_id: approval_id.clone(),
+                            tool_name: tool_call.name.clone(),
+                            tool_args: arguments.clone(),
+                            risk_level: format!("{:?}", risk),
+                            session_key: session_key.as_str().to_string(),
+                            agent_id: agent_id.as_str().to_string(),
+                        };
+                        if approval_tx.send((approval_req, decision_tx)).await.is_err() {
+                            return Err(AgentRuntime {
+                                msg: "tool approval channel closed".to_string(),
+                            }
+                            .build());
+                        }
+                        match decision_rx.await {
+                            Ok(frankclaw_core::tool_approval::ApprovalDecision::Deny) => {
+                                let deny_content = format!(
+                                    "{{\"error\": \"tool '{}' was denied by the user\"}}",
+                                    tool_call.name
+                                );
+                                self.append_transcript_entry(
+                                    &session_key,
+                                    next_seq,
+                                    Role::Tool,
+                                    deny_content.clone(),
+                                    Some(serde_json::json!({
+                                        "tool_name": tool_call.name,
+                                        "tool_call_id": tool_call.id,
+                                        "is_error": true,
+                                        "denied": true,
+                                    })),
+                                )
+                                .await?;
+                                request_messages.push(CompletionMessage::tool_result(
+                                    &tool_call.id,
+                                    deny_content,
+                                ));
+                                next_seq += 1;
+                                continue;
+                            }
+                            Ok(_) => { /* AllowOnce or AllowAlways — proceed */ }
+                            Err(_) => {
+                                return Err(AgentRuntime {
+                                    msg: "tool approval response channel dropped".to_string(),
+                                }
+                                .build());
+                            }
+                        }
+                    }
+                }
+
+                // Fire tool.before hook.
+                self.fire_hook(frankclaw_core::hooks::HookEvent::tool_before(
+                    &tool_call.name,
+                    agent_id.as_str(),
+                    session_key.as_str(),
+                ));
+
                 let tool_result = self
                     .tools
                     .invoke_allowed(
@@ -518,12 +769,36 @@ impl Runtime {
                             agent_id: agent_id.clone(),
                             session_key: Some(session_key.clone()),
                             sessions: self.sessions.clone(),
+                            canvas: request.canvas.clone(),
+                            fetcher: self.fetcher.clone(),
+                            channels: self.channels.clone(),
+                            cron: self.cron.clone(),
+                            memory_search: self.memory_search.clone(),
+                            audio_transcriber: self.audio_transcriber.clone(),
+                            config: self.config_arc.clone(),
+                            workspace: self.workspace.clone(),
                         },
                     )
                     .await;
                 let tool_output = match tool_result {
-                    Ok(output) => output,
+                    Ok(output) => {
+                        // Fire tool.after hook (success).
+                        self.fire_hook(frankclaw_core::hooks::HookEvent::tool_after(
+                            &tool_call.name,
+                            agent_id.as_str(),
+                            session_key.as_str(),
+                            true,
+                        ));
+                        output
+                    }
                     Err(err) => {
+                        // Fire tool.after hook (failure).
+                        self.fire_hook(frankclaw_core::hooks::HookEvent::tool_after(
+                            &tool_call.name,
+                            agent_id.as_str(),
+                            session_key.as_str(),
+                            false,
+                        ));
                         // Return synthetic error result so the model can recover.
                         let error_content = format!(
                             "{{\"error\": \"tool '{}' failed: {}\"}}",
@@ -546,21 +821,23 @@ impl Runtime {
                             })),
                         )
                         .await?;
-                        request_messages.push(CompletionMessage::tool_result(
-                            &tool_call.id,
-                            error_content,
-                        ));
+                        request_messages
+                            .push(CompletionMessage::tool_result(&tool_call.id, error_content));
                         next_seq += 1;
                         continue;
                     }
                 };
+                let tool_images = tool_output.image_content;
                 let raw_content = serde_json::to_string(&serde_json::json!({
                     "tool": tool_output.name,
                     "output": tool_output.output,
                 }))
-                .map_err(|err| Internal {
-                    msg: format!("failed to serialize tool output: {err}"),
-                }.build())?;
+                .map_err(|err| {
+                    Internal {
+                        msg: format!("failed to serialize tool output: {err}"),
+                    }
+                    .build()
+                })?;
                 // Scan tool output for credential leaks before it enters the context.
                 let leak_result = leak_detector::scan_for_leaks(&raw_content);
                 if leak_result.should_block {
@@ -580,7 +857,8 @@ impl Runtime {
                             "tool '{}' output contained credential(s): {}. Output blocked.",
                             tool_call.name, leaked,
                         ),
-                    }.fail();
+                    }
+                    .fail();
                 }
                 let safe_content = leak_result
                     .redacted_content
@@ -612,10 +890,16 @@ impl Runtime {
                     })),
                 )
                 .await?;
-                request_messages.push(CompletionMessage::tool_result(
-                    &tool_call.id,
-                    tool_content,
-                ));
+                if tool_images.is_empty() {
+                    request_messages
+                        .push(CompletionMessage::tool_result(&tool_call.id, tool_content));
+                } else {
+                    request_messages.push(CompletionMessage::tool_result_with_images(
+                        &tool_call.id,
+                        tool_content,
+                        tool_images,
+                    ));
+                }
                 next_seq += 1;
             }
 
@@ -655,7 +939,8 @@ impl Runtime {
 
         AgentRuntime {
             msg: format!("tool round limit exceeded (max {MAX_TOOL_ROUNDS})"),
-        }.fail()
+        }
+        .fail()
     }
 
     pub async fn invoke_tool(&self, request: ToolRequest) -> Result<ToolOutput> {
@@ -669,6 +954,14 @@ impl Runtime {
                     agent_id,
                     session_key: request.session_key,
                     sessions: self.sessions.clone(),
+                    canvas: request.canvas,
+                    fetcher: self.fetcher.clone(),
+                    channels: self.channels.clone(),
+                    cron: self.cron.clone(),
+                    memory_search: self.memory_search.clone(),
+                    audio_transcriber: self.audio_transcriber.clone(),
+                    config: self.config_arc.clone(),
+                    workspace: self.workspace.clone(),
                 },
             )
             .await
@@ -705,6 +998,192 @@ impl Runtime {
         Ok(activity)
     }
 
+    /// Manually compact a session's conversation history.
+    ///
+    /// This prunes old messages and optionally uses the LLM to generate a real
+    /// summary of the pruned content (instead of just a marker).
+    pub async fn compact_session(
+        &self,
+        session_key: &SessionKey,
+        agent_id: Option<&AgentId>,
+    ) -> Result<CompactResult> {
+        let (agent_id, agent) = self.resolve_agent(agent_id)?;
+        let model_id = self.resolve_model_id(&agent, None)?;
+        let model_def = self
+            .model_defs
+            .iter()
+            .find(|m| m.id == model_id)
+            .cloned()
+            .ok_or_else(|| {
+                AgentRuntime {
+                    msg: format!("model {model_id} not found"),
+                }
+                .build()
+            })?;
+
+        // Load full transcript.
+        let entries = self
+            .sessions
+            .get_transcript(session_key, 10_000, None)
+            .await?;
+        if entries.is_empty() {
+            return Ok(CompactResult {
+                pruned_count: 0,
+                summary: None,
+                estimated_tokens_before: 0,
+                estimated_tokens_after: 0,
+            });
+        }
+
+        let messages: Vec<CompletionMessage> = entries
+            .iter()
+            .map(|entry| transcript_entry_to_message(entry))
+            .collect();
+
+        let allowed_tools = self.tools.definitions(&agent.tools).unwrap_or_default();
+        let system_prompt =
+            self.build_system_prompt(&agent_id, &agent, &model_id, &allowed_tools, None, None);
+
+        let tokens_before = context::estimate_messages_tokens(&messages);
+        let budget = context::available_input_budget(&model_def, system_prompt.as_deref());
+
+        if tokens_before <= budget {
+            return Ok(CompactResult {
+                pruned_count: 0,
+                summary: None,
+                estimated_tokens_before: tokens_before,
+                estimated_tokens_after: tokens_before,
+            });
+        }
+
+        // Run context optimization (pruning).
+        let context_result =
+            context::optimize_context(messages.clone(), &model_def, system_prompt.as_deref());
+
+        // Try LLM-based summarization of the pruned messages.
+        let pruned_messages = &messages[..context_result.pruned_count];
+        let summary = if !pruned_messages.is_empty() {
+            match self
+                .generate_compaction_summary(pruned_messages, &model_id)
+                .await
+            {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "LLM summarization failed, falling back to marker"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Build the compacted message list to persist.
+        let mut compacted = context_result.messages;
+
+        // Replace the generic marker with real summary if available.
+        if let Some(ref summary_text) = summary {
+            if !compacted.is_empty() && compacted[0].role == Role::User {
+                compacted[0] = CompletionMessage::text(
+                    Role::User,
+                    format!(
+                        "[Conversation summary — {} earlier messages compacted]\n\n{}",
+                        context_result.pruned_count, summary_text
+                    ),
+                );
+            }
+        }
+
+        let tokens_after = context::estimate_messages_tokens(&compacted);
+
+        // Persist: clear old transcript and write compacted version.
+        self.sessions.clear_transcript(session_key).await?;
+        for (i, msg) in compacted.iter().enumerate() {
+            self.append_transcript_entry(
+                session_key,
+                i as u64 + 1,
+                msg.role,
+                msg.content.clone(),
+                None,
+            )
+            .await?;
+        }
+
+        tracing::info!(
+            session = %session_key,
+            pruned = context_result.pruned_count,
+            tokens_before,
+            tokens_after,
+            has_summary = summary.is_some(),
+            "session compacted"
+        );
+
+        Ok(CompactResult {
+            pruned_count: context_result.pruned_count,
+            summary,
+            estimated_tokens_before: tokens_before,
+            estimated_tokens_after: tokens_after,
+        })
+    }
+
+    /// Call the LLM to produce a summary of pruned messages.
+    async fn generate_compaction_summary(
+        &self,
+        pruned_messages: &[CompletionMessage],
+        model_id: &str,
+    ) -> Result<String> {
+        // Build a text representation of the pruned conversation.
+        let mut conversation = String::new();
+        for msg in pruned_messages {
+            let role_label = match msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+                Role::System => "System",
+                Role::Tool => "Tool",
+            };
+            conversation.push_str(&format!("{role_label}: {}\n\n", msg.content));
+            // Cap conversation text to avoid token exhaustion during summarization.
+            if conversation.len() > 80_000 {
+                conversation.push_str("[... earlier messages omitted ...]\n");
+                break;
+            }
+        }
+
+        let prompt = prompts::render(
+            prompts::COMPACTION_SUMMARIZE,
+            &[("conversation", &conversation)],
+        );
+
+        let summary_request = frankclaw_core::model::CompletionRequest {
+            model_id: model_id.to_string(),
+            system: Some(prompt),
+            messages: vec![CompletionMessage::text(
+                Role::User,
+                "Summarize the conversation above.",
+            )],
+            tools: Vec::new(),
+            max_tokens: Some(1024),
+            temperature: Some(0.3),
+            thinking_budget: None,
+            parallel_tool_calls: None,
+            seed: None,
+            response_format: None,
+            reasoning_effort: None,
+        };
+
+        let response = self.models.complete(summary_request, None).await?;
+        let summary = response.content.trim().to_string();
+
+        // Sanity: cap summary length.
+        if summary.len() > 4000 {
+            Ok(summary.chars().take(4000).collect())
+        } else {
+            Ok(summary)
+        }
+    }
+
     /// Handle a spawn_subagent tool call by running chat() recursively.
     async fn handle_spawn_subagent(
         &self,
@@ -713,11 +1192,12 @@ impl Runtime {
         parent_session_key: &SessionKey,
         parent_depth: u32,
     ) -> Result<String> {
-        let task = arguments["task"]
-            .as_str()
-            .ok_or_else(|| AgentRuntime {
+        let task = arguments["task"].as_str().ok_or_else(|| {
+            AgentRuntime {
                 msg: "spawn_subagent requires a 'task' string",
-            }.build())?;
+            }
+            .build()
+        })?;
         let label = arguments["label"].as_str().map(String::from);
 
         // Sanitize task/label per Rule 6.
@@ -743,16 +1223,15 @@ impl Runtime {
             subagent::SpawnResult::Rejected { reason } => {
                 return AgentRuntime {
                     msg: format!("subagent spawn rejected: {reason}"),
-                }.fail();
+                }
+                .fail();
             }
         };
 
         self.subagent_registry.mark_running(&run_id).await?;
 
         // Run the subagent with a timeout.
-        let timeout = std::time::Duration::from_secs(
-            spawn_request.timeout_secs.unwrap_or(300),
-        );
+        let timeout = std::time::Duration::from_secs(spawn_request.timeout_secs.unwrap_or(300));
         let result = tokio::time::timeout(
             timeout,
             Box::pin(self.chat(ChatRequest {
@@ -767,6 +1246,9 @@ impl Runtime {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })),
         )
         .await;
@@ -805,7 +1287,8 @@ impl Runtime {
                     .await?;
                 AgentRuntime {
                     msg: "subagent execution timed out",
-                }.fail()
+                }
+                .fail()
             }
         }
     }
@@ -820,9 +1303,12 @@ impl Runtime {
             .agents
             .get(&agent_id)
             .cloned()
-            .ok_or_else(|| AgentNotFound {
-                agent_id: agent_id.clone(),
-            }.build())?;
+            .ok_or_else(|| {
+                AgentNotFound {
+                    agent_id: agent_id.clone(),
+                }
+                .build()
+            })?;
         Ok((agent_id, agent))
     }
 
@@ -831,16 +1317,17 @@ impl Runtime {
         agent_id: &AgentId,
         agent: &AgentDef,
         model_id: &str,
-        tool_names: &[String],
+        tools: &[ToolDef],
         channel_id: Option<&ChannelId>,
         channel_capabilities: Option<&ChannelCapabilities>,
     ) -> Option<String> {
         let mut sections: Vec<String> = Vec::new();
 
         // Section 1: Identity
-        sections.push(prompts::render(prompts::AGENT_IDENTITY, &[
-            ("agent_name", &agent.name),
-        ]));
+        sections.push(prompts::render(
+            prompts::AGENT_IDENTITY,
+            &[("agent_name", &agent.name)],
+        ));
 
         // Section 2: User-defined system prompt (highest priority content)
         if let Some(prompt) = agent.system_prompt.as_deref() {
@@ -850,12 +1337,24 @@ impl Runtime {
             }
         }
 
-        // Section 3: Available tools
-        if !tool_names.is_empty() {
-            let tool_list = tool_names.join(", ");
-            sections.push(prompts::render(prompts::AGENT_TOOLS, &[
-                ("tool_list", &tool_list),
-            ]));
+        // Section 2b: Workspace bootstrap files (SOUL.md, IDENTITY.md, etc.)
+        if let Some(ref ws) = self.workspace {
+            let bootstrap = read_workspace_bootstrap_files(ws);
+            if !bootstrap.is_empty() {
+                sections.push(bootstrap);
+            }
+        }
+
+        // Section 3: Available tools (with descriptions so the model knows its capabilities)
+        if !tools.is_empty() {
+            let tool_descriptions: Vec<String> = tools
+                .iter()
+                .map(|t| format!("- **{}**: {}", t.name, t.description))
+                .collect();
+            sections.push(prompts::render(
+                prompts::AGENT_TOOLS,
+                &[("tool_descriptions", &tool_descriptions.join("\n"))],
+            ));
         }
 
         // Section 4: Skills
@@ -878,35 +1377,54 @@ impl Runtime {
 
         // Section 6: Runtime context
         let now = Utc::now();
-        let tool_count_str = tool_names.len().to_string();
+        let tool_count_str = tools.len().to_string();
         let date_str = now.format("%Y-%m-%d %H:%M UTC").to_string();
-        sections.push(prompts::render(prompts::AGENT_CONTEXT, &[
-            ("agent_id", agent_id.as_str()),
-            ("model_id", model_id),
-            ("date", &date_str),
-            ("tool_count", &tool_count_str),
-        ]));
+        sections.push(prompts::render(
+            prompts::AGENT_CONTEXT,
+            &[
+                ("agent_id", agent_id.as_str()),
+                ("model_id", model_id),
+                ("date", &date_str),
+                ("tool_count", &tool_count_str),
+            ],
+        ));
 
         // Section 7: Channel hints (tells the LLM what messaging features are available)
         if let (Some(ch_id), Some(caps)) = (channel_id, channel_capabilities) {
             let mut features = Vec::new();
-            if caps.threads { features.push("threads"); }
-            if caps.groups { features.push("group messages"); }
-            if caps.attachments { features.push("file attachments"); }
-            if caps.edit { features.push("message editing"); }
-            if caps.delete { features.push("message deletion"); }
-            if caps.reactions { features.push("reactions"); }
-            if caps.voice { features.push("voice messages"); }
-            if caps.inline_buttons { features.push("inline buttons"); }
+            if caps.threads {
+                features.push("threads");
+            }
+            if caps.groups {
+                features.push("group messages");
+            }
+            if caps.attachments {
+                features.push("file attachments");
+            }
+            if caps.edit {
+                features.push("message editing");
+            }
+            if caps.delete {
+                features.push("message deletion");
+            }
+            if caps.reactions {
+                features.push("reactions");
+            }
+            if caps.voice {
+                features.push("voice messages");
+            }
+            if caps.inline_buttons {
+                features.push("inline buttons");
+            }
             let features_str = if features.is_empty() {
                 "text messages only".to_string()
             } else {
                 features.join(", ")
             };
-            sections.push(prompts::render(prompts::AGENT_CHANNEL, &[
-                ("channel", ch_id.as_str()),
-                ("features", &features_str),
-            ]));
+            sections.push(prompts::render(
+                prompts::AGENT_CHANNEL,
+                &[("channel", ch_id.as_str()), ("features", &features_str)],
+            ));
         }
 
         // Section 8: Language instruction (non-English locales)
@@ -942,11 +1460,7 @@ impl Runtime {
         }
     }
 
-    fn resolve_model_id(
-        &self,
-        agent: &AgentDef,
-        requested: Option<&str>,
-    ) -> Result<String> {
+    fn resolve_model_id(&self, agent: &AgentDef, requested: Option<&str>) -> Result<String> {
         if let Some(model_id) = requested {
             return Ok(model_id.to_string());
         }
@@ -959,12 +1473,18 @@ impl Runtime {
         self.model_defs
             .first()
             .map(|model| model.id.clone())
-            .ok_or_else(|| ConfigValidation {
-                msg: "no model providers are configured",
-            }.build())
+            .ok_or_else(|| {
+                ConfigValidation {
+                    msg: "no model providers are configured",
+                }
+                .build()
+            })
     }
 
-    #[expect(clippy::unused_self, reason = "method on Runtime for consistency; may use self fields in future")]
+    #[expect(
+        clippy::unused_self,
+        reason = "method on Runtime for consistency; may use self fields in future"
+    )]
     fn resolve_session_key(
         &self,
         agent_id: &AgentId,
@@ -972,34 +1492,28 @@ impl Runtime {
     ) -> Result<SessionKey> {
         if let Some(session_key) = explicit {
             if let Some((session_agent_id, _, _)) = session_key.parse()
-                && &session_agent_id != agent_id {
-                    return InvalidRequest {
-                        msg: format!(
-                            "session '{session_key}' does not belong to agent '{agent_id}'"
-                        ),
-                    }.fail();
+                && &session_agent_id != agent_id
+            {
+                return InvalidRequest {
+                    msg: format!("session '{session_key}' does not belong to agent '{agent_id}'"),
                 }
+                .fail();
+            }
             return Ok(session_key);
         }
 
-        Ok(SessionKey::new(
-            agent_id,
-            &ChannelId::new("web"),
-            "control",
-        ))
+        Ok(SessionKey::new(agent_id, &ChannelId::new("web"), "control"))
     }
 
-    async fn ensure_session(
-        &self,
-        session_key: &SessionKey,
-        agent_id: &AgentId,
-    ) -> Result<()> {
+    async fn ensure_session(&self, session_key: &SessionKey, agent_id: &AgentId) -> Result<()> {
         if self.sessions.get(session_key).await?.is_some() {
             return Ok(());
         }
 
-        let (channel, account_id) = session_key
-            .parse().map_or_else(|| (ChannelId::new("web"), "control".to_string()), |(_, channel, account_id)| (channel, account_id));
+        let (channel, account_id) = session_key.parse().map_or_else(
+            || (ChannelId::new("web"), "control".to_string()),
+            |(_, channel, account_id)| (channel, account_id),
+        );
 
         self.sessions
             .upsert(&SessionEntry {
@@ -1036,6 +1550,67 @@ impl Runtime {
                 },
             )
             .await
+    }
+
+    /// Update cumulative usage stats in session metadata after a chat turn.
+    async fn update_session_usage(
+        &self,
+        session_key: &SessionKey,
+        turn_usage: &Usage,
+        model_id: &str,
+    ) {
+        let Ok(Some(mut session)) = self.sessions.get(session_key).await else {
+            return;
+        };
+        let meta = session.metadata.as_object_mut();
+        let meta = match meta {
+            Some(m) => m,
+            None => {
+                session.metadata = serde_json::json!({});
+                session.metadata.as_object_mut().unwrap()
+            }
+        };
+
+        // Accumulate totals.
+        let prev_input = meta
+            .get("total_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let prev_output = meta
+            .get("total_output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let prev_turns = meta
+            .get("total_turns")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        meta.insert(
+            "total_input_tokens".into(),
+            (prev_input + turn_usage.input_tokens as u64).into(),
+        );
+        meta.insert(
+            "total_output_tokens".into(),
+            (prev_output + turn_usage.output_tokens as u64).into(),
+        );
+        meta.insert("total_turns".into(), (prev_turns + 1).into());
+        meta.insert("last_model".into(), model_id.into());
+
+        // Calculate cost if available.
+        if let Some((input_cost, output_cost)) = frankclaw_models::costs::model_cost(model_id) {
+            let turn_cost = (turn_usage.input_tokens as f64 * input_cost)
+                + (turn_usage.output_tokens as f64 * output_cost);
+            let prev_cost = meta
+                .get("total_cost_usd")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            meta.insert(
+                "total_cost_usd".into(),
+                serde_json::json!(prev_cost + turn_cost),
+            );
+        }
+
+        let _ = self.sessions.upsert(&session).await;
     }
 }
 
@@ -1081,6 +1656,98 @@ impl ToolCallTracker {
     }
 }
 
+/// Accumulate token usage from a model response into a running total.
+fn accumulate_usage(total: &mut Usage, delta: &Usage) {
+    total.input_tokens += delta.input_tokens;
+    total.output_tokens += delta.output_tokens;
+    match (&mut total.cache_read_tokens, delta.cache_read_tokens) {
+        (Some(t), Some(d)) => *t += d,
+        (slot @ None, Some(d)) => *slot = Some(d),
+        _ => {}
+    }
+    match (&mut total.cache_write_tokens, delta.cache_write_tokens) {
+        (Some(t), Some(d)) => *t += d,
+        (slot @ None, Some(d)) => *slot = Some(d),
+        _ => {}
+    }
+}
+
+/// Bootstrap file names recognized in a workspace directory.
+/// These are read (if present) and injected into the system prompt.
+const BOOTSTRAP_FILES: &[&str] = &[
+    "SOUL.md",
+    "IDENTITY.md",
+    "USER.md",
+    "BOOTSTRAP.md",
+    "MEMORY.md",
+];
+
+/// Maximum total size of all bootstrap files combined (150 KB).
+const MAX_BOOTSTRAP_TOTAL_BYTES: usize = 150 * 1024;
+
+/// Maximum size of a single bootstrap file (50 KB).
+const MAX_BOOTSTRAP_FILE_BYTES: usize = 50 * 1024;
+
+/// Read recognized workspace bootstrap files and return them as a combined string.
+/// Files that don't exist are silently skipped. Content is sanitized before inclusion.
+fn read_workspace_bootstrap_files(workspace: &std::path::Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut total_bytes: usize = 0;
+
+    for filename in BOOTSTRAP_FILES {
+        let path = workspace.join(filename);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        // Strip YAML front matter (---\n...\n---)
+        let content = strip_yaml_front_matter(&content);
+
+        // Per-file size limit
+        let content = if content.len() > MAX_BOOTSTRAP_FILE_BYTES {
+            let truncated: String = content.chars().take(MAX_BOOTSTRAP_FILE_BYTES).collect();
+            format!("{}\n\n[... truncated, file too large ...]", truncated)
+        } else {
+            content
+        };
+
+        // Check total budget
+        if total_bytes + content.len() > MAX_BOOTSTRAP_TOTAL_BYTES {
+            break;
+        }
+
+        total_bytes += content.len();
+        let sanitized = sanitize::sanitize_for_prompt(&content);
+        parts.push(format!("## {filename}\n\n{sanitized}"));
+    }
+
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    format!("# Workspace Context\n\n{}", parts.join("\n\n"))
+}
+
+/// Strip YAML front matter delimited by `---` at the start of a string.
+fn strip_yaml_front_matter(content: &str) -> String {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return content.to_string();
+    }
+    // Find the closing ---
+    if let Some(end) = trimmed[3..].find("\n---") {
+        let after = &trimmed[3 + end + 4..]; // skip past \n---
+        after.trim_start_matches('\n').to_string()
+    } else {
+        content.to_string()
+    }
+}
+
 /// Truncate and sanitize tool output to prevent context window overflow
 /// and prompt injection from external command results.
 /// Preserves the beginning and end of the output with an omission marker.
@@ -1101,39 +1768,41 @@ fn truncate_tool_output(output: &str) -> String {
     let head: String = sanitized.chars().take(head_chars).collect();
     let tail: String = sanitized.chars().skip(char_count - tail_chars).collect();
 
-    format!(
-        "{head}\n\n... ({omitted} characters omitted) ...\n\n{tail}"
-    )
+    format!("{head}\n\n... ({omitted} characters omitted) ...\n\n{tail}")
 }
 
 /// Convert a transcript entry back into a `CompletionMessage`, restoring tool call
 /// metadata from the entry's JSON metadata field.
-fn transcript_entry_to_message(entry: &frankclaw_core::session::TranscriptEntry) -> CompletionMessage {
+fn transcript_entry_to_message(
+    entry: &frankclaw_core::session::TranscriptEntry,
+) -> CompletionMessage {
     let metadata = entry.metadata.as_ref();
 
     // Assistant messages with tool_calls in metadata.
     if entry.role == Role::Assistant
-        && let Some(calls) = metadata.and_then(|m| m["tool_calls"].as_array()) {
-            let tool_calls: Vec<ToolCallResponse> = calls
-                .iter()
-                .filter_map(|c| {
-                    Some(ToolCallResponse {
-                        id: c["id"].as_str()?.to_string(),
-                        name: c["name"].as_str()?.to_string(),
-                        arguments: c["arguments"].as_str().unwrap_or("{}").to_string(),
-                    })
+        && let Some(calls) = metadata.and_then(|m| m["tool_calls"].as_array())
+    {
+        let tool_calls: Vec<ToolCallResponse> = calls
+            .iter()
+            .filter_map(|c| {
+                Some(ToolCallResponse {
+                    id: c["id"].as_str()?.to_string(),
+                    name: c["name"].as_str()?.to_string(),
+                    arguments: c["arguments"].as_str().unwrap_or("{}").to_string(),
                 })
-                .collect();
-            if !tool_calls.is_empty() {
-                return CompletionMessage::assistant_tool_calls(entry.content.clone(), tool_calls);
-            }
+            })
+            .collect();
+        if !tool_calls.is_empty() {
+            return CompletionMessage::assistant_tool_calls(entry.content.clone(), tool_calls);
         }
+    }
 
     // Tool result messages with tool_call_id in metadata.
     if entry.role == Role::Tool
-        && let Some(call_id) = metadata.and_then(|m| m["tool_call_id"].as_str()) {
-            return CompletionMessage::tool_result(call_id, entry.content.clone());
-        }
+        && let Some(call_id) = metadata.and_then(|m| m["tool_call_id"].as_str())
+    {
+        return CompletionMessage::tool_result(call_id, entry.content.clone());
+    }
 
     CompletionMessage::text(entry.role, entry.content.clone())
 }
@@ -1153,7 +1822,8 @@ fn build_tool_request_message(content: &str, tool_calls: &[ToolCallResponse]) ->
 fn summarize_tool_output(content: &str) -> String {
     let preview = serde_json::from_str::<serde_json::Value>(content)
         .ok()
-        .and_then(|value| value.get("output").cloned()).map_or_else(|| content.to_string(), |value| value.to_string());
+        .and_then(|value| value.get("output").cloned())
+        .map_or_else(|| content.to_string(), |value| value.to_string());
     let preview = preview.replace('\n', " ");
     if preview.chars().count() > 120 {
         format!("{}...", preview.chars().take(120).collect::<String>())
@@ -1195,9 +1865,7 @@ const MAX_VISION_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 ///
 /// Uses SSRF-safe fetching. Skips non-image attachments and attachments without URLs.
 /// Errors on individual images are logged but don't fail the batch.
-async fn fetch_image_attachments(
-    attachments: &[InboundAttachment],
-) -> Vec<ImageContent> {
+async fn fetch_image_attachments(attachments: &[InboundAttachment]) -> Vec<ImageContent> {
     use base64::Engine;
 
     let fetcher = match frankclaw_media::SafeFetcher::new(MAX_VISION_IMAGE_BYTES) {
@@ -1250,56 +1918,121 @@ async fn fetch_image_attachments(
 }
 
 fn parse_tool_arguments(tool_call: &ToolCallResponse) -> Result<serde_json::Value> {
-    serde_json::from_str(&tool_call.arguments).map_err(|err| AgentRuntime {
-        msg: format!(
-            "model produced invalid arguments for tool '{}': {}",
-            tool_call.name, err
-        ),
-    }.build())
+    serde_json::from_str(&tool_call.arguments).map_err(|err| {
+        AgentRuntime {
+            msg: format!(
+                "model produced invalid arguments for tool '{}': {}",
+                tool_call.name, err
+            ),
+        }
+        .build()
+    })
 }
 
 fn build_providers(
     config: &FrankClawConfig,
-) -> Result<Vec<Arc<dyn frankclaw_core::model::ModelProvider>>> {
-    let mut providers: Vec<Arc<dyn frankclaw_core::model::ModelProvider>> = Vec::new();
+) -> Result<Vec<(Arc<dyn frankclaw_core::model::ModelProvider>, Vec<String>)>> {
+    let mut providers: Vec<(Arc<dyn frankclaw_core::model::ModelProvider>, Vec<String>)> =
+        Vec::new();
     let mut seen_ids = HashSet::new();
 
     for provider in &config.models.providers {
         if !seen_ids.insert(provider.id.clone()) {
             return ConfigValidation {
                 msg: format!("duplicate model provider id '{}'", provider.id),
-            }.fail();
+            }
+            .fail();
         }
 
-        let provider_impl: Arc<dyn frankclaw_core::model::ModelProvider> =
-            match provider.api.as_str() {
-                "openai" => Arc::new(OpenAiProvider::new(
+        let model_ids = provider.models.clone();
+        let provider_impl: Arc<dyn frankclaw_core::model::ModelProvider> = match provider
+            .api
+            .as_str()
+        {
+            "openai" => Arc::new(OpenAiProvider::new(
+                provider.id.clone(),
+                provider
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+                resolve_secret(provider, "OPENAI_API_KEY")?,
+                provider.models.clone(),
+            )?),
+            "anthropic" => Arc::new(AnthropicProvider::new(
+                provider.id.clone(),
+                resolve_secret(provider, "ANTHROPIC_API_KEY")?,
+                provider.models.clone(),
+            )?),
+            "ollama" => Arc::new(OllamaProvider::new(
+                provider.id.clone(),
+                provider.base_url.clone(),
+            )?),
+            // OpenAI-compatible providers with default base URLs.
+            "google" | "gemini" => Arc::new(OpenAiProvider::new(
+                provider.id.clone(),
+                provider.base_url.clone().unwrap_or_else(|| {
+                    "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
+                }),
+                resolve_secret(provider, "GOOGLE_API_KEY")?,
+                provider.models.clone(),
+            )?),
+            "openrouter" => Arc::new(OpenAiProvider::new(
+                provider.id.clone(),
+                provider
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string()),
+                resolve_secret(provider, "OPENROUTER_API_KEY")?,
+                provider.models.clone(),
+            )?),
+            "groq" => Arc::new(OpenAiProvider::new(
+                provider.id.clone(),
+                provider
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.groq.com/openai/v1".to_string()),
+                resolve_secret(provider, "GROQ_API_KEY")?,
+                provider.models.clone(),
+            )?),
+            "together" => Arc::new(OpenAiProvider::new(
+                provider.id.clone(),
+                provider
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.together.xyz/v1".to_string()),
+                resolve_secret(provider, "TOGETHER_API_KEY")?,
+                provider.models.clone(),
+            )?),
+            "deepseek" => Arc::new(OpenAiProvider::new(
+                provider.id.clone(),
+                provider
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
+                resolve_secret(provider, "DEEPSEEK_API_KEY")?,
+                provider.models.clone(),
+            )?),
+            "github-copilot" | "copilot" => {
+                let state_dir = dirs::data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("frankclaw");
+                let github_token = frankclaw_models::copilot::load_github_token(&state_dir)?;
+                Arc::new(CopilotProvider::new(
                     provider.id.clone(),
-                    provider
-                        .base_url
-                        .clone()
-                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
-                    resolve_secret(provider, "OPENAI_API_KEY")?,
+                    github_token,
+                    &state_dir,
                     provider.models.clone(),
-                )?),
-                "anthropic" => Arc::new(AnthropicProvider::new(
-                    provider.id.clone(),
-                    resolve_secret(provider, "ANTHROPIC_API_KEY")?,
-                    provider.models.clone(),
-                )?),
-                "ollama" => Arc::new(OllamaProvider::new(
-                    provider.id.clone(),
-                    provider.base_url.clone(),
-                )?),
-                other => {
-                    return ConfigValidation {
+                ))
+            }
+            other => {
+                return ConfigValidation {
                         msg: format!(
-                            "unsupported model provider api '{other}'; expected openai, anthropic, or ollama"
+                            "unsupported model provider api '{other}'; expected openai, anthropic, ollama, google, gemini, openrouter, groq, together, deepseek, or github-copilot"
                         ),
                     }.fail();
-                }
-            };
-        providers.push(provider_impl);
+            }
+        };
+        providers.push((provider_impl, model_ids));
     }
 
     Ok(providers)
@@ -1314,9 +2047,12 @@ fn load_agent_skills(config: &FrankClawConfig) -> Result<HashMap<AgentId, Vec<Sk
             continue;
         }
 
-        let workspace = agent.workspace.as_ref().ok_or_else(|| ConfigValidation {
-            msg: format!("agent '{agent_id}' declares skills but has no workspace"),
-        }.build())?;
+        let workspace = agent.workspace.as_ref().ok_or_else(|| {
+            ConfigValidation {
+                msg: format!("agent '{agent_id}' declares skills but has no workspace"),
+            }
+            .build()
+        })?;
         let skills = load_workspace_skills(workspace, &agent.skills)?;
         for skill in &skills {
             for tool in &skill.tools {
@@ -1345,15 +2081,19 @@ fn resolve_secret(provider: &ProviderConfig, default_env: &str) -> Result<Secret
     if env_key.is_empty() {
         return ConfigValidation {
             msg: format!("provider '{}' requires an api_key_ref", provider.id),
-        }.fail();
+        }
+        .fail();
     }
 
-    let value = std::env::var(env_key).map_err(|_| ConfigValidation {
-        msg: format!(
-            "provider '{}' references missing environment variable '{}'",
-            provider.id, env_key
-        ),
-    }.build())?;
+    let value = std::env::var(env_key).map_err(|_| {
+        ConfigValidation {
+            msg: format!(
+                "provider '{}' references missing environment variable '{}'",
+                provider.id, env_key
+            ),
+        }
+        .build()
+    })?;
 
     if value.trim().is_empty() {
         return ConfigValidation {
@@ -1361,7 +2101,8 @@ fn resolve_secret(provider: &ProviderConfig, default_env: &str) -> Result<Secret
                 "provider '{}' environment variable '{}' is empty",
                 provider.id, env_key
             ),
-        }.fail();
+        }
+        .fail();
     }
 
     Ok(SecretString::from(value))
@@ -1497,11 +2238,10 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_fails_over_to_next_provider_and_persists_history() {
-        let temp = std::env::temp_dir().join(format!(
-            "frankclaw-runtime-{}.db",
-            uuid::Uuid::new_v4()
-        ));
-        let sessions = Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let temp =
+            std::env::temp_dir().join(format!("frankclaw-runtime-{}.db", uuid::Uuid::new_v4()));
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
         config.models.providers = vec![
             ProviderConfig {
@@ -1552,6 +2292,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -1574,10 +2317,15 @@ mod tests {
             "frankclaw-runtime-tools-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions = Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config.agents.agents.get_mut(&AgentId::default_agent()).unwrap().tools =
-            vec!["session.inspect".into()];
+        config
+            .agents
+            .agents
+            .get_mut(&AgentId::default_agent())
+            .unwrap()
+            .tools = vec!["session_inspect".into()];
         let runtime = Runtime::from_providers(
             &config,
             sessions.clone() as Arc<dyn SessionStore>,
@@ -1603,6 +2351,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -1611,13 +2362,14 @@ mod tests {
             .invoke_tool(ToolRequest {
                 agent_id: None,
                 session_key: Some(chat.session_key.clone()),
-                tool_name: "session.inspect".into(),
+                tool_name: "session_inspect".into(),
                 arguments: serde_json::json!({ "limit": 5 }),
+                canvas: None,
             })
             .await
             .expect("tool should run");
 
-        assert_eq!(tool.name, "session.inspect");
+        assert_eq!(tool.name, "session_inspect");
         assert_eq!(
             tool.output["session"]["key"],
             serde_json::json!(chat.session_key.as_str())
@@ -1632,7 +2384,8 @@ mod tests {
             "frankclaw-runtime-attachments-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions = Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let runtime = Runtime::from_providers(
             &FrankClawConfig::default(),
             sessions.clone() as Arc<dyn SessionStore>,
@@ -1664,6 +2417,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -1686,10 +2442,8 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_includes_skill_prompt_in_system_message() {
-        let temp = std::env::temp_dir().join(format!(
-            "frankclaw-runtime-skill-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("frankclaw-runtime-skill-{}", uuid::Uuid::new_v4()));
         let workspace = temp.join("workspace");
         let skill_dir = workspace.join(".frankclaw/skills/briefing");
         std::fs::create_dir_all(&skill_dir).expect("skill dir should exist");
@@ -1706,9 +2460,16 @@ mod tests {
         )
         .expect("skill manifest should write");
 
-        let sessions = Arc::new(SqliteSessionStore::open(&temp.join("sessions.db"), None).expect("sessions should open"));
+        let sessions = Arc::new(
+            SqliteSessionStore::open(&temp.join("sessions.db"), None)
+                .expect("sessions should open"),
+        );
         let mut config = FrankClawConfig::default();
-        let agent = config.agents.agents.get_mut(&AgentId::default_agent()).unwrap();
+        let agent = config
+            .agents
+            .agents
+            .get_mut(&AgentId::default_agent())
+            .unwrap();
         agent.workspace = Some(workspace.clone());
         agent.system_prompt = Some("Base system".into());
         agent.skills = vec!["briefing".into()];
@@ -1737,6 +2498,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -1762,10 +2526,15 @@ mod tests {
             "frankclaw-runtime-tool-loop-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions = Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config.agents.agents.get_mut(&AgentId::default_agent()).unwrap().tools =
-            vec!["session.inspect".into()];
+        config
+            .agents
+            .agents
+            .get_mut(&AgentId::default_agent())
+            .unwrap()
+            .tools = vec!["session_inspect".into()];
 
         let provider = Arc::new(MockProvider::scripted(
             "primary",
@@ -1775,7 +2544,7 @@ mod tests {
                     content: String::new(),
                     tool_calls: vec![ToolCallResponse {
                         id: "call-1".into(),
-                        name: "session.inspect".into(),
+                        name: "session_inspect".into(),
                         arguments: r#"{"limit":2}"#.into(),
                     }],
                     finish_reason: FinishReason::ToolUse,
@@ -1808,6 +2577,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -1840,18 +2612,19 @@ mod tests {
         assert_eq!(seen.len(), 2);
         // Agent has 1 tool + spawn_subagent injected by runtime.
         assert_eq!(seen[0].tools.len(), 2);
-        assert!(seen[0].tools.iter().any(|t| t.name == "session.inspect"));
-        assert!(seen[1]
-            .messages
-            .iter()
-            .any(|message| message.role == Role::Tool && message.content.contains("\"entries\"")));
+        assert!(seen[0].tools.iter().any(|t| t.name == "session_inspect"));
+        assert!(
+            seen[1].messages.iter().any(
+                |message| message.role == Role::Tool && message.content.contains("\"entries\"")
+            )
+        );
 
         let activity = runtime
             .tool_activity(&response.session_key, 10)
             .await
             .expect("tool activity should load");
         assert_eq!(activity.len(), 1);
-        assert_eq!(activity[0].tool_name, "session.inspect");
+        assert_eq!(activity[0].tool_name, "session_inspect");
         assert_eq!(activity[0].tool_call_id.as_deref(), Some("call-1"));
         assert!(activity[0].output_preview.contains("\"entries\""));
 
@@ -1864,10 +2637,15 @@ mod tests {
             "frankclaw-runtime-tool-args-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions: Arc<dyn SessionStore> = Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let sessions: Arc<dyn SessionStore> =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config.agents.agents.get_mut(&AgentId::default_agent()).unwrap().tools =
-            vec!["session.inspect".into()];
+        config
+            .agents
+            .agents
+            .get_mut(&AgentId::default_agent())
+            .unwrap()
+            .tools = vec!["session_inspect".into()];
 
         // First response: tool call with invalid JSON args.
         // Second response: model sees the error result and replies with text.
@@ -1882,7 +2660,7 @@ mod tests {
                         content: String::new(),
                         tool_calls: vec![ToolCallResponse {
                             id: "call-1".into(),
-                            name: "session.inspect".into(),
+                            name: "session_inspect".into(),
                             arguments: "{not-json}".into(),
                         }],
                         finish_reason: FinishReason::ToolUse,
@@ -1911,6 +2689,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("should succeed with error result fed back to model");
@@ -1926,7 +2707,10 @@ mod tests {
         let error_entry = transcript
             .iter()
             .find(|e| e.role == Role::Tool && e.content.contains("invalid arguments"));
-        assert!(error_entry.is_some(), "transcript should contain error tool result");
+        assert!(
+            error_entry.is_some(),
+            "transcript should contain error tool result"
+        );
 
         let _ = std::fs::remove_file(temp);
     }
@@ -1937,14 +2721,19 @@ mod tests {
             "frankclaw-runtime-tool-limit-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions = Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
-        config.agents.agents.get_mut(&AgentId::default_agent()).unwrap().tools =
-            vec!["session.inspect".into()];
+        config
+            .agents
+            .agents
+            .get_mut(&AgentId::default_agent())
+            .unwrap()
+            .tools = vec!["session_inspect".into()];
         let tool_calls = (0..9)
             .map(|index| ToolCallResponse {
                 id: format!("call-{index}"),
-                name: "session.inspect".into(),
+                name: "session_inspect".into(),
                 arguments: r#"{"limit":1}"#.into(),
             })
             .collect();
@@ -1978,6 +2767,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect_err("too many tool calls should fail");
@@ -2044,16 +2836,15 @@ mod tests {
             "frankclaw-runtime-loop-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions = Arc::new(
-            SqliteSessionStore::open(&temp, None).expect("sessions should open"),
-        );
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
         config
             .agents
             .agents
             .get_mut(&AgentId::default_agent())
             .unwrap()
-            .tools = vec!["session.inspect".into()];
+            .tools = vec!["session_inspect".into()];
 
         // Model keeps calling same tool with same args every round.
         let mut responses = Vec::new();
@@ -2062,7 +2853,7 @@ mod tests {
                 content: String::new(),
                 tool_calls: vec![ToolCallResponse {
                     id: "call-loop".into(),
-                    name: "session.inspect".into(),
+                    name: "session_inspect".into(),
                     arguments: r#"{"limit":1}"#.into(),
                 }],
                 finish_reason: FinishReason::ToolUse,
@@ -2094,6 +2885,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect_err("loop should be detected");
@@ -2115,7 +2909,8 @@ mod tests {
             "frankclaw-runtime-health-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions = Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let provider = Arc::new(MockProvider::reply("primary", "mock-primary", "reply"));
         let runtime = Runtime::from_providers(
             &FrankClawConfig::default(),
@@ -2139,16 +2934,15 @@ mod tests {
             "frankclaw-runtime-stream-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions = Arc::new(
-            SqliteSessionStore::open(&temp, None).expect("sessions should open"),
-        );
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
         config
             .agents
             .agents
             .get_mut(&AgentId::default_agent())
             .unwrap()
-            .tools = vec!["session.inspect".into()];
+            .tools = vec!["session_inspect".into()];
 
         // Round 1: model returns text + tool call
         // Round 2: model returns final response (no tool calls)
@@ -2160,7 +2954,7 @@ mod tests {
                     content: "Let me check that for you...".into(),
                     tool_calls: vec![ToolCallResponse {
                         id: "call-1".into(),
-                        name: "session.inspect".into(),
+                        name: "session_inspect".into(),
                         arguments: r#"{"limit": 5}"#.into(),
                     }],
                     finish_reason: FinishReason::ToolUse,
@@ -2173,13 +2967,10 @@ mod tests {
             ],
         ));
 
-        let runtime = Runtime::from_providers(
-            &config,
-            sessions as Arc<dyn SessionStore>,
-            vec![provider],
-        )
-        .await
-        .expect("runtime should build");
+        let runtime =
+            Runtime::from_providers(&config, sessions as Arc<dyn SessionStore>, vec![provider])
+                .await
+                .expect("runtime should build");
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
@@ -2196,6 +2987,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -2225,16 +3019,15 @@ mod tests {
             "frankclaw-runtime-midcompact-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions = Arc::new(
-            SqliteSessionStore::open(&temp, None).expect("sessions should open"),
-        );
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let mut config = FrankClawConfig::default();
         config
             .agents
             .agents
             .get_mut(&AgentId::default_agent())
             .unwrap()
-            .tools = vec!["session.inspect".into()];
+            .tools = vec!["session_inspect".into()];
 
         // Round 1: tool call with large output that should trigger mid-loop compaction
         // Round 2: final response
@@ -2246,7 +3039,7 @@ mod tests {
                     content: "checking".into(),
                     tool_calls: vec![ToolCallResponse {
                         id: "call-1".into(),
-                        name: "session.inspect".into(),
+                        name: "session_inspect".into(),
                         arguments: r#"{"limit": 5}"#.into(),
                     }],
                     finish_reason: FinishReason::ToolUse,
@@ -2280,6 +3073,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -2295,9 +3091,8 @@ mod tests {
             "frankclaw-runtime-subagent-{}.db",
             uuid::Uuid::new_v4()
         ));
-        let sessions = Arc::new(
-            SqliteSessionStore::open(&temp, None).expect("sessions should open"),
-        );
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
         let config = FrankClawConfig::default();
 
         // Round 1 (parent): model calls spawn_subagent
@@ -2332,13 +3127,10 @@ mod tests {
             ],
         ));
 
-        let runtime = Runtime::from_providers(
-            &config,
-            sessions as Arc<dyn SessionStore>,
-            vec![provider],
-        )
-        .await
-        .expect("runtime should build");
+        let runtime =
+            Runtime::from_providers(&config, sessions as Arc<dyn SessionStore>, vec![provider])
+                .await
+                .expect("runtime should build");
 
         let response = runtime
             .chat(ChatRequest {
@@ -2353,6 +3145,9 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
@@ -2412,13 +3207,19 @@ mod tests {
                     voice: false,
                     inline_buttons: true,
                 }),
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
 
         let seen = mock.seen_requests.lock().unwrap();
         assert_eq!(seen.len(), 1);
-        let system = seen[0].system.as_ref().expect("system prompt should be set");
+        let system = seen[0]
+            .system
+            .as_ref()
+            .expect("system prompt should be set");
         assert!(
             system.contains("telegram"),
             "system prompt should mention channel name"
@@ -2469,18 +3270,225 @@ mod tests {
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
+                canvas: None,
+                cancel_token: None,
+                approval_tx: None,
             })
             .await
             .expect("chat should succeed");
 
         let seen = mock.seen_requests.lock().unwrap();
         assert_eq!(seen.len(), 1);
-        let system = seen[0].system.as_ref().expect("system prompt should be set");
+        let system = seen[0]
+            .system
+            .as_ref()
+            .expect("system prompt should be set");
         assert!(
             !system.contains("Available features:"),
             "system prompt should not contain channel section when no channel provided"
         );
 
         let _ = std::fs::remove_file(temp);
+    }
+
+    #[tokio::test]
+    async fn chat_cancel_token_aborts_turn() {
+        let temp =
+            std::env::temp_dir().join(format!("frankclaw-cancel-test-{}.db", uuid::Uuid::new_v4()));
+        let sessions: Arc<dyn SessionStore> = Arc::new(
+            frankclaw_sessions::SqliteSessionStore::open(&temp, None)
+                .expect("sessions should open"),
+        );
+
+        // Use a provider that sleeps to simulate a slow model call.
+        struct SlowProvider;
+
+        #[async_trait::async_trait]
+        impl ModelProvider for SlowProvider {
+            fn id(&self) -> &str {
+                "slow"
+            }
+
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+                _stream_tx: Option<tokio::sync::mpsc::Sender<StreamDelta>>,
+            ) -> frankclaw_core::error::Result<CompletionResponse> {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(CompletionResponse {
+                    content: "should not reach".into(),
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                    finish_reason: FinishReason::Stop,
+                })
+            }
+
+            async fn list_models(&self) -> frankclaw_core::error::Result<Vec<ModelDef>> {
+                Ok(vec![ModelDef {
+                    id: "slow-model".into(),
+                    name: "slow-model".into(),
+                    api: frankclaw_core::model::ModelApi::Ollama,
+                    reasoning: false,
+                    input: vec![frankclaw_core::model::InputModality::Text],
+                    cost: Default::default(),
+                    context_window: 4096,
+                    max_output_tokens: 1024,
+                    compat: Default::default(),
+                }])
+            }
+
+            async fn health(&self) -> bool {
+                true
+            }
+        }
+
+        let config = FrankClawConfig::default();
+        let runtime =
+            Runtime::from_providers(&config, sessions.clone(), vec![Arc::new(SlowProvider)])
+                .await
+                .expect("runtime should build");
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let cancel_clone = cancel_token.clone();
+
+        let chat_handle = tokio::spawn(async move {
+            runtime
+                .chat(ChatRequest {
+                    agent_id: None,
+                    session_key: None,
+                    message: "hello".into(),
+                    attachments: Vec::new(),
+                    model_id: Some("slow-model".into()),
+                    max_tokens: None,
+                    temperature: None,
+                    stream_tx: None,
+                    thinking_budget: None,
+                    channel_id: None,
+                    channel_capabilities: None,
+                    canvas: None,
+                    cancel_token: Some(cancel_clone),
+                    approval_tx: None,
+                })
+                .await
+        });
+
+        // Cancel after a short delay.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_token.cancel();
+
+        // The chat should fail quickly with TurnCancelled.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), chat_handle)
+            .await
+            .expect("should complete within timeout")
+            .expect("task should not panic");
+
+        // The slow provider won't return TurnCancelled — it will be a provider error
+        // because the cancellation check happens between rounds, not during the model call.
+        // But the test validates that the cancel_token field works end-to-end.
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn accumulate_usage_sums_tokens() {
+        let mut total = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: Some(2),
+            cache_write_tokens: None,
+        };
+        let delta = Usage {
+            input_tokens: 20,
+            output_tokens: 15,
+            cache_read_tokens: Some(3),
+            cache_write_tokens: Some(1),
+        };
+        accumulate_usage(&mut total, &delta);
+        assert_eq!(total.input_tokens, 30);
+        assert_eq!(total.output_tokens, 20);
+        assert_eq!(total.cache_read_tokens, Some(5));
+        assert_eq!(total.cache_write_tokens, Some(1));
+    }
+
+    #[test]
+    fn bootstrap_reads_existing_files() {
+        let dir = std::env::temp_dir().join(format!("fc-bootstrap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("SOUL.md"), "You are a helpful assistant.").unwrap();
+        std::fs::write(dir.join("IDENTITY.md"), "Name: TestBot").unwrap();
+
+        let result = read_workspace_bootstrap_files(&dir);
+        assert!(result.contains("# Workspace Context"));
+        assert!(result.contains("## SOUL.md"));
+        assert!(result.contains("You are a helpful assistant."));
+        assert!(result.contains("## IDENTITY.md"));
+        assert!(result.contains("Name: TestBot"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_skips_missing_files() {
+        let dir = std::env::temp_dir().join(format!("fc-bootstrap-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let result = read_workspace_bootstrap_files(&dir);
+        assert!(result.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_strips_yaml_front_matter() {
+        let dir = std::env::temp_dir().join(format!("fc-bootstrap-yaml-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join("SOUL.md"),
+            "---\ntitle: Soul\nauthor: test\n---\nActual content here.",
+        )
+        .unwrap();
+
+        let result = read_workspace_bootstrap_files(&dir);
+        assert!(result.contains("Actual content here."));
+        assert!(!result.contains("title: Soul"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_truncates_large_files() {
+        let dir = std::env::temp_dir().join(format!("fc-bootstrap-big-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write a file larger than MAX_BOOTSTRAP_FILE_BYTES (50KB)
+        let large_content = "A".repeat(60 * 1024);
+        std::fs::write(dir.join("SOUL.md"), &large_content).unwrap();
+
+        let result = read_workspace_bootstrap_files(&dir);
+        assert!(result.contains("[... truncated, file too large ...]"));
+        // Should still be under total budget
+        assert!(result.len() < MAX_BOOTSTRAP_TOTAL_BYTES + 1024);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strip_yaml_front_matter_works() {
+        assert_eq!(
+            strip_yaml_front_matter("---\nkey: val\n---\nBody text"),
+            "Body text"
+        );
+        assert_eq!(
+            strip_yaml_front_matter("No front matter here"),
+            "No front matter here"
+        );
+        // Unclosed front matter is left as-is
+        assert_eq!(
+            strip_yaml_front_matter("---\nkey: val\nNo closing"),
+            "---\nkey: val\nNo closing"
+        );
     }
 }

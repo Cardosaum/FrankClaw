@@ -99,15 +99,9 @@ impl OutboundAttachment {
 /// Result of sending a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SendResult {
-    Sent {
-        platform_message_id: String,
-    },
-    RateLimited {
-        retry_after_secs: Option<u64>,
-    },
-    Failed {
-        reason: String,
-    },
+    Sent { platform_message_id: String },
+    RateLimited { retry_after_secs: Option<u64> },
+    Failed { reason: String },
 }
 
 /// Context required to edit an already-sent platform message.
@@ -154,10 +148,7 @@ pub trait ChannelPlugin: Send + Sync + 'static {
     fn label(&self) -> &str;
 
     /// Start the channel adapter. Inbound messages sent to `inbound_tx`.
-    async fn start(
-        &self,
-        inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>,
-    ) -> Result<()>;
+    async fn start(&self, inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>) -> Result<()>;
 
     /// Stop the channel adapter gracefully.
     async fn stop(&self) -> Result<()>;
@@ -179,11 +170,7 @@ pub trait ChannelPlugin: Send + Sync + 'static {
     }
 
     /// Edit a previously sent message (if supported).
-    async fn edit_message(
-        &self,
-        _target: &EditMessageTarget,
-        _new_text: &str,
-    ) -> Result<()> {
+    async fn edit_message(&self, _target: &EditMessageTarget, _new_text: &str) -> Result<()> {
         Err(self.channel_err("edit not supported".into()))
     }
 
@@ -192,29 +179,42 @@ pub trait ChannelPlugin: Send + Sync + 'static {
         Err(self.channel_err("delete not supported".into()))
     }
 
-    /// Start streaming a response (if supported).
-    async fn stream_start(
+    /// Send a typing indicator (if supported).
+    /// This tells the platform the bot is "typing" a response.
+    async fn send_typing_indicator(
         &self,
-        _msg: &OutboundMessage,
-    ) -> Result<StreamHandle> {
+        _account_id: &str,
+        _to: &str,
+        _thread_id: Option<&str>,
+    ) -> Result<()> {
+        // Default: silently succeed (not all channels support typing).
+        Ok(())
+    }
+
+    /// Send an emoji reaction to a message (if supported).
+    async fn send_reaction(
+        &self,
+        _account_id: &str,
+        _to: &str,
+        _thread_id: Option<&str>,
+        _platform_message_id: &str,
+        _emoji: &str,
+    ) -> Result<()> {
+        Err(self.channel_err("reactions not supported".to_string()))
+    }
+
+    /// Start streaming a response (if supported).
+    async fn stream_start(&self, _msg: &OutboundMessage) -> Result<StreamHandle> {
         Err(self.channel_err("streaming not supported".into()))
     }
 
     /// Update an in-progress stream.
-    async fn stream_update(
-        &self,
-        _handle: &StreamHandle,
-        _text: &str,
-    ) -> Result<()> {
+    async fn stream_update(&self, _handle: &StreamHandle, _text: &str) -> Result<()> {
         Err(self.channel_err("streaming not supported".into()))
     }
 
     /// Finalize a stream.
-    async fn stream_end(
-        &self,
-        _handle: &StreamHandle,
-        _final_text: &str,
-    ) -> Result<()> {
+    async fn stream_end(&self, _handle: &StreamHandle, _final_text: &str) -> Result<()> {
         Err(self.channel_err("streaming not supported".into()))
     }
 }

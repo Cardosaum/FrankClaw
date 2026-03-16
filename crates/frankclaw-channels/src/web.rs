@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use frankclaw_core::channel::{OutboundMessage, ChannelPlugin, ChannelCapabilities, InboundMessage, HealthStatus, SendResult};
+use frankclaw_core::channel::{
+    ChannelCapabilities, ChannelPlugin, HealthStatus, InboundMessage, OutboundMessage, SendResult,
+};
 use frankclaw_core::error::Result;
 use frankclaw_core::types::ChannelId;
 
@@ -147,6 +149,11 @@ mod tests {
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].text, "hello b");
         assert_eq!(b[0].attachments.len(), 1);
-        assert!(channel.drain_outbound("default", "browser-a").await.is_empty());
+        assert!(
+            channel
+                .drain_outbound("default", "browser-a")
+                .await
+                .is_empty()
+        );
     }
 }

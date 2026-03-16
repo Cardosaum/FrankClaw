@@ -1,14 +1,18 @@
 #![forbid(unsafe_code)]
 #![doc = "Plugin SDK for extending FrankClaw with custom channels, tools, and memory backends."]
 
+pub mod discovery;
+pub mod lifecycle;
+pub mod manifest;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use frankclaw_core::channel::{ChannelPlugin, InboundMessage};
 use frankclaw_core::error::{ConfigIo, ConfigValidation, Result};
-use serde::{Deserialize, Serialize};
 use frankclaw_core::types::ChannelId;
+use serde::{Deserialize, Serialize};
 
 /// Registry of loaded plugins.
 pub struct PluginRegistry {
@@ -39,7 +43,10 @@ impl PluginRegistry {
     }
 
     /// Start all registered channels, feeding inbound messages to the provided sender.
-    #[expect(clippy::unused_async, reason = "async kept for API consistency with channel plugin lifecycle")]
+    #[expect(
+        clippy::unused_async,
+        reason = "async kept for API consistency with channel plugin lifecycle"
+    )]
     pub async fn start_all_channels(
         &self,
         inbound_tx: mpsc::Sender<InboundMessage>,
@@ -108,13 +115,17 @@ pub fn load_workspace_skills(workspace: &Path, names: &[String]) -> Result<Vec<S
 pub fn load_workspace_skill(workspace: &Path, name: &str) -> Result<SkillManifest> {
     validate_skill_name(name)?;
     let path = resolve_skill_manifest_path(workspace, name)?;
-    let content = std::fs::read_to_string(&path).map_err(|e| ConfigIo {
-        msg: format!("failed to read skill manifest '{}': {e}", path.display()),
-    }.build())?;
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        ConfigIo {
+            msg: format!("failed to read skill manifest '{}': {e}", path.display()),
+        }
+        .build()
+    })?;
     let manifest: SkillManifest = serde_json::from_str(&content).map_err(|e| {
         ConfigValidation {
             msg: format!("invalid skill manifest '{}': {e}", path.display()),
-        }.build()
+        }
+        .build()
     })?;
     validate_manifest(name, &manifest)?;
     Ok(manifest)
@@ -130,7 +141,8 @@ fn validate_skill_name(name: &str) -> Result<()> {
     } else {
         ConfigValidation {
             msg: format!("invalid skill name '{name}'"),
-        }.fail()
+        }
+        .fail()
     }
 }
 
@@ -138,7 +150,8 @@ fn validate_manifest(name: &str, manifest: &SkillManifest) -> Result<()> {
     if manifest.id.trim().is_empty() {
         return ConfigValidation {
             msg: format!("skill '{name}' manifest is missing id"),
-        }.fail();
+        }
+        .fail();
     }
     if manifest.id != name {
         return ConfigValidation {
@@ -146,35 +159,41 @@ fn validate_manifest(name: &str, manifest: &SkillManifest) -> Result<()> {
                 "skill '{}' manifest id '{}' does not match requested skill name",
                 name, manifest.id
             ),
-        }.fail();
+        }
+        .fail();
     }
     if manifest.name.trim().is_empty() {
         return ConfigValidation {
             msg: format!("skill '{name}' manifest is missing name"),
-        }.fail();
+        }
+        .fail();
     }
     if manifest.prompt.trim().is_empty() {
         return ConfigValidation {
             msg: format!("skill '{name}' manifest is missing prompt"),
-        }.fail();
+        }
+        .fail();
     }
     let capabilities: std::collections::HashSet<_> =
         manifest.capabilities.iter().cloned().collect();
     if capabilities.is_empty() {
         return ConfigValidation {
             msg: format!("skill '{name}' manifest must declare at least one capability"),
-        }.fail();
+        }
+        .fail();
     }
     if !capabilities.contains(&SkillCapability::Prompt) {
         return ConfigValidation {
             msg: format!("skill '{name}' manifest must declare the 'prompt' capability"),
-        }.fail();
+        }
+        .fail();
     }
     for tool in &manifest.tools {
         if tool.trim().is_empty() {
             return ConfigValidation {
                 msg: format!("skill '{name}' declares an empty tool name"),
-            }.fail();
+            }
+            .fail();
         }
     }
     for required in required_capabilities_for_tools(&manifest.tools) {
@@ -185,7 +204,8 @@ fn validate_manifest(name: &str, manifest: &SkillManifest) -> Result<()> {
                     name,
                     capability_name(&required)
                 ),
-            }.fail();
+            }
+            .fail();
         }
     }
     Ok(())
@@ -195,7 +215,7 @@ fn required_capabilities_for_tools(tools: &[String]) -> std::collections::HashSe
     tools
         .iter()
         .filter_map(|tool| match tool.as_str() {
-            "session.inspect" => Some(SkillCapability::ReadSession),
+            "session_inspect" => Some(SkillCapability::ReadSession),
             _ => None,
         })
         .collect()
@@ -210,21 +230,27 @@ fn capability_name(capability: &SkillCapability) -> &'static str {
 
 fn resolve_skill_manifest_path(workspace: &Path, name: &str) -> Result<PathBuf> {
     let candidates = [
-        workspace.join(".frankclaw/skills").join(name).join("skill.json"),
+        workspace
+            .join(".frankclaw/skills")
+            .join(name)
+            .join("skill.json"),
         workspace.join("skills").join(name).join("skill.json"),
     ];
 
     candidates
         .into_iter()
         .find(|path| path.is_file())
-        .ok_or_else(|| ConfigIo {
-            msg: format!(
-                "skill '{}' not found under '{}' or '{}'",
-                name,
-                workspace.join(".frankclaw/skills").display(),
-                workspace.join("skills").display()
-            ),
-        }.build())
+        .ok_or_else(|| {
+            ConfigIo {
+                msg: format!(
+                    "skill '{}' not found under '{}' or '{}'",
+                    name,
+                    workspace.join(".frankclaw/skills").display(),
+                    workspace.join("skills").display()
+                ),
+            }
+            .build()
+        })
 }
 
 #[cfg(test)]
@@ -255,7 +281,7 @@ mod tests {
                 "name": "Briefing",
                 "prompt": "Summarize clearly.",
                 "capabilities": ["prompt", "read_session"],
-                "tools": ["session.inspect"]
+                "tools": ["session_inspect"]
             })
             .to_string(),
         )
@@ -263,7 +289,7 @@ mod tests {
 
         let manifest = load_workspace_skill(&root, "briefing").expect("skill should load");
         assert_eq!(manifest.id, "briefing");
-        assert_eq!(manifest.tools, vec!["session.inspect"]);
+        assert_eq!(manifest.tools, vec!["session_inspect"]);
         assert_eq!(
             manifest.capabilities,
             vec![SkillCapability::Prompt, SkillCapability::ReadSession]
@@ -290,14 +316,17 @@ mod tests {
                 "name": "Briefing",
                 "prompt": "Summarize clearly.",
                 "capabilities": ["prompt"],
-                "tools": ["session.inspect"]
+                "tools": ["session_inspect"]
             })
             .to_string(),
         )
         .expect("skill manifest should write");
 
         let err = load_workspace_skill(&root, "briefing").expect_err("skill should fail");
-        assert!(err.to_string().contains("missing required capability 'read_session'"));
+        assert!(
+            err.to_string()
+                .contains("missing required capability 'read_session'")
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

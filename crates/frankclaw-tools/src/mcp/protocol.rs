@@ -133,7 +133,10 @@ impl McpRequest {
         }
     }
 
-    #[expect(clippy::needless_pass_by_value, reason = "value is moved directly into JSON serialization")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "value is moved directly into JSON serialization"
+    )]
     pub fn call_tool(id: u64, name: &str, arguments: serde_json::Value) -> Self {
         Self {
             jsonrpc: "2.0".into(),

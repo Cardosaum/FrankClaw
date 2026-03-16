@@ -1,7 +1,19 @@
 #![forbid(unsafe_code)]
 
+pub mod aria;
+pub mod audio;
 pub mod bash;
+pub mod browser_profiles;
+pub mod config_tools;
+pub mod cron_tools;
+pub mod file;
+pub mod image;
 pub mod mcp;
+pub mod memory;
+pub mod messaging;
+pub mod pdf;
+pub mod sessions;
+pub mod web;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,10 +30,14 @@ use url::Url;
 
 use tokio::net::lookup_host;
 
+use frankclaw_core::config::FrankClawConfig;
 use frankclaw_core::error::{AgentRuntime, ConfigValidation, Internal, InvalidRequest, Result};
 use frankclaw_core::media::is_safe_ip;
-use frankclaw_core::model::{ToolDef, ToolRiskLevel};
+use frankclaw_core::model::{ImageContent, ToolDef, ToolRiskLevel};
 use frankclaw_core::session::SessionStore;
+use frankclaw_core::tool_services::{
+    AudioTranscriber, CronManager, Fetcher, MemorySearch, MessageSender,
+};
 use frankclaw_core::types::{AgentId, SessionKey};
 
 /// Maximum time to wait for a single CDP command response.
@@ -35,12 +51,34 @@ pub struct ToolContext {
     pub agent_id: AgentId,
     pub session_key: Option<SessionKey>,
     pub sessions: Arc<dyn SessionStore>,
+    pub canvas: Option<Arc<dyn frankclaw_core::canvas::CanvasService>>,
+    pub fetcher: Option<Arc<dyn Fetcher>>,
+    pub channels: Option<Arc<dyn MessageSender>>,
+    pub cron: Option<Arc<dyn CronManager>>,
+    pub memory_search: Option<Arc<dyn MemorySearch>>,
+    pub audio_transcriber: Option<Arc<dyn AudioTranscriber>>,
+    pub config: Option<Arc<FrankClawConfig>>,
+    pub workspace: Option<std::path::PathBuf>,
+}
+
+impl ToolContext {
+    /// Returns the workspace path, or an error if no workspace is configured.
+    pub fn require_workspace(&self) -> Result<&std::path::Path> {
+        self.workspace.as_deref().ok_or_else(|| {
+            AgentRuntime {
+                msg: "tool requires a workspace directory but none is configured".to_string(),
+            }
+            .build()
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub name: String,
     pub output: serde_json::Value,
+    /// Optional image content to attach to the tool result message for vision models.
+    pub image_content: Vec<ImageContent>,
 }
 
 #[async_trait]
@@ -99,15 +137,19 @@ impl ToolRegistry {
     }
 
     pub fn with_policy(policy: ToolPolicy) -> Self {
-        let browser = Arc::new(
-            BrowserClient::from_env()
-                .unwrap_or_else(|_| BrowserClient::new("http://127.0.0.1:9222/").expect("default browser client should build")),
-        );
+        let browser = Arc::new(BrowserClient::from_env().unwrap_or_else(|_| {
+            BrowserClient::new("http://127.0.0.1:9222/")
+                .expect("default browser client should build")
+        }));
         let mut registry = Self {
             tools: HashMap::new(),
             policy,
         };
         registry.register(Arc::new(SessionInspectTool));
+        registry.register(Arc::new(CanvasGetTool));
+        registry.register(Arc::new(CanvasSetTool));
+        registry.register(Arc::new(CanvasAppendTool));
+        registry.register(Arc::new(CanvasClearTool));
         registry.register(Arc::new(BrowserOpenTool::new(browser.clone())));
         registry.register(Arc::new(BrowserExtractTool::new(browser.clone())));
         registry.register(Arc::new(BrowserSnapshotTool::new(browser.clone())));
@@ -116,8 +158,38 @@ impl ToolRegistry {
         registry.register(Arc::new(BrowserWaitTool::new(browser.clone())));
         registry.register(Arc::new(BrowserPressTool::new(browser.clone())));
         registry.register(Arc::new(BrowserSessionsTool::new(browser.clone())));
+        registry.register(Arc::new(BrowserScreenshotTool::new(browser.clone())));
+        registry.register(Arc::new(BrowserAriaSnapshotTool::new(browser.clone())));
         registry.register(Arc::new(BrowserCloseTool::new(browser)));
         registry.register(Arc::new(bash::BashTool::from_env()));
+        // Web tools
+        registry.register(Arc::new(web::WebFetchTool));
+        registry.register(Arc::new(web::WebSearchTool));
+        // Session tools
+        registry.register(Arc::new(sessions::SessionsListTool));
+        registry.register(Arc::new(sessions::SessionsHistoryTool));
+        // File tools
+        registry.register(Arc::new(file::FileReadTool));
+        registry.register(Arc::new(file::FileWriteTool));
+        registry.register(Arc::new(file::FileEditTool));
+        // Messaging
+        registry.register(Arc::new(messaging::MessageSendTool));
+        registry.register(Arc::new(messaging::MessageReactTool));
+        // Cron tools
+        registry.register(Arc::new(cron_tools::CronListTool));
+        registry.register(Arc::new(cron_tools::CronAddTool));
+        registry.register(Arc::new(cron_tools::CronRemoveTool));
+        // Config tools
+        registry.register(Arc::new(config_tools::ConfigGetTool));
+        registry.register(Arc::new(config_tools::AgentsListTool));
+        // Memory tools
+        registry.register(Arc::new(memory::MemoryGetTool));
+        registry.register(Arc::new(memory::MemorySearchTool));
+        // PDF tools
+        registry.register(Arc::new(pdf::PdfReadTool));
+        // Image tools
+        registry.register(Arc::new(image::ImageDescribeTool));
+        registry.register(Arc::new(audio::AudioTranscribeTool));
         registry
     }
 
@@ -130,7 +202,8 @@ impl ToolRegistry {
             if !self.tools.contains_key(name) {
                 return ConfigValidation {
                     msg: format!("unknown tool '{name}'"),
-                }.fail();
+                }
+                .fail();
             }
         }
         Ok(())
@@ -154,16 +227,20 @@ impl ToolRegistry {
     ) -> Result<ToolOutput> {
         if !allowed_tools.iter().any(|allowed| allowed == name) {
             return AgentRuntime {
-                msg: format!("tool '{}' is not allowed for agent '{}'", name, ctx.agent_id),
-            }.fail();
+                msg: format!(
+                    "tool '{}' is not allowed for agent '{}'",
+                    name, ctx.agent_id
+                ),
+            }
+            .fail();
         }
 
-        let tool = self
-            .tools
-            .get(name)
-            .ok_or_else(|| InvalidRequest {
+        let tool = self.tools.get(name).ok_or_else(|| {
+            InvalidRequest {
                 msg: format!("unknown tool '{name}'"),
-            }.build())?;
+            }
+            .build()
+        })?;
 
         let risk_level = tool.definition().risk_level;
         if !self.policy.is_approved(name, risk_level) {
@@ -174,10 +251,15 @@ impl ToolRegistry {
             }.fail();
         }
 
-        let output = tool.invoke(args, ctx).await?;
+        let mut output = tool.invoke(args, ctx).await?;
+
+        // Extract image content from tool output if present (used by image.describe).
+        let image_content = extract_image_content(&mut output);
+
         Ok(ToolOutput {
             name: name.to_string(),
             output,
+            image_content,
         })
     }
 }
@@ -185,6 +267,91 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::with_builtins()
+    }
+}
+
+/// Extract `_image_content` from a tool's JSON output and convert to `ImageContent` structs.
+/// The `_image_content` key is removed from the output to avoid sending raw base64 to the LLM
+/// as text (it will be sent as proper image content parts instead).
+fn extract_image_content(output: &mut serde_json::Value) -> Vec<ImageContent> {
+    let arr = match output
+        .as_object_mut()
+        .and_then(|obj| obj.remove("_image_content"))
+    {
+        Some(serde_json::Value::Array(arr)) => arr,
+        _ => return Vec::new(),
+    };
+    arr.into_iter()
+        .filter_map(|v| {
+            let mime_type = v.get("mime_type")?.as_str()?.to_string();
+            let data = v.get("data")?.as_str()?.to_string();
+            Some(ImageContent { mime_type, data })
+        })
+        .collect()
+}
+
+/// Create a test-only ToolContext with minimal services.
+#[cfg(test)]
+pub(crate) fn test_tool_context(workspace: Option<std::path::PathBuf>) -> ToolContext {
+    use frankclaw_core::session::{PruningConfig, SessionEntry, SessionStore, TranscriptEntry};
+
+    #[derive(Default)]
+    struct NoopStore;
+
+    #[async_trait]
+    impl SessionStore for NoopStore {
+        async fn get(&self, _key: &SessionKey) -> Result<Option<SessionEntry>> {
+            Ok(None)
+        }
+        async fn upsert(&self, _entry: &SessionEntry) -> Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _key: &SessionKey) -> Result<()> {
+            Ok(())
+        }
+        async fn list(
+            &self,
+            _agent_id: &AgentId,
+            _limit: usize,
+            _offset: usize,
+        ) -> Result<Vec<SessionEntry>> {
+            Ok(vec![])
+        }
+        async fn append_transcript(
+            &self,
+            _key: &SessionKey,
+            _entry: &TranscriptEntry,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn get_transcript(
+            &self,
+            _key: &SessionKey,
+            _limit: usize,
+            _before: Option<u64>,
+        ) -> Result<Vec<TranscriptEntry>> {
+            Ok(vec![])
+        }
+        async fn clear_transcript(&self, _key: &SessionKey) -> Result<()> {
+            Ok(())
+        }
+        async fn maintenance(&self, _config: &PruningConfig) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    ToolContext {
+        agent_id: AgentId::default_agent(),
+        session_key: None,
+        sessions: Arc::new(NoopStore),
+        canvas: None,
+        fetcher: None,
+        channels: None,
+        cron: None,
+        memory_search: None,
+        audio_transcriber: None,
+        config: None,
+        workspace,
     }
 }
 
@@ -230,9 +397,17 @@ fn truthy_env(name: &str) -> bool {
 /// Returns the risk level assigned to a tool by name.
 pub fn tool_risk_level(tool_name: &str) -> ToolRiskLevel {
     match tool_name {
-        "browser.click" | "browser.type" | "browser.press" | "browser.select_option" | "bash" => {
-            ToolRiskLevel::Mutating
-        }
+        "browser_click"
+        | "browser_type"
+        | "browser_press"
+        | "browser_select_option"
+        | "bash"
+        | "file_write"
+        | "file_edit"
+        | "message_send"
+        | "message_react"
+        | "cron_add" => ToolRiskLevel::Mutating,
+        "cron_remove" => ToolRiskLevel::Destructive,
         _ => ToolRiskLevel::ReadOnly,
     }
 }
@@ -281,9 +456,12 @@ impl BrowserClient {
     }
 
     fn new(raw_base_url: &str) -> Result<Self> {
-        let mut base_url = Url::parse(raw_base_url).map_err(|err| ConfigValidation {
-            msg: format!("invalid FRANKCLAW_BROWSER_DEVTOOLS_URL: {err}"),
-        }.build())?;
+        let mut base_url = Url::parse(raw_base_url).map_err(|err| {
+            ConfigValidation {
+                msg: format!("invalid FRANKCLAW_BROWSER_DEVTOOLS_URL: {err}"),
+            }
+            .build()
+        })?;
         if !base_url.path().ends_with('/') {
             let path = format!("{}/", base_url.path());
             base_url.set_path(&path);
@@ -294,15 +472,21 @@ impl BrowserClient {
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
-                .map_err(|err| Internal {
-                    msg: format!("failed to build browser client: {err}"),
-                }.build())?,
+                .map_err(|err| {
+                    Internal {
+                        msg: format!("failed to build browser client: {err}"),
+                    }
+                    .build()
+                })?,
             sessions: Mutex::new(HashMap::new()),
             next_command_id: AtomicU64::new(1),
         })
     }
 
-    #[expect(clippy::unused_self, reason = "method on BrowserClient for consistency with other session management methods")]
+    #[expect(
+        clippy::unused_self,
+        reason = "method on BrowserClient for consistency with other session management methods"
+    )]
     fn session_count(&self, sessions: &HashMap<String, BrowserSession>) -> usize {
         sessions.len()
     }
@@ -312,7 +496,10 @@ impl BrowserClient {
         self.sessions.lock().await.remove(session_id);
     }
 
-    #[expect(clippy::unused_self, reason = "method on BrowserClient for consistency with other session management methods")]
+    #[expect(
+        clippy::unused_self,
+        reason = "method on BrowserClient for consistency with other session management methods"
+    )]
     fn resolve_session_id(&self, requested: Option<&str>, ctx: &ToolContext) -> Result<String> {
         if let Some(session_id) = requested.map(str::trim).filter(|value| !value.is_empty()) {
             return Ok(session_id.to_string());
@@ -322,7 +509,8 @@ impl BrowserClient {
         }
         InvalidRequest {
             msg: "browser tool requires session_id or session context",
-        }.fail()
+        }
+        .fail()
     }
 
     async fn open(&self, session_id: String, url: &str) -> Result<BrowserSnapshot> {
@@ -403,9 +591,12 @@ impl BrowserClient {
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| InvalidRequest {
-                msg: format!("browser session '{session_id}' was not opened yet"),
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: format!("browser session '{session_id}' was not opened yet"),
+                }
+                .build()
+            })?;
         self.snapshot_session(&session).await
     }
 
@@ -419,27 +610,38 @@ impl BrowserClient {
             .lock()
             .await
             .remove(session_id)
-            .ok_or_else(|| InvalidRequest {
-                msg: format!("browser session '{session_id}' was not opened yet"),
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: format!("browser session '{session_id}' was not opened yet"),
+                }
+                .build()
+            })?;
         let endpoint = self
             .base_url
             .join(&format!("json/close/{}", session.target_id))
-            .map_err(|err| Internal {
-                msg: format!("invalid browser close endpoint: {err}"),
-            }.build())?;
+            .map_err(|err| {
+                Internal {
+                    msg: format!("invalid browser close endpoint: {err}"),
+                }
+                .build()
+            })?;
         let response = self
             .http
             .get(endpoint)
+            .header("Host", self.devtools_host_header())
             .send()
             .await
-            .map_err(|err| AgentRuntime {
-                msg: format!("failed to close browser target: {err}"),
-            }.build())?;
+            .map_err(|err| {
+                AgentRuntime {
+                    msg: format!("failed to close browser target: {err}"),
+                }
+                .build()
+            })?;
         if !response.status().is_success() {
             return AgentRuntime {
                 msg: format!("browser close failed with HTTP {}", response.status()),
-            }.fail();
+            }
+            .fail();
         }
         Ok(())
     }
@@ -451,9 +653,12 @@ impl BrowserClient {
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| InvalidRequest {
-                msg: format!("browser session '{session_id}' was not opened yet"),
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: format!("browser session '{session_id}' was not opened yet"),
+                }
+                .build()
+            })?;
         let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
         self.wait_for_ready(&mut socket).await?;
         let clicked = self
@@ -462,21 +667,30 @@ impl BrowserClient {
         if !clicked {
             return AgentRuntime {
                 msg: format!("browser.click could not find selector '{selector}'"),
-            }.fail();
+            }
+            .fail();
         }
         self.snapshot_session(&session).await
     }
 
-    async fn type_text(&self, session_id: &str, selector: &str, text: &str) -> Result<BrowserSnapshot> {
+    async fn type_text(
+        &self,
+        session_id: &str,
+        selector: &str,
+        text: &str,
+    ) -> Result<BrowserSnapshot> {
         let session = self
             .sessions
             .lock()
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| InvalidRequest {
-                msg: format!("browser session '{session_id}' was not opened yet"),
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: format!("browser session '{session_id}' was not opened yet"),
+                }
+                .build()
+            })?;
         let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
         self.wait_for_ready(&mut socket).await?;
         let typed = self
@@ -485,7 +699,8 @@ impl BrowserClient {
         if !typed {
             return AgentRuntime {
                 msg: format!("browser.type could not find selector '{selector}'"),
-            }.fail();
+            }
+            .fail();
         }
         self.snapshot_session(&session).await
     }
@@ -500,7 +715,8 @@ impl BrowserClient {
         if selector.is_none() && text.is_none() {
             return InvalidRequest {
                 msg: "browser.wait requires selector or text",
-            }.fail();
+            }
+            .fail();
         }
 
         let session = self
@@ -509,9 +725,12 @@ impl BrowserClient {
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| InvalidRequest {
-                msg: format!("browser session '{session_id}' was not opened yet"),
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: format!("browser session '{session_id}' was not opened yet"),
+                }
+                .build()
+            })?;
         let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
         self.wait_for_ready(&mut socket).await?;
 
@@ -529,13 +748,119 @@ impl BrowserClient {
                     .unwrap_or_else(|| "condition".into());
                 return AgentRuntime {
                     msg: format!("browser.wait timed out waiting for {target}"),
-                }.fail();
+                }
+                .fail();
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 
-    async fn press_key(&self, session_id: &str, selector: &str, key: &str) -> Result<BrowserSnapshot> {
+    async fn screenshot(&self, session_id: &str, full_page: bool) -> Result<Vec<u8>> {
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: format!("browser session '{}' was not opened yet", session_id),
+                }
+                .build()
+            })?;
+        let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
+        self.wait_for_ready(&mut socket).await?;
+
+        let mut params = serde_json::json!({
+            "format": "png",
+            "fromSurface": true,
+        });
+
+        if full_page {
+            let metrics = self
+                .send_command(&mut socket, "Page.getLayoutMetrics", serde_json::json!({}))
+                .await?;
+            let content_size = &metrics["result"]["contentSize"];
+            let width = content_size["width"].as_f64().unwrap_or(1280.0);
+            let height = content_size["height"].as_f64().unwrap_or(800.0);
+            params["clip"] = serde_json::json!({
+                "x": 0,
+                "y": 0,
+                "width": width,
+                "height": height,
+                "scale": 1,
+            });
+        }
+
+        let response = self
+            .send_command(&mut socket, "Page.captureScreenshot", params)
+            .await?;
+        let b64_data = response["result"]["data"].as_str().ok_or_else(|| {
+            AgentRuntime {
+                msg: "screenshot response missing base64 data".to_string(),
+            }
+            .build()
+        })?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64_data)
+            .map_err(|e| {
+                AgentRuntime {
+                    msg: format!("failed to decode screenshot: {e}"),
+                }
+                .build()
+            })
+    }
+
+    async fn aria_snapshot(
+        &self,
+        session_id: &str,
+        options: &aria::AriaSnapshotOptions,
+    ) -> Result<(String, aria::RoleRefMap)> {
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: format!("browser session '{}' was not opened yet", session_id),
+                }
+                .build()
+            })?;
+        let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
+        self.wait_for_ready(&mut socket).await?;
+
+        // Enable accessibility domain
+        let _ = self
+            .send_command(&mut socket, "Accessibility.enable", serde_json::json!({}))
+            .await?;
+
+        // Get full accessibility tree
+        let response = self
+            .send_command(
+                &mut socket,
+                "Accessibility.getFullAXTree",
+                serde_json::json!({}),
+            )
+            .await?;
+
+        let nodes = response["result"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let (tree, refs) = aria::build_role_snapshot(&nodes, options);
+        Ok((tree, refs))
+    }
+
+    async fn press_key(
+        &self,
+        session_id: &str,
+        selector: &str,
+        key: &str,
+    ) -> Result<BrowserSnapshot> {
         validate_press_key(key)?;
         let session = self
             .sessions
@@ -543,9 +868,12 @@ impl BrowserClient {
             .await
             .get(session_id)
             .cloned()
-            .ok_or_else(|| InvalidRequest {
-                msg: format!("browser session '{session_id}' was not opened yet"),
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: format!("browser session '{session_id}' was not opened yet"),
+                }
+                .build()
+            })?;
         let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
         self.wait_for_ready(&mut socket).await?;
         let pressed = self
@@ -554,32 +882,65 @@ impl BrowserClient {
         if !pressed {
             return AgentRuntime {
                 msg: format!("browser.press could not find selector '{selector}'"),
-            }.fail();
+            }
+            .fail();
         }
         self.snapshot_session(&session).await
     }
 
+    /// Build a Host header value that Chromium DevTools will accept.
+    /// DevTools rejects Host headers that aren't IP addresses or "localhost".
+    fn devtools_host_header(&self) -> String {
+        let port = self.base_url.port().unwrap_or(9222);
+        format!("localhost:{port}")
+    }
+
     async fn create_target(&self, url: &str) -> Result<DevtoolsTarget> {
-        let mut endpoint = self.base_url.join("json/new").map_err(|err| Internal {
-            msg: format!("invalid browser endpoint: {err}"),
-        }.build())?;
+        let mut endpoint = self.base_url.join("json/new").map_err(|err| {
+            Internal {
+                msg: format!("invalid browser endpoint: {err}"),
+            }
+            .build()
+        })?;
         endpoint.set_query(Some(url));
         let response = self
             .http
             .put(endpoint)
+            .header("Host", self.devtools_host_header())
             .send()
             .await
-            .map_err(|err| AgentRuntime {
-                msg: format!("failed to create browser target: {err}"),
-            }.build())?;
+            .map_err(|err| {
+                AgentRuntime {
+                    msg: format!("failed to create browser target: {err}"),
+                }
+                .build()
+            })?;
         if !response.status().is_success() {
             return AgentRuntime {
-                msg: format!("browser target creation failed with HTTP {}", response.status()),
-            }.fail();
+                msg: format!(
+                    "browser target creation failed with HTTP {}",
+                    response.status()
+                ),
+            }
+            .fail();
         }
-        response.json::<DevtoolsTarget>().await.map_err(|err| AgentRuntime {
-            msg: format!("invalid browser target response: {err}"),
-        }.build())
+        let mut target = response.json::<DevtoolsTarget>().await.map_err(|err| {
+            AgentRuntime {
+                msg: format!("invalid browser target response: {err}"),
+            }
+            .build()
+        })?;
+
+        // Rewrite the WebSocket URL to match our configured base URL.
+        // Chromium returns ws://127.0.0.1:<internal-port>/... but when accessed
+        // via Docker networking we need to replace host:port so the gateway can reach it.
+        if let Ok(mut ws_url) = Url::parse(&target.web_socket_debugger_url) {
+            let _ = ws_url.set_host(self.base_url.host_str());
+            let _ = ws_url.set_port(self.base_url.port());
+            target.web_socket_debugger_url = ws_url.to_string();
+        }
+
+        Ok(target)
     }
 
     async fn navigate_target(&self, session: &BrowserSession, url: &str) -> Result<()> {
@@ -628,18 +989,43 @@ impl BrowserClient {
     async fn connect_page_socket(
         &self,
         ws_url: &str,
-    ) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
-        let (socket, _) = connect_async(ws_url)
-            .await
-            .map_err(|err| AgentRuntime {
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    > {
+        use tokio_tungstenite::tungstenite;
+        let request = tungstenite::http::Request::builder()
+            .uri(ws_url)
+            .header("Host", self.devtools_host_header())
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
+            .body(())
+            .map_err(|err| {
+                AgentRuntime {
+                    msg: format!("failed to build browser websocket request: {err}"),
+                }
+                .build()
+            })?;
+        let (socket, _) = connect_async(request).await.map_err(|err| {
+            AgentRuntime {
                 msg: format!("failed to connect to browser page socket: {err}"),
-            }.build())?;
+            }
+            .build()
+        })?;
         Ok(socket)
     }
 
     async fn wait_for_ready(
         &self,
-        socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     ) -> Result<()> {
         for _ in 0..20 {
             let ready_state = self
@@ -656,7 +1042,9 @@ impl BrowserClient {
 
     async fn evaluate_string(
         &self,
-        socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         expression: &str,
     ) -> Result<String> {
         Ok(self
@@ -669,7 +1057,9 @@ impl BrowserClient {
 
     async fn evaluate_bool(
         &self,
-        socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         expression: &str,
     ) -> Result<bool> {
         Ok(self
@@ -681,7 +1071,9 @@ impl BrowserClient {
 
     async fn evaluate_value(
         &self,
-        socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         expression: &str,
     ) -> Result<serde_json::Value> {
         let response = self
@@ -699,7 +1091,9 @@ impl BrowserClient {
 
     async fn send_command(
         &self,
-        socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
@@ -715,15 +1109,21 @@ impl BrowserClient {
                 .into(),
             ))
             .await
-            .map_err(|err| AgentRuntime {
-                msg: format!("failed to send browser command '{method}': {err}"),
-            }.build())?;
+            .map_err(|err| {
+                AgentRuntime {
+                    msg: format!("failed to send browser command '{method}': {err}"),
+                }
+                .build()
+            })?;
 
         let read_response = async {
             while let Some(message) = socket.next().await {
-                let message = message.map_err(|err| AgentRuntime {
-                    msg: format!("browser socket read failed: {err}"),
-                }.build())?;
+                let message = message.map_err(|err| {
+                    AgentRuntime {
+                        msg: format!("browser socket read failed: {err}"),
+                    }
+                    .build()
+                })?;
                 let Message::Text(text) = message else {
                     continue;
                 };
@@ -731,7 +1131,8 @@ impl BrowserClient {
                     serde_json::from_str(text.as_ref()).map_err(|err| {
                         AgentRuntime {
                             msg: format!("browser socket sent invalid JSON: {err}"),
-                        }.build()
+                        }
+                        .build()
                     })?;
                 if frame["id"].as_u64() != Some(id) {
                     continue;
@@ -739,20 +1140,26 @@ impl BrowserClient {
                 if let Some(message) = frame["error"]["message"].as_str() {
                     return AgentRuntime {
                         msg: format!("browser command '{method}' failed: {message}"),
-                    }.fail();
+                    }
+                    .fail();
                 }
                 return Ok(frame);
             }
             AgentRuntime {
                 msg: format!("browser socket closed while waiting for '{method}'"),
-            }.fail()
+            }
+            .fail()
         };
 
         match tokio::time::timeout(CDP_COMMAND_TIMEOUT, read_response).await {
             Ok(result) => result,
             Err(_) => AgentRuntime {
-                msg: format!("browser command '{method}' timed out after {}s", CDP_COMMAND_TIMEOUT.as_secs()),
-            }.fail(),
+                msg: format!(
+                    "browser command '{method}' timed out after {}s",
+                    CDP_COMMAND_TIMEOUT.as_secs()
+                ),
+            }
+            .fail(),
         }
     }
 }
@@ -783,6 +1190,12 @@ struct BrowserSessionsTool {
     client: Arc<BrowserClient>,
 }
 struct BrowserCloseTool {
+    client: Arc<BrowserClient>,
+}
+struct BrowserScreenshotTool {
+    client: Arc<BrowserClient>,
+}
+struct BrowserAriaSnapshotTool {
     client: Arc<BrowserClient>,
 }
 
@@ -840,11 +1253,23 @@ impl BrowserCloseTool {
     }
 }
 
+impl BrowserScreenshotTool {
+    fn new(client: Arc<BrowserClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl BrowserAriaSnapshotTool {
+    fn new(client: Arc<BrowserClient>) -> Self {
+        Self { client }
+    }
+}
+
 #[async_trait]
 impl Tool for SessionInspectTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "session.inspect".into(),
+            name: "session_inspect".into(),
             description: "Inspect one session entry and recent transcript messages.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -871,9 +1296,12 @@ impl Tool for SessionInspectTool {
             .and_then(|value| value.as_str())
             .map(SessionKey::from_raw)
             .or(ctx.session_key)
-            .ok_or_else(|| InvalidRequest {
-                msg: "session.inspect requires a session_key",
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: "session.inspect requires a session_key",
+                }
+                .build()
+            })?;
         let limit = args
             .get("limit")
             .and_then(serde_json::Value::as_u64)
@@ -881,7 +1309,10 @@ impl Tool for SessionInspectTool {
             .clamp(1, 100) as usize;
 
         let session = ctx.sessions.get(&session_key).await?;
-        let entries = ctx.sessions.get_transcript(&session_key, limit, None).await?;
+        let entries = ctx
+            .sessions
+            .get_transcript(&session_key, limit, None)
+            .await?;
 
         Ok(serde_json::json!({
             "session": session,
@@ -890,11 +1321,214 @@ impl Tool for SessionInspectTool {
     }
 }
 
+// =========================================================================
+// Canvas Tools
+// =========================================================================
+
+struct CanvasGetTool;
+struct CanvasSetTool;
+struct CanvasAppendTool;
+struct CanvasClearTool;
+
+fn canvas_service(ctx: &ToolContext) -> Result<&dyn frankclaw_core::canvas::CanvasService> {
+    ctx.canvas.as_deref().ok_or_else(|| {
+        AgentRuntime {
+            msg: "canvas service not available".to_string(),
+        }
+        .build()
+    })
+}
+
+fn canvas_id_from_args(args: &serde_json::Value, ctx: &ToolContext) -> String {
+    if let Some(id) = args
+        .get("canvas_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return id.to_string();
+    }
+    if let Some(sk) = &ctx.session_key {
+        return format!("session:{}", sk.as_str());
+    }
+    "main".to_string()
+}
+
+#[async_trait]
+impl Tool for CanvasGetTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "canvas_get".into(),
+            description:
+                "Read the current canvas document. Returns the title, body, and structured blocks."
+                    .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "canvas_id": {
+                        "type": "string",
+                        "description": "Canvas ID. Defaults to the current session canvas."
+                    }
+                }
+            }),
+            risk_level: ToolRiskLevel::ReadOnly,
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let canvas = canvas_service(&ctx)?;
+        let id = canvas_id_from_args(&args, &ctx);
+        match canvas.get(&id).await {
+            Some(doc) => Ok(serde_json::to_value(&doc).unwrap_or(serde_json::json!({}))),
+            None => Ok(
+                serde_json::json!({ "canvas_id": id, "status": "empty", "message": "No canvas document exists yet. Use canvas_set to create one." }),
+            ),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for CanvasSetTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "canvas_set".into(),
+            description: "Create or fully replace a canvas document visible in the user's Canvas tab. Use this to write structured content like reports, notes, code, checklists, or drawings (as SVG/HTML in the body). Supports markdown in the body field and typed blocks.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["title", "body"],
+                "properties": {
+                    "canvas_id": { "type": "string", "description": "Canvas ID. Defaults to the current session canvas." },
+                    "title": { "type": "string", "description": "Document title." },
+                    "body": { "type": "string", "description": "Main document body (supports markdown)." },
+                    "blocks": {
+                        "type": "array",
+                        "description": "Optional structured blocks.",
+                        "items": {
+                            "type": "object",
+                            "required": ["kind", "text"],
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["markdown", "code", "note", "checklist", "status", "metric", "action"] },
+                                "text": { "type": "string" },
+                                "meta": { "type": "object" }
+                            }
+                        }
+                    }
+                }
+            }),
+            risk_level: ToolRiskLevel::ReadOnly,
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let canvas = canvas_service(&ctx)?;
+        let id = canvas_id_from_args(&args, &ctx);
+        let title = args
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let body = args
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let blocks: Vec<frankclaw_core::canvas::CanvasBlock> = args
+            .get("blocks")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let doc = frankclaw_core::canvas::CanvasDocument {
+            id,
+            title,
+            body,
+            session_key: ctx.session_key.as_ref().map(|sk| sk.as_str().to_string()),
+            blocks,
+            revision: 0,
+            updated_at: chrono::Utc::now(),
+        };
+        let result = canvas.set(doc).await?;
+        Ok(serde_json::to_value(&result).unwrap_or(serde_json::json!({"status": "ok"})))
+    }
+}
+
+#[async_trait]
+impl Tool for CanvasAppendTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "canvas_append".into(),
+            description: "Append blocks to an existing canvas or update its title/body without replacing the whole document.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "canvas_id": { "type": "string", "description": "Canvas ID. Defaults to the current session canvas." },
+                    "title": { "type": "string", "description": "New title (replaces existing)." },
+                    "body": { "type": "string", "description": "New body (replaces existing)." },
+                    "blocks": {
+                        "type": "array",
+                        "description": "Blocks to append.",
+                        "items": {
+                            "type": "object",
+                            "required": ["kind", "text"],
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["markdown", "code", "note", "checklist", "status", "metric", "action"] },
+                                "text": { "type": "string" },
+                                "meta": { "type": "object" }
+                            }
+                        }
+                    }
+                }
+            }),
+            risk_level: ToolRiskLevel::ReadOnly,
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let canvas = canvas_service(&ctx)?;
+        let id = canvas_id_from_args(&args, &ctx);
+        let title = args.get("title").and_then(|v| v.as_str()).map(String::from);
+        let body = args.get("body").and_then(|v| v.as_str()).map(String::from);
+        let blocks: Vec<frankclaw_core::canvas::CanvasBlock> = args
+            .get("blocks")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        if title.is_none() && body.is_none() && blocks.is_empty() {
+            return Err(InvalidRequest {
+                msg: "canvas_append requires at least one of: title, body, or blocks".to_string(),
+            }
+            .build());
+        }
+        let result = canvas.patch(&id, title, body, blocks).await?;
+        Ok(serde_json::to_value(&result).unwrap_or(serde_json::json!({"status": "ok"})))
+    }
+}
+
+#[async_trait]
+impl Tool for CanvasClearTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "canvas_clear".into(),
+            description: "Delete a canvas document, removing all its content.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "canvas_id": { "type": "string", "description": "Canvas ID. Defaults to the current session canvas." }
+                }
+            }),
+            risk_level: ToolRiskLevel::ReadOnly,
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let canvas = canvas_service(&ctx)?;
+        let id = canvas_id_from_args(&args, &ctx);
+        canvas.clear(&id).await;
+        Ok(serde_json::json!({ "canvas_id": id, "status": "cleared" }))
+    }
+}
+
 #[async_trait]
 impl Tool for BrowserOpenTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "browser.open".into(),
+            name: "browser_open".into(),
             description: "Create or reuse a Chromium-backed browser session and navigate it to a URL over the DevTools protocol.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -914,12 +1548,16 @@ impl Tool for BrowserOpenTool {
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| InvalidRequest {
-                msg: "browser.open requires a non-empty url",
-            }.build())?;
-        let session_id = self
-            .client
-            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: "browser.open requires a non-empty url",
+                }
+                .build()
+            })?;
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
         let snapshot = self.client.open(session_id, url).await?;
         Ok(snapshot_result(snapshot, false, 800))
     }
@@ -929,8 +1567,9 @@ impl Tool for BrowserOpenTool {
 impl Tool for BrowserExtractTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "browser.extract".into(),
-            description: "Extract visible text from an existing Chromium-backed browser session.".into(),
+            name: "browser_extract".into(),
+            description: "Extract visible text from an existing Chromium-backed browser session."
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -943,9 +1582,10 @@ impl Tool for BrowserExtractTool {
     }
 
     async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
-        let session_id = self
-            .client
-            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
         let max_chars = args
             .get("max_chars")
             .and_then(serde_json::Value::as_u64)
@@ -960,7 +1600,7 @@ impl Tool for BrowserExtractTool {
 impl Tool for BrowserSnapshotTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "browser.snapshot".into(),
+            name: "browser_snapshot".into(),
             description: "Return stored HTML plus visible text from an existing Chromium-backed browser session.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -974,9 +1614,10 @@ impl Tool for BrowserSnapshotTool {
     }
 
     async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
-        let session_id = self
-            .client
-            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
         let max_chars = args
             .get("max_chars")
             .and_then(serde_json::Value::as_u64)
@@ -991,7 +1632,7 @@ impl Tool for BrowserSnapshotTool {
 impl Tool for BrowserClickTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "browser.click".into(),
+            name: "browser_click".into(),
             description: "Click a DOM element by CSS selector in an existing Chromium-backed browser session.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1006,17 +1647,21 @@ impl Tool for BrowserClickTool {
     }
 
     async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
-        let session_id = self
-            .client
-            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
         let selector = args
             .get("selector")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| InvalidRequest {
-                msg: "browser.click requires a non-empty selector",
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: "browser.click requires a non-empty selector",
+                }
+                .build()
+            })?;
         let snapshot = self.client.click(&session_id, selector).await?;
         Ok(snapshot_result(snapshot, false, 1000))
     }
@@ -1026,7 +1671,7 @@ impl Tool for BrowserClickTool {
 impl Tool for BrowserTypeTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "browser.type".into(),
+            name: "browser_type".into(),
             description: "Set an input or textarea value by CSS selector in an existing Chromium-backed browser session.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1042,23 +1687,30 @@ impl Tool for BrowserTypeTool {
     }
 
     async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
-        let session_id = self
-            .client
-            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
         let selector = args
             .get("selector")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| InvalidRequest {
-                msg: "browser.type requires a non-empty selector",
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: "browser.type requires a non-empty selector",
+                }
+                .build()
+            })?;
         let text = args
             .get("text")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| InvalidRequest {
-                msg: "browser.type requires text",
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: "browser.type requires text",
+                }
+                .build()
+            })?;
         let snapshot = self.client.type_text(&session_id, selector, text).await?;
         Ok(snapshot_result(snapshot, false, 1000))
     }
@@ -1068,7 +1720,7 @@ impl Tool for BrowserTypeTool {
 impl Tool for BrowserWaitTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "browser.wait".into(),
+            name: "browser_wait".into(),
             description: "Wait for a CSS selector or visible text to appear in an existing Chromium-backed browser session.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1084,9 +1736,10 @@ impl Tool for BrowserWaitTool {
     }
 
     async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
-        let session_id = self
-            .client
-            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
         let selector = args
             .get("selector")
             .and_then(|value| value.as_str())
@@ -1113,7 +1766,7 @@ impl Tool for BrowserWaitTool {
 impl Tool for BrowserPressTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "browser.press".into(),
+            name: "browser_press".into(),
             description: "Send one allowed keyboard key to a focused DOM element by CSS selector in an existing Chromium-backed browser session.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1129,25 +1782,32 @@ impl Tool for BrowserPressTool {
     }
 
     async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
-        let session_id = self
-            .client
-            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
         let selector = args
             .get("selector")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| InvalidRequest {
-                msg: "browser.press requires a non-empty selector",
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: "browser.press requires a non-empty selector",
+                }
+                .build()
+            })?;
         let key = args
             .get("key")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| InvalidRequest {
-                msg: "browser.press requires an allowed key",
-            }.build())?;
+            .ok_or_else(|| {
+                InvalidRequest {
+                    msg: "browser.press requires an allowed key",
+                }
+                .build()
+            })?;
         let snapshot = self.client.press_key(&session_id, selector, key).await?;
         Ok(snapshot_result(snapshot, false, 1000))
     }
@@ -1157,8 +1817,9 @@ impl Tool for BrowserPressTool {
 impl Tool for BrowserSessionsTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "browser.sessions".into(),
-            description: "List active Chromium-backed browser sessions tracked by FrankClaw.".into(),
+            name: "browser_sessions".into(),
+            description: "List active Chromium-backed browser sessions tracked by FrankClaw."
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {}
@@ -1167,19 +1828,25 @@ impl Tool for BrowserSessionsTool {
         }
     }
 
-    async fn invoke(&self, _args: serde_json::Value, _ctx: ToolContext) -> Result<serde_json::Value> {
+    async fn invoke(
+        &self,
+        _args: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<serde_json::Value> {
         let sessions = self
             .client
             .list_sessions()
             .await
             .into_iter()
-            .map(|session| serde_json::json!({
-                "session_id": session.session_id,
-                "target_id": session.target_id,
-                "url": session.current_url,
-                "title": session.title,
-                "last_updated_at": session.last_updated_at,
-            }))
+            .map(|session| {
+                serde_json::json!({
+                    "session_id": session.session_id,
+                    "target_id": session.target_id,
+                    "url": session.current_url,
+                    "title": session.title,
+                    "last_updated_at": session.last_updated_at,
+                })
+            })
             .collect::<Vec<_>>();
         Ok(serde_json::json!({ "sessions": sessions }))
     }
@@ -1189,7 +1856,7 @@ impl Tool for BrowserSessionsTool {
 impl Tool for BrowserCloseTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "browser.close".into(),
+            name: "browser_close".into(),
             description: "Close a Chromium-backed browser session and its DevTools target.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1202,9 +1869,10 @@ impl Tool for BrowserCloseTool {
     }
 
     async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
-        let session_id = self
-            .client
-            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
         self.client.close(&session_id).await?;
         Ok(serde_json::json!({
             "session_id": session_id,
@@ -1213,8 +1881,100 @@ impl Tool for BrowserCloseTool {
     }
 }
 
-#[expect(clippy::needless_pass_by_value, reason = "snapshot is consumed to build the JSON result")]
-fn snapshot_result(snapshot: BrowserSnapshot, include_html: bool, max_chars: usize) -> serde_json::Value {
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "snapshot is consumed to build the JSON result"
+)]
+#[async_trait]
+impl Tool for BrowserScreenshotTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "browser_screenshot".into(),
+            description: "Capture a PNG screenshot of an existing Chromium-backed browser session. Returns base64-encoded PNG data.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Optional browser session identifier. Defaults to the current chat session." },
+                    "full_page": { "type": "boolean", "description": "Capture entire page content (not just viewport). Default: false." }
+                }
+            }),
+            risk_level: ToolRiskLevel::ReadOnly,
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
+        let full_page = args
+            .get("full_page")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let png_bytes = self.client.screenshot(&session_id, full_page).await?;
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        Ok(serde_json::json!({
+            "session_id": session_id,
+            "format": "png",
+            "size_bytes": png_bytes.len(),
+            "_image_content": [{
+                "mime_type": "image/png",
+                "data": b64,
+            }],
+        }))
+    }
+}
+
+#[async_trait]
+impl Tool for BrowserAriaSnapshotTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "browser_aria_snapshot".into(),
+            description: "Get an accessibility (ARIA) tree snapshot of an existing Chromium-backed browser session. Returns an indented text representation of interactive and content elements with [ref=eN] annotations for element targeting.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Optional browser session identifier. Defaults to the current chat session." },
+                    "interactive_only": { "type": "boolean", "description": "Only include interactive elements (buttons, links, inputs). Default: false." },
+                    "max_depth": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum tree depth to traverse. Default: 20." }
+                }
+            }),
+            risk_level: ToolRiskLevel::ReadOnly,
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let session_id = self.client.resolve_session_id(
+            args.get("session_id").and_then(|value| value.as_str()),
+            &ctx,
+        )?;
+        let options = aria::AriaSnapshotOptions {
+            interactive_only: args
+                .get("interactive_only")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            max_depth: args
+                .get("max_depth")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(20)
+                .clamp(1, 50) as usize,
+        };
+        let (tree, refs) = self.client.aria_snapshot(&session_id, &options).await?;
+        let ref_count = refs.len();
+        Ok(serde_json::json!({
+            "session_id": session_id,
+            "tree": tree,
+            "ref_count": ref_count,
+        }))
+    }
+}
+
+fn snapshot_result(
+    snapshot: BrowserSnapshot,
+    include_html: bool,
+    max_chars: usize,
+) -> serde_json::Value {
     let mut value = serde_json::json!({
         "session_id": snapshot.session_id,
         "target_id": snapshot.target_id,
@@ -1245,8 +2005,14 @@ fn type_expression(selector: &str, text: &str) -> String {
 }
 
 fn wait_expression(selector: Option<&str>, text: Option<&str>) -> String {
-    let selector = selector.map_or_else(|| "null".into(), |value| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()));
-    let text = text.map_or_else(|| "null".into(), |value| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()));
+    let selector = selector.map_or_else(
+        || "null".into(),
+        |value| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()),
+    );
+    let text = text.map_or_else(
+        || "null".into(),
+        |value| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()),
+    );
     format!(
         "(function() {{ const selector = {selector}; const text = {text}; const hasSelector = !selector || !!document.querySelector(selector); const bodyText = document.body ? document.body.innerText : ''; const hasText = !text || bodyText.includes(text); return hasSelector && hasText; }})()"
     )
@@ -1267,37 +2033,49 @@ fn validate_press_key(key: &str) -> Result<()> {
             msg: format!(
                 "browser.press only allows Enter, Tab, Escape, ArrowDown, and ArrowUp; got '{key}'"
             ),
-        }.fail(),
+        }
+        .fail(),
     }
 }
 
 /// Validate that a browser navigation URL is not targeting private/internal IPs.
 /// Uses the same SSRF blocklist as media fetches.
 async fn validate_navigation_url(raw_url: &str) -> Result<()> {
-    let parsed = Url::parse(raw_url).map_err(|err| InvalidRequest {
-        msg: format!("invalid browser navigation URL: {err}"),
-    }.build())?;
+    let parsed = Url::parse(raw_url).map_err(|err| {
+        InvalidRequest {
+            msg: format!("invalid browser navigation URL: {err}"),
+        }
+        .build()
+    })?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return InvalidRequest {
             msg: format!("browser navigation only allows http/https URLs, got '{scheme}'"),
-        }.fail();
+        }
+        .fail();
     }
-    let host = parsed.host_str().ok_or_else(|| InvalidRequest {
-        msg: "browser navigation URL has no host",
-    }.build())?;
+    let host = parsed.host_str().ok_or_else(|| {
+        InvalidRequest {
+            msg: "browser navigation URL has no host",
+        }
+        .build()
+    })?;
     let port = parsed.port_or_known_default().unwrap_or(80);
     let lookup = format!("{host}:{port}");
     let addrs: Vec<_> = lookup_host(&lookup)
         .await
-        .map_err(|err| AgentRuntime {
-            msg: format!("DNS lookup failed for browser navigation URL '{host}': {err}"),
-        }.build())?
+        .map_err(|err| {
+            AgentRuntime {
+                msg: format!("DNS lookup failed for browser navigation URL '{host}': {err}"),
+            }
+            .build()
+        })?
         .collect();
     if addrs.is_empty() {
         return AgentRuntime {
             msg: format!("DNS lookup returned no addresses for '{host}'"),
-        }.fail();
+        }
+        .fail();
     }
     for addr in &addrs {
         if !is_safe_ip(&addr.ip()) {
@@ -1306,7 +2084,8 @@ async fn validate_navigation_url(raw_url: &str) -> Result<()> {
                     "browser navigation blocked: '{host}' resolves to private/internal IP {}",
                     addr.ip()
                 ),
-            }.fail();
+            }
+            .fail();
         }
     }
     Ok(())
@@ -1331,7 +2110,10 @@ mod tests {
     use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
     use axum::extract::{RawQuery, State};
     use axum::response::IntoResponse;
-    use axum::{Json, Router, routing::{get, put}};
+    use axum::{
+        Json, Router,
+        routing::{get, put},
+    };
     use chrono::Utc;
     use tokio::net::TcpListener;
 
@@ -1459,21 +2241,35 @@ mod tests {
         let registry = ToolRegistry::with_builtins();
         let result = registry
             .invoke_allowed(
-                &["session.inspect".into()],
-                "session.inspect",
+                &["session_inspect".into()],
+                "session_inspect",
                 serde_json::json!({ "limit": 5 }),
                 ToolContext {
                     agent_id: AgentId::default_agent(),
                     session_key: Some(key.clone()),
                     sessions: store as Arc<dyn SessionStore>,
+                    canvas: None,
+                    fetcher: None,
+                    channels: None,
+                    cron: None,
+                    memory_search: None,
+                    audio_transcriber: None,
+                    config: None,
+                    workspace: None,
                 },
             )
             .await
             .expect("tool should succeed");
 
-        assert_eq!(result.name, "session.inspect");
-        assert_eq!(result.output["session"]["key"], serde_json::json!(key.as_str()));
-        assert_eq!(result.output["entries"][0]["content"], serde_json::json!("hello"));
+        assert_eq!(result.name, "session_inspect");
+        assert_eq!(
+            result.output["session"]["key"],
+            serde_json::json!(key.as_str())
+        );
+        assert_eq!(
+            result.output["entries"][0]["content"],
+            serde_json::json!("hello")
+        );
     }
 
     #[tokio::test]
@@ -1482,12 +2278,20 @@ mod tests {
         let err = registry
             .invoke_allowed(
                 &[],
-                "session.inspect",
+                "session_inspect",
                 serde_json::json!({}),
                 ToolContext {
                     agent_id: AgentId::default_agent(),
                     session_key: None,
                     sessions: Arc::new(MockSessionStore::default()),
+                    canvas: None,
+                    fetcher: None,
+                    channels: None,
+                    cron: None,
+                    memory_search: None,
+                    audio_transcriber: None,
+                    config: None,
+                    workspace: None,
                 },
             )
             .await
@@ -1501,12 +2305,16 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have local addr");
+        let addr = listener
+            .local_addr()
+            .expect("listener should have local addr");
         let mock_state = MockBrowserState {
             page_url: Arc::new(Mutex::new("about:blank".into())),
             title: Arc::new(Mutex::new("Example page".into())),
             text: Arc::new(Mutex::new("Hello from Chromium".into())),
-            html: Arc::new(Mutex::new("<html><body><h1>Hello from Chromium</h1></body></html>".into())),
+            html: Arc::new(Mutex::new(
+                "<html><body><h1>Hello from Chromium</h1></body></html>".into(),
+            )),
             websocket_url: format!("ws://127.0.0.1:{}/devtools/page/mock-page", addr.port()),
         };
         let app = Router::new()
@@ -1515,12 +2323,13 @@ mod tests {
             .route("/devtools/page/mock-page", get(mock_page_ws))
             .with_state(mock_state.clone());
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("mock server should run");
+            axum::serve(listener, app)
+                .await
+                .expect("mock server should run");
         });
 
         let client = Arc::new(
-            BrowserClient::new(&format!("http://{addr}/"))
-                .expect("browser client should build"),
+            BrowserClient::new(&format!("http://{addr}/")).expect("browser client should build"),
         );
         let mut registry = ToolRegistry {
             tools: HashMap::new(),
@@ -1533,13 +2342,21 @@ mod tests {
             agent_id: AgentId::default_agent(),
             session_key: Some(SessionKey::from_raw("default:web:browser-policy")),
             sessions: Arc::new(MockSessionStore::default()),
+            canvas: None,
+            fetcher: None,
+            channels: None,
+            cron: None,
+            memory_search: None,
+            audio_transcriber: None,
+            config: None,
+            workspace: None,
         };
-        let allowed = vec!["browser.open".into(), "browser.click".into()];
+        let allowed = vec!["browser_open".into(), "browser_click".into()];
 
         registry
             .invoke_allowed(
                 &allowed,
-                "browser.open",
+                "browser_open",
                 serde_json::json!({ "url": "https://example.com/" }),
                 ctx.clone(),
             )
@@ -1549,15 +2366,13 @@ mod tests {
         let err = registry
             .invoke_allowed(
                 &allowed,
-                "browser.click",
+                "browser_click",
                 serde_json::json!({ "selector": "#submit" }),
                 ctx,
             )
             .await
             .expect_err("browser.click should require explicit approval");
-        assert!(err
-            .to_string()
-            .contains("requires mutating approval"));
+        assert!(err.to_string().contains("requires mutating approval"));
     }
 
     #[test]
@@ -1588,23 +2403,23 @@ mod tests {
     fn policy_approved_tools_override_level() {
         let policy = ToolPolicy {
             approval_level: ApprovalLevel::ReadOnly,
-            approved_tools: std::collections::HashSet::from(["browser.click".into()]),
+            approved_tools: std::collections::HashSet::from(["browser_click".into()]),
         };
-        assert!(policy.is_approved("browser.click", ToolRiskLevel::Mutating));
-        assert!(!policy.is_approved("browser.type", ToolRiskLevel::Mutating));
-        assert!(policy.is_approved("browser.extract", ToolRiskLevel::ReadOnly));
+        assert!(policy.is_approved("browser_click", ToolRiskLevel::Mutating));
+        assert!(!policy.is_approved("browser_type", ToolRiskLevel::Mutating));
+        assert!(policy.is_approved("browser_extract", ToolRiskLevel::ReadOnly));
     }
 
     #[test]
     fn tool_risk_level_classification() {
         use frankclaw_core::model::ToolRiskLevel;
-        assert_eq!(tool_risk_level("browser.click"), ToolRiskLevel::Mutating);
-        assert_eq!(tool_risk_level("browser.type"), ToolRiskLevel::Mutating);
-        assert_eq!(tool_risk_level("browser.press"), ToolRiskLevel::Mutating);
+        assert_eq!(tool_risk_level("browser_click"), ToolRiskLevel::Mutating);
+        assert_eq!(tool_risk_level("browser_type"), ToolRiskLevel::Mutating);
+        assert_eq!(tool_risk_level("browser_press"), ToolRiskLevel::Mutating);
         assert_eq!(tool_risk_level("bash"), ToolRiskLevel::Mutating);
-        assert_eq!(tool_risk_level("browser.open"), ToolRiskLevel::ReadOnly);
-        assert_eq!(tool_risk_level("browser.extract"), ToolRiskLevel::ReadOnly);
-        assert_eq!(tool_risk_level("session.inspect"), ToolRiskLevel::ReadOnly);
+        assert_eq!(tool_risk_level("browser_open"), ToolRiskLevel::ReadOnly);
+        assert_eq!(tool_risk_level("browser_extract"), ToolRiskLevel::ReadOnly);
+        assert_eq!(tool_risk_level("session_inspect"), ToolRiskLevel::ReadOnly);
     }
 
     #[tokio::test]
@@ -1612,12 +2427,16 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have local addr");
+        let addr = listener
+            .local_addr()
+            .expect("listener should have local addr");
         let mock_state = MockBrowserState {
             page_url: Arc::new(Mutex::new("about:blank".into())),
             title: Arc::new(Mutex::new("Example page".into())),
             text: Arc::new(Mutex::new("Hello from Chromium".into())),
-            html: Arc::new(Mutex::new("<html><body><h1>Hello from Chromium</h1></body></html>".into())),
+            html: Arc::new(Mutex::new(
+                "<html><body><h1>Hello from Chromium</h1></body></html>".into(),
+            )),
             websocket_url: format!("ws://127.0.0.1:{}/devtools/page/mock-page", addr.port()),
         };
         let app = Router::new()
@@ -1626,12 +2445,13 @@ mod tests {
             .route("/devtools/page/mock-page", get(mock_page_ws))
             .with_state(mock_state.clone());
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("mock server should run");
+            axum::serve(listener, app)
+                .await
+                .expect("mock server should run");
         });
 
         let client = Arc::new(
-            BrowserClient::new(&format!("http://{addr}/"))
-                .expect("browser client should build"),
+            BrowserClient::new(&format!("http://{addr}/")).expect("browser client should build"),
         );
         let mut registry = ToolRegistry {
             tools: HashMap::new(),
@@ -1654,23 +2474,31 @@ mod tests {
             agent_id: AgentId::default_agent(),
             session_key: Some(SessionKey::from_raw("default:web:browser")),
             sessions: Arc::new(MockSessionStore::default()),
+            canvas: None,
+            fetcher: None,
+            channels: None,
+            cron: None,
+            memory_search: None,
+            audio_transcriber: None,
+            config: None,
+            workspace: None,
         };
         let allowed = vec![
-            "browser.open".into(),
-            "browser.extract".into(),
-            "browser.snapshot".into(),
-            "browser.click".into(),
-            "browser.type".into(),
-            "browser.wait".into(),
-            "browser.press".into(),
-            "browser.sessions".into(),
-            "browser.close".into(),
+            "browser_open".into(),
+            "browser_extract".into(),
+            "browser_snapshot".into(),
+            "browser_click".into(),
+            "browser_type".into(),
+            "browser_wait".into(),
+            "browser_press".into(),
+            "browser_sessions".into(),
+            "browser_close".into(),
         ];
 
         let opened = registry
             .invoke_allowed(
                 &allowed,
-                "browser.open",
+                "browser_open",
                 serde_json::json!({ "url": "https://example.com/" }),
                 ctx.clone(),
             )
@@ -1681,37 +2509,50 @@ mod tests {
         let extracted = registry
             .invoke_allowed(
                 &allowed,
-                "browser.extract",
+                "browser_extract",
                 serde_json::json!({ "max_chars": 32 }),
                 ctx.clone(),
             )
             .await
             .expect("browser.extract should succeed");
-        assert_eq!(extracted.output["text"], serde_json::json!("Hello from Chromium"));
+        assert_eq!(
+            extracted.output["text"],
+            serde_json::json!("Hello from Chromium")
+        );
 
         let snapshot = registry
             .invoke_allowed(
                 &allowed,
-                "browser.snapshot",
+                "browser_snapshot",
                 serde_json::json!({ "max_chars": 128 }),
                 ctx,
             )
             .await
             .expect("browser.snapshot should succeed");
-        assert!(snapshot.output["html"]
-            .as_str()
-            .expect("html should exist")
-            .contains("<h1>Hello from Chromium</h1>"));
+        assert!(
+            snapshot.output["html"]
+                .as_str()
+                .expect("html should exist")
+                .contains("<h1>Hello from Chromium</h1>")
+        );
 
         let clicked = registry
             .invoke_allowed(
                 &allowed,
-                "browser.click",
+                "browser_click",
                 serde_json::json!({ "selector": "#submit" }),
                 ToolContext {
                     agent_id: AgentId::default_agent(),
                     session_key: Some(SessionKey::from_raw("default:web:browser")),
                     sessions: Arc::new(MockSessionStore::default()),
+                    canvas: None,
+                    fetcher: None,
+                    channels: None,
+                    cron: None,
+                    memory_search: None,
+                    audio_transcriber: None,
+                    config: None,
+                    workspace: None,
                 },
             )
             .await
@@ -1721,12 +2562,20 @@ mod tests {
         let typed = registry
             .invoke_allowed(
                 &allowed,
-                "browser.type",
+                "browser_type",
                 serde_json::json!({ "selector": "#query", "text": "frankclaw" }),
                 ToolContext {
                     agent_id: AgentId::default_agent(),
                     session_key: Some(SessionKey::from_raw("default:web:browser")),
                     sessions: Arc::new(MockSessionStore::default()),
+                    canvas: None,
+                    fetcher: None,
+                    channels: None,
+                    cron: None,
+                    memory_search: None,
+                    audio_transcriber: None,
+                    config: None,
+                    workspace: None,
                 },
             )
             .await
@@ -1741,12 +2590,20 @@ mod tests {
         let waited = registry
             .invoke_allowed(
                 &allowed,
-                "browser.wait",
+                "browser_wait",
                 serde_json::json!({ "text": "Typed frankclaw", "timeout_ms": 250 }),
                 ToolContext {
                     agent_id: AgentId::default_agent(),
                     session_key: Some(SessionKey::from_raw("default:web:browser")),
                     sessions: Arc::new(MockSessionStore::default()),
+                    canvas: None,
+                    fetcher: None,
+                    channels: None,
+                    cron: None,
+                    memory_search: None,
+                    audio_transcriber: None,
+                    config: None,
+                    workspace: None,
                 },
             )
             .await
@@ -1756,12 +2613,20 @@ mod tests {
         let pressed = registry
             .invoke_allowed(
                 &allowed,
-                "browser.press",
+                "browser_press",
                 serde_json::json!({ "selector": "#query", "key": "Enter" }),
                 ToolContext {
                     agent_id: AgentId::default_agent(),
                     session_key: Some(SessionKey::from_raw("default:web:browser")),
                     sessions: Arc::new(MockSessionStore::default()),
+                    canvas: None,
+                    fetcher: None,
+                    channels: None,
+                    cron: None,
+                    memory_search: None,
+                    audio_transcriber: None,
+                    config: None,
+                    workspace: None,
                 },
             )
             .await
@@ -1776,17 +2641,28 @@ mod tests {
         let sessions = registry
             .invoke_allowed(
                 &allowed,
-                "browser.sessions",
+                "browser_sessions",
                 serde_json::json!({}),
                 ToolContext {
                     agent_id: AgentId::default_agent(),
                     session_key: Some(SessionKey::from_raw("default:web:browser")),
                     sessions: Arc::new(MockSessionStore::default()),
+                    canvas: None,
+                    fetcher: None,
+                    channels: None,
+                    cron: None,
+                    memory_search: None,
+                    audio_transcriber: None,
+                    config: None,
+                    workspace: None,
                 },
             )
             .await
             .expect("browser.sessions should succeed");
-        assert_eq!(sessions.output["sessions"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            sessions.output["sessions"].as_array().map(Vec::len),
+            Some(1)
+        );
         assert_eq!(
             sessions.output["sessions"][0]["session_id"],
             serde_json::json!("session:default:web:browser")
@@ -1795,12 +2671,20 @@ mod tests {
         let closed = registry
             .invoke_allowed(
                 &allowed,
-                "browser.close",
+                "browser_close",
                 serde_json::json!({}),
                 ToolContext {
                     agent_id: AgentId::default_agent(),
                     session_key: Some(SessionKey::from_raw("default:web:browser")),
                     sessions: Arc::new(MockSessionStore::default()),
+                    canvas: None,
+                    fetcher: None,
+                    channels: None,
+                    cron: None,
+                    memory_search: None,
+                    audio_transcriber: None,
+                    config: None,
+                    workspace: None,
                 },
             )
             .await
@@ -1810,18 +2694,28 @@ mod tests {
         let sessions_after_close = registry
             .invoke_allowed(
                 &allowed,
-                "browser.sessions",
+                "browser_sessions",
                 serde_json::json!({}),
                 ToolContext {
                     agent_id: AgentId::default_agent(),
                     session_key: Some(SessionKey::from_raw("default:web:browser")),
                     sessions: Arc::new(MockSessionStore::default()),
+                    canvas: None,
+                    fetcher: None,
+                    channels: None,
+                    cron: None,
+                    memory_search: None,
+                    audio_transcriber: None,
+                    config: None,
+                    workspace: None,
                 },
             )
             .await
             .expect("browser.sessions should still succeed");
         assert_eq!(
-            sessions_after_close.output["sessions"].as_array().map(Vec::len),
+            sessions_after_close.output["sessions"]
+                .as_array()
+                .map(Vec::len),
             Some(0)
         );
     }
@@ -1832,7 +2726,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have local addr");
+        let addr = listener
+            .local_addr()
+            .expect("listener should have local addr");
         let app = Router::new().route(
             "/",
             get(|| async {
@@ -1875,7 +2771,9 @@ mod tests {
             }),
         );
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("real browser test server should run");
+            axum::serve(listener, app)
+                .await
+                .expect("real browser test server should run");
         });
 
         let registry = ToolRegistry::with_policy(ToolPolicy {
@@ -1886,23 +2784,31 @@ mod tests {
             agent_id: AgentId::default_agent(),
             session_key: Some(SessionKey::from_raw("default:web:real-browser")),
             sessions: Arc::new(MockSessionStore::default()),
+            canvas: None,
+            fetcher: None,
+            channels: None,
+            cron: None,
+            memory_search: None,
+            audio_transcriber: None,
+            config: None,
+            workspace: None,
         };
         let allowed = vec![
-            "browser.open".into(),
-            "browser.extract".into(),
-            "browser.snapshot".into(),
-            "browser.click".into(),
-            "browser.type".into(),
-            "browser.wait".into(),
-            "browser.press".into(),
-            "browser.sessions".into(),
-            "browser.close".into(),
+            "browser_open".into(),
+            "browser_extract".into(),
+            "browser_snapshot".into(),
+            "browser_click".into(),
+            "browser_type".into(),
+            "browser_wait".into(),
+            "browser_press".into(),
+            "browser_sessions".into(),
+            "browser_close".into(),
         ];
 
         let opened = registry
             .invoke_allowed(
                 &allowed,
-                "browser.open",
+                "browser_open",
                 serde_json::json!({ "url": format!("http://{addr}/") }),
                 ctx.clone(),
             )
@@ -1913,7 +2819,7 @@ mod tests {
         let waited = registry
             .invoke_allowed(
                 &allowed,
-                "browser.wait",
+                "browser_wait",
                 serde_json::json!({ "selector": "body[data-ready='1']", "text": "Loaded", "timeout_ms": 2_000 }),
                 ctx.clone(),
             )
@@ -1929,7 +2835,7 @@ mod tests {
         let typed = registry
             .invoke_allowed(
                 &allowed,
-                "browser.type",
+                "browser_type",
                 serde_json::json!({ "selector": "#query", "text": "frankclaw" }),
                 ctx.clone(),
             )
@@ -1946,7 +2852,7 @@ mod tests {
         let pressed = registry
             .invoke_allowed(
                 &allowed,
-                "browser.press",
+                "browser_press",
                 serde_json::json!({ "selector": "#query", "key": "Enter" }),
                 ctx.clone(),
             )
@@ -1963,7 +2869,7 @@ mod tests {
         let clicked = registry
             .invoke_allowed(
                 &allowed,
-                "browser.click",
+                "browser_click",
                 serde_json::json!({ "selector": "#submit" }),
                 ctx.clone(),
             )
@@ -1980,7 +2886,7 @@ mod tests {
         let snapshot = registry
             .invoke_allowed(
                 &allowed,
-                "browser.snapshot",
+                "browser_snapshot",
                 serde_json::json!({ "max_chars": 4096 }),
                 ctx.clone(),
             )
@@ -1996,18 +2902,21 @@ mod tests {
         let sessions = registry
             .invoke_allowed(
                 &allowed,
-                "browser.sessions",
+                "browser_sessions",
                 serde_json::json!({}),
                 ctx.clone(),
             )
             .await
             .expect("browser.sessions should succeed against real chromium");
-        assert_eq!(sessions.output["sessions"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            sessions.output["sessions"].as_array().map(Vec::len),
+            Some(1)
+        );
 
         let closed = registry
             .invoke_allowed(
                 &allowed,
-                "browser.close",
+                "browser_close",
                 serde_json::json!({}),
                 ctx.clone(),
             )
@@ -2016,16 +2925,13 @@ mod tests {
         assert_eq!(closed.output["closed"], serde_json::json!(true));
 
         let sessions_after_close = registry
-            .invoke_allowed(
-                &allowed,
-                "browser.sessions",
-                serde_json::json!({}),
-                ctx,
-            )
+            .invoke_allowed(&allowed, "browser_sessions", serde_json::json!({}), ctx)
             .await
             .expect("browser.sessions should still succeed against real chromium");
         assert_eq!(
-            sessions_after_close.output["sessions"].as_array().map(Vec::len),
+            sessions_after_close.output["sessions"]
+                .as_array()
+                .map(Vec::len),
             Some(0)
         );
     }
@@ -2050,7 +2956,9 @@ mod tests {
         ws.on_upgrade(move |socket| handle_mock_page_ws(socket, state))
     }
 
-    async fn mock_close_target(axum::extract::Path(target_id): axum::extract::Path<String>) -> impl IntoResponse {
+    async fn mock_close_target(
+        axum::extract::Path(target_id): axum::extract::Path<String>,
+    ) -> impl IntoResponse {
         (
             axum::http::StatusCode::OK,
             format!("Target is closing: {target_id}"),
@@ -2076,10 +2984,18 @@ mod tests {
                     let expression = frame["params"]["expression"].as_str().unwrap_or_default();
                     let value = match expression {
                         "document.readyState" => serde_json::json!("complete"),
-                        "document.title || ''" => serde_json::json!(state.title.lock().await.clone()),
-                        "document.body ? document.body.innerText : ''" => serde_json::json!(state.text.lock().await.clone()),
-                        "document.documentElement ? document.documentElement.outerHTML : ''" => serde_json::json!(state.html.lock().await.clone()),
-                        "window.location.href" => serde_json::json!(state.page_url.lock().await.clone()),
+                        "document.title || ''" => {
+                            serde_json::json!(state.title.lock().await.clone())
+                        }
+                        "document.body ? document.body.innerText : ''" => {
+                            serde_json::json!(state.text.lock().await.clone())
+                        }
+                        "document.documentElement ? document.documentElement.outerHTML : ''" => {
+                            serde_json::json!(state.html.lock().await.clone())
+                        }
+                        "window.location.href" => {
+                            serde_json::json!(state.page_url.lock().await.clone())
+                        }
                         expression if expression.contains(".click();") => {
                             *state.title.lock().await = "Clicked".into();
                             *state.text.lock().await = "Clicked submit".into();
@@ -2107,7 +3023,11 @@ mod tests {
                         }
                         _ => serde_json::json!(""),
                     };
-                    let value_type = if value.is_boolean() { "boolean" } else { "string" };
+                    let value_type = if value.is_boolean() {
+                        "boolean"
+                    } else {
+                        "string"
+                    };
                     serde_json::json!({
                         "id": id,
                         "result": {
@@ -2162,8 +3082,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_limit_enforcement() {
-        let client = BrowserClient::new("http://127.0.0.1:19999/")
-            .expect("browser client should build");
+        let client =
+            BrowserClient::new("http://127.0.0.1:19999/").expect("browser client should build");
         {
             let mut sessions = client.sessions.lock().await;
             for i in 0..MAX_BROWSER_SESSIONS {
@@ -2186,7 +3106,11 @@ mod tests {
             .open("new-session".into(), "https://example.com/")
             .await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("session limit reached"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("session limit reached")
+        );
     }
 
     #[tokio::test]
@@ -2211,8 +3135,8 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let client = BrowserClient::new(&format!("http://{addr}/"))
-            .expect("browser client should build");
+        let client =
+            BrowserClient::new(&format!("http://{addr}/")).expect("browser client should build");
         let ws_url = format!("ws://{addr}/");
         let mut socket = client
             .connect_page_socket(&ws_url)
@@ -2222,7 +3146,11 @@ mod tests {
         // Override the timeout constant behavior by using a short timeout directly.
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(200),
-            client.send_command(&mut socket, "Runtime.evaluate", serde_json::json!({"expression": "1+1"})),
+            client.send_command(
+                &mut socket,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "1+1"}),
+            ),
         )
         .await;
         // Either our internal CDP_COMMAND_TIMEOUT or our test timeout should fire.
@@ -2252,8 +3180,8 @@ mod tests {
             axum::serve(listener, app).await.expect("mock server");
         });
 
-        let client = BrowserClient::new(&format!("http://{addr}/"))
-            .expect("browser client should build");
+        let client =
+            BrowserClient::new(&format!("http://{addr}/")).expect("browser client should build");
 
         // Pre-populate a dead session with a bogus WS URL.
         {

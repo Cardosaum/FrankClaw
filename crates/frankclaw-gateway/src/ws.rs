@@ -101,11 +101,7 @@ pub async fn handle_ws_connection(
                             "id": null,
                             "error": { "code": 400, "message": format!("invalid request: {e}") }
                         });
-                        if client_tx
-                            .send(err_response.to_string())
-                            .await
-                            .is_err()
-                        {
+                        if client_tx.send(err_response.to_string()).await.is_err() {
                             break;
                         }
                     }
@@ -148,7 +144,7 @@ async fn dispatch_method(
 
     // Route to handler.
     match request.method {
-        Method::HealthProbe => {
+        Method::Ping | Method::HealthProbe => {
             ResponseFrame::ok(request.id, serde_json::json!({ "status": "ok" }))
         }
         Method::ConfigGet => {
@@ -157,21 +153,12 @@ async fn dispatch_method(
             let safe_config = redact_config(&config);
             ResponseFrame::ok(request.id, safe_config)
         }
-        Method::ChatSend => {
-            crate::methods::chat_send(state, conn_id, request).await
-        }
-        Method::SessionsList => {
-            crate::methods::sessions_list(state, request).await
-        }
-        Method::SessionsGet => {
-            crate::methods::sessions_get(state, request).await
-        }
-        Method::SessionsReset => {
-            crate::methods::sessions_reset(state, request).await
-        }
-        Method::ChatHistory => {
-            crate::methods::chat_history(state, request).await
-        }
+        Method::ChatSend => crate::methods::chat_send(state, conn_id, request).await,
+        Method::ChatCancel => crate::methods::chat_cancel(state, request).await,
+        Method::SessionsList => crate::methods::sessions_list(state, request).await,
+        Method::SessionsGet => crate::methods::sessions_get(state, request).await,
+        Method::SessionsReset => crate::methods::sessions_reset(state, request).await,
+        Method::ChatHistory => crate::methods::chat_history(state, request).await,
         Method::ChannelsList => {
             let channels: Vec<_> = state
                 .channels
@@ -197,24 +184,21 @@ async fn dispatch_method(
             let models = serde_json::to_value(state.runtime.list_models()).unwrap_or_default();
             ResponseFrame::ok(request.id, serde_json::json!({ "models": models }))
         }
-        Method::CanvasGet => {
-            crate::methods::canvas_get(state, request).await
-        }
-        Method::CanvasExport => {
-            crate::methods::canvas_export(state, request).await
-        }
-        Method::CanvasSet => {
-            crate::methods::canvas_set(state, request).await
-        }
-        Method::CanvasPatch => {
-            crate::methods::canvas_patch(state, request).await
-        }
-        Method::CanvasClear => {
-            crate::methods::canvas_clear(state, request).await
-        }
-        Method::WebhooksTest => {
-            crate::methods::webhooks_test(state, request).await
-        }
+        Method::CanvasGet => crate::methods::canvas_get(state, request).await,
+        Method::CanvasExport => crate::methods::canvas_export(state, request).await,
+        Method::CanvasSet => crate::methods::canvas_set(state, request).await,
+        Method::CanvasPatch => crate::methods::canvas_patch(state, request).await,
+        Method::CanvasClear => crate::methods::canvas_clear(state, request).await,
+        Method::WebhooksTest => crate::methods::webhooks_test(state, request).await,
+        Method::SessionsDelete => crate::methods::sessions_delete(state, request).await,
+        Method::UsageGet => crate::methods::usage_get(state, request).await,
+        Method::ToolApprovalResolve => crate::methods::tool_approval_resolve(state, request).await,
+        Method::SessionsPatch => crate::methods::sessions_patch(state, request).await,
+        Method::SessionsCompact => crate::methods::sessions_compact(state, request).await,
+        Method::CronList => crate::methods::cron_list(state, request).await,
+        Method::CronAdd => crate::methods::cron_add(state, request).await,
+        Method::CronRemove => crate::methods::cron_remove(state, request).await,
+        Method::CronRun => crate::methods::cron_run(state, request).await,
         _ => ResponseFrame::err(
             request.id,
             501,
@@ -229,28 +213,31 @@ fn redact_config(config: &frankclaw_core::config::FrankClawConfig) -> serde_json
     if let Some(obj) = val.as_object_mut() {
         // Redact auth tokens.
         if let Some(gw) = obj.get_mut("gateway")
-            && let Some(auth) = gw.get_mut("auth") {
-                if let Some(token) = auth.get_mut("token") {
-                    *token = serde_json::json!("[REDACTED]");
-                }
-                if let Some(hash) = auth.get_mut("hash") {
-                    *hash = serde_json::json!("[REDACTED]");
-                }
+            && let Some(auth) = gw.get_mut("auth")
+        {
+            if let Some(token) = auth.get_mut("token") {
+                *token = serde_json::json!("[REDACTED]");
             }
+            if let Some(hash) = auth.get_mut("hash") {
+                *hash = serde_json::json!("[REDACTED]");
+            }
+        }
         // Redact model provider API keys.
         if let Some(models) = obj.get_mut("models")
             && let Some(providers) = models.get_mut("providers")
-                && let Some(arr) = providers.as_array_mut() {
-                    for p in arr {
-                        if let Some(key) = p.get_mut("api_key_ref") {
-                            *key = serde_json::json!("[REDACTED]");
-                        }
-                    }
+            && let Some(arr) = providers.as_array_mut()
+        {
+            for p in arr {
+                if let Some(key) = p.get_mut("api_key_ref") {
+                    *key = serde_json::json!("[REDACTED]");
                 }
-        if let Some(hooks) = obj.get_mut("hooks")
-            && let Some(token) = hooks.get_mut("token") {
-                *token = serde_json::json!("[REDACTED]");
             }
+        }
+        if let Some(hooks) = obj.get_mut("hooks")
+            && let Some(token) = hooks.get_mut("token")
+        {
+            *token = serde_json::json!("[REDACTED]");
+        }
     }
     val
 }
@@ -265,8 +252,8 @@ mod tests {
     use frankclaw_channels::ChannelSet;
     use frankclaw_core::auth::{AuthMode, AuthRole};
     use frankclaw_core::model::{
-        CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi,
-        ModelCompat, ModelCost, ModelDef, ModelProvider, Usage,
+        CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi, ModelCompat,
+        ModelCost, ModelDef, ModelProvider, Usage,
     };
     use frankclaw_core::protocol::Method;
     use frankclaw_core::session::SessionStore;
@@ -324,9 +311,7 @@ mod tests {
         }
     }
 
-    async fn build_test_state(
-        temp_dir: &PathBuf,
-    ) -> Arc<GatewayState> {
+    async fn build_test_state(temp_dir: &PathBuf) -> Arc<GatewayState> {
         std::fs::create_dir_all(temp_dir).expect("temp dir should exist");
 
         let sessions = Arc::new(
@@ -334,8 +319,7 @@ mod tests {
                 .expect("sessions should open"),
         );
         let pairing = Arc::new(
-            PairingStore::open(&temp_dir.join("pairings.json"))
-                .expect("pairing store should open"),
+            PairingStore::open(&temp_dir.join("pairings.json")).expect("pairing store should open"),
         );
         let media = Arc::new(
             MediaStore::new(temp_dir.join("media"), 1024 * 1024, 1)
@@ -408,7 +392,12 @@ mod tests {
         .await;
         assert!(allowed.error.is_none());
         assert_eq!(
-            state.canvas.get("main").await.expect("canvas should exist").body,
+            state
+                .canvas
+                .get("main")
+                .await
+                .expect("canvas should exist")
+                .body,
             "Editors can update canvas"
         );
 
@@ -435,7 +424,10 @@ mod tests {
 
         assert!(response.error.is_none());
         let result = response.result.expect("config_get should return result");
-        assert_eq!(result["gateway"]["auth"]["token"], serde_json::json!("[REDACTED]"));
+        assert_eq!(
+            result["gateway"]["auth"]["token"],
+            serde_json::json!("[REDACTED]")
+        );
         assert_eq!(result["hooks"]["token"], serde_json::json!("[REDACTED]"));
 
         let _ = std::fs::remove_file(temp_dir.join("sessions.db"));

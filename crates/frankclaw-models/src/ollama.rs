@@ -4,7 +4,10 @@ use reqwest::Client;
 use tracing::debug;
 
 use frankclaw_core::error::{Internal, Provider, Result};
-use frankclaw_core::model::{ModelProvider, CompletionRequest, StreamDelta, CompletionResponse, ModelDef, ModelApi, InputModality, ModelCost, ModelCompat};
+use frankclaw_core::model::{
+    CompletionRequest, CompletionResponse, InputModality, ModelApi, ModelCompat, ModelCost,
+    ModelDef, ModelProvider, StreamDelta,
+};
 
 use crate::openai_compat::{self, StreamState};
 use crate::sse::SseDecoder;
@@ -27,13 +30,15 @@ impl OllamaProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .map_err(|e| Internal {
-                msg: format!("failed to build HTTP client: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Internal {
+                    msg: format!("failed to build HTTP client: {e}"),
+                }
+                .build()
+            })?;
 
-        let base_url = normalize_ollama_url(
-            &base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string()),
-        );
+        let base_url =
+            normalize_ollama_url(&base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string()));
 
         Ok(Self {
             id: id.into(),
@@ -62,7 +67,10 @@ impl ModelProvider for OllamaProvider {
             body["stream"] = serde_json::json!(false);
         }
 
-        let url = format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
         debug!(url, model = %request.model_id, "sending ollama request");
 
         let response = self
@@ -71,14 +79,19 @@ impl ModelProvider for OllamaProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Provider {
-                msg: format!("ollama request failed: {e}"),
-            }.build())?;
+            .map_err(|e| {
+                Provider {
+                    msg: format!("ollama request failed: {e}"),
+                }
+                .build()
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
-            return Err(crate::anthropic::classify_provider_error(status, &body_text));
+            return Err(crate::anthropic::classify_provider_error(
+                status, &body_text,
+            ));
         }
 
         if let Some(stream_tx) = stream_tx {
@@ -86,9 +99,12 @@ impl ModelProvider for OllamaProvider {
             let mut state = StreamState::default();
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| Provider {
-                    msg: format!("failed to read ollama streaming response: {e}"),
-                }.build())?;
+                let chunk = chunk.map_err(|e| {
+                    Provider {
+                        msg: format!("failed to read ollama streaming response: {e}"),
+                    }
+                    .build()
+                })?;
                 for event in decoder.push(chunk.as_ref()) {
                     for delta in openai_compat::apply_stream_event(&mut state, &event.data)? {
                         let _ = stream_tx.send(delta).await;
@@ -101,7 +117,9 @@ impl ModelProvider for OllamaProvider {
                     break;
                 }
             }
-            if !state.done && let Some(event) = decoder.finish() {
+            if !state.done
+                && let Some(event) = decoder.finish()
+            {
                 for delta in openai_compat::apply_stream_event(&mut state, &event.data)? {
                     let _ = stream_tx.send(delta).await;
                 }
@@ -115,10 +133,12 @@ impl ModelProvider for OllamaProvider {
             return Ok(response);
         }
 
-        let data: serde_json::Value =
-            response.json().await.map_err(|e| Provider {
+        let data: serde_json::Value = response.json().await.map_err(|e| {
+            Provider {
                 msg: format!("invalid ollama response: {e}"),
-            }.build())?;
+            }
+            .build()
+        })?;
         openai_compat::parse_completion_response(&data)
     }
 
@@ -127,13 +147,15 @@ impl ModelProvider for OllamaProvider {
         let response = self.client.get(&url).send().await.map_err(|e| {
             Provider {
                 msg: format!("failed to list ollama models: {e}"),
-            }.build()
+            }
+            .build()
         })?;
 
         let data: serde_json::Value = response.json().await.map_err(|e| {
             Provider {
                 msg: format!("invalid ollama response: {e}"),
-            }.build()
+            }
+            .build()
         })?;
 
         let models = data["models"]
@@ -180,9 +202,7 @@ impl ModelProvider for OllamaProvider {
 /// OpenAI-compatible endpoint but breaks native API calls (`/api/tags`, `/api/show`).
 fn normalize_ollama_url(url: &str) -> String {
     let trimmed = url.trim().trim_end_matches('/');
-    let stripped = trimmed
-        .strip_suffix("/v1")
-        .unwrap_or(trimmed);
+    let stripped = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
     stripped.to_string()
 }
 

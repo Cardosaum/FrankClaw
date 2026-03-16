@@ -257,8 +257,7 @@ pub fn matches_event_trigger(
             }
 
             // Check pattern match (case-insensitive).
-            regex::Regex::new(pattern)
-                .is_ok_and(|re| re.is_match(message_content))
+            regex::Regex::new(pattern).is_ok_and(|re| re.is_match(message_content))
         }
         _ => false,
     }
@@ -493,7 +492,11 @@ mod tests {
             channel: None,
             pattern: r"(?i)deploy\s+\w+".into(),
         };
-        assert!(matches_event_trigger(&trigger, "please deploy staging", None));
+        assert!(matches_event_trigger(
+            &trigger,
+            "please deploy staging",
+            None
+        ));
         assert!(!matches_event_trigger(&trigger, "hello world", None));
     }
 
@@ -588,8 +591,8 @@ mod tests {
             .with_payload(serde_json::json!({"repo": "frankclaw", "branch": "main"}));
         assert!(matches_system_event(&trigger, &event));
 
-        let event_wrong_repo = SystemEvent::new("github", "push")
-            .with_payload(serde_json::json!({"repo": "other"}));
+        let event_wrong_repo =
+            SystemEvent::new("github", "push").with_payload(serde_json::json!({"repo": "other"}));
         assert!(!matches_system_event(&trigger, &event_wrong_repo));
     }
 
@@ -602,8 +605,8 @@ mod tests {
             event_type: "push".into(),
             filters,
         };
-        let event = SystemEvent::new("github", "push")
-            .with_payload(serde_json::json!({"branch": "main"}));
+        let event =
+            SystemEvent::new("github", "push").with_payload(serde_json::json!({"branch": "main"}));
         assert!(!matches_system_event(&trigger, &event));
     }
 
@@ -616,8 +619,8 @@ mod tests {
             event_type: "push".into(),
             filters,
         };
-        let event = SystemEvent::new("github", "push")
-            .with_payload(serde_json::json!("just a string"));
+        let event =
+            SystemEvent::new("github", "push").with_payload(serde_json::json!("just a string"));
         assert!(!matches_system_event(&trigger, &event));
     }
 
