@@ -1213,7 +1213,7 @@ impl Tool for CanvasGetTool {
         let id = canvas_id_from_args(&args, &ctx);
         match canvas.get(&id).await {
             Some(doc) => Ok(serde_json::to_value(&doc).unwrap_or(serde_json::json!({}))),
-            None => Ok(serde_json::json!({ "canvas_id": id, "status": "empty", "message": "No canvas document exists yet. Use canvas.set to create one." })),
+            None => Ok(serde_json::json!({ "canvas_id": id, "status": "empty", "message": "No canvas document exists yet. Use canvas_set to create one." })),
         }
     }
 }
@@ -1315,7 +1315,7 @@ impl Tool for CanvasAppendTool {
             .unwrap_or_default();
         if title.is_none() && body.is_none() && blocks.is_empty() {
             return Err(FrankClawError::InvalidRequest {
-                msg: "canvas.append requires at least one of: title, body, or blocks".into(),
+                msg: "canvas_append requires at least one of: title, body, or blocks".into(),
             });
         }
         let result = canvas.patch(&id, title, body, blocks).await?;

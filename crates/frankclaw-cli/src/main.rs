@@ -864,6 +864,7 @@ async fn main() -> anyhow::Result<()> {
                     session_key: session.map(frankclaw_core::types::SessionKey::from_raw),
                     tool_name: tool,
                     arguments,
+                    canvas: Some(frankclaw_gateway::canvas::CanvasStore::new()),
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&output.output)?);

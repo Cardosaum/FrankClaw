@@ -21,6 +21,8 @@ pub struct ProviderHealth {
 struct ProviderEntry {
     provider: Arc<dyn ModelProvider>,
     breaker: CircuitBreaker,
+    /// Cached model IDs this provider serves (populated at construction).
+    model_ids: Vec<String>,
 }
 
 /// Failover chain with per-provider circuit breakers and retry with backoff.
@@ -36,16 +38,29 @@ pub struct FailoverChain {
 }
 
 impl FailoverChain {
+    /// Create a failover chain without model routing (tries all providers).
     pub fn new(providers: Vec<Arc<dyn ModelProvider>>, cooldown_secs: u64) -> Self {
+        let with_models = providers.into_iter().map(|p| (p, Vec::new())).collect();
+        Self::with_model_routing(with_models, cooldown_secs)
+    }
+
+    /// Create a failover chain with model routing — each provider is paired
+    /// with the model IDs it serves. Providers whose list doesn't contain
+    /// the requested model are skipped, avoiding unnecessary 404s.
+    pub fn with_model_routing(
+        providers: Vec<(Arc<dyn ModelProvider>, Vec<String>)>,
+        cooldown_secs: u64,
+    ) -> Self {
         let breaker_config = CircuitBreakerConfig {
             recovery_timeout: Duration::from_secs(cooldown_secs),
             ..CircuitBreakerConfig::default()
         };
         let entries = providers
             .into_iter()
-            .map(|provider| ProviderEntry {
+            .map(|(provider, model_ids)| ProviderEntry {
                 provider,
                 breaker: CircuitBreaker::new(breaker_config.clone()),
+                model_ids,
             })
             .collect();
         Self {
@@ -55,6 +70,9 @@ impl FailoverChain {
     }
 
     /// Try each provider in order with circuit breaker + retry.
+    ///
+    /// Providers that don't list the requested model are skipped to avoid
+    /// unnecessary 404s (e.g. sending a Claude model ID to OpenAI).
     pub async fn complete(
         &self,
         request: CompletionRequest,
@@ -64,6 +82,13 @@ impl FailoverChain {
 
         for entry in &self.entries {
             let id = entry.provider.id().to_string();
+
+            // Skip providers that don't serve the requested model.
+            if !entry.model_ids.is_empty()
+                && !entry.model_ids.iter().any(|id| id == &request.model_id)
+            {
+                continue;
+            }
 
             // Skip if circuit breaker is open.
             if !entry.breaker.check_allowed() {

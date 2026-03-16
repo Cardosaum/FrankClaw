@@ -89,12 +89,13 @@ pub struct CompactResult {
     pub estimated_tokens_after: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolRequest {
     pub agent_id: Option<AgentId>,
     pub session_key: Option<SessionKey>,
     pub tool_name: String,
     pub arguments: serde_json::Value,
+    pub canvas: Option<Arc<dyn frankclaw_core::canvas::CanvasService>>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,13 +125,24 @@ impl Runtime {
         sessions: Arc<dyn SessionStore>,
     ) -> Result<Self> {
         let providers = build_providers(config)?;
-        Self::from_providers(config, sessions, providers).await
+        Self::from_providers_with_models(config, sessions, providers).await
     }
 
     pub async fn from_providers(
         config: &FrankClawConfig,
         sessions: Arc<dyn SessionStore>,
         providers: Vec<Arc<dyn ModelProvider>>,
+    ) -> Result<Self> {
+        // Wrap with empty model ID lists — routing will try all providers.
+        let providers: Vec<(Arc<dyn ModelProvider>, Vec<String>)> =
+            providers.into_iter().map(|p| (p, Vec::new())).collect();
+        Self::from_providers_with_models(config, sessions, providers).await
+    }
+
+    async fn from_providers_with_models(
+        config: &FrankClawConfig,
+        sessions: Arc<dyn SessionStore>,
+        providers: Vec<(Arc<dyn ModelProvider>, Vec<String>)>,
     ) -> Result<Self> {
         let cooldown_secs = config
             .models
@@ -140,7 +152,7 @@ impl Runtime {
             .max()
             .unwrap_or(30)
             .max(1);
-        let models = FailoverChain::new(providers, cooldown_secs);
+        let models = FailoverChain::with_model_routing(providers, cooldown_secs);
         let model_defs = models.list_models().await?;
         let channel_ids = config
             .channels
@@ -933,7 +945,7 @@ impl Runtime {
                     agent_id,
                     session_key: request.session_key,
                     sessions: self.sessions.clone(),
-                    canvas: None,
+                    canvas: request.canvas,
                     fetcher: self.fetcher.clone(),
                     channels: self.channels.clone(),
                     cron: self.cron.clone(),
@@ -1865,8 +1877,9 @@ fn parse_tool_arguments(tool_call: &ToolCallResponse) -> Result<serde_json::Valu
 
 fn build_providers(
     config: &FrankClawConfig,
-) -> Result<Vec<Arc<dyn frankclaw_core::model::ModelProvider>>> {
-    let mut providers: Vec<Arc<dyn frankclaw_core::model::ModelProvider>> = Vec::new();
+) -> Result<Vec<(Arc<dyn frankclaw_core::model::ModelProvider>, Vec<String>)>> {
+    let mut providers: Vec<(Arc<dyn frankclaw_core::model::ModelProvider>, Vec<String>)> =
+        Vec::new();
     let mut seen_ids = HashSet::new();
 
     for provider in &config.models.providers {
@@ -1876,6 +1889,7 @@ fn build_providers(
             });
         }
 
+        let model_ids = provider.models.clone();
         let provider_impl: Arc<dyn frankclaw_core::model::ModelProvider> =
             match provider.api.as_str() {
                 "openai" => Arc::new(OpenAiProvider::new(
@@ -1965,7 +1979,7 @@ fn build_providers(
                     });
                 }
             };
-        providers.push(provider_impl);
+        providers.push((provider_impl, model_ids));
     }
 
     Ok(providers)
@@ -2284,6 +2298,7 @@ mod tests {
                 session_key: Some(chat.session_key.clone()),
                 tool_name: "session_inspect".into(),
                 arguments: serde_json::json!({ "limit": 5 }),
+                canvas: None,
             })
             .await
             .expect("tool should run");

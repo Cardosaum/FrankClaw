@@ -327,6 +327,7 @@ impl AcpServer {
             session_key,
             tool_name: tool_name.clone(),
             arguments: args,
+            canvas: Some(self.canvas.clone()),
         };
 
         match self.runtime.invoke_tool(tool_request).await {

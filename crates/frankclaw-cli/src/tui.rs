@@ -317,7 +317,7 @@ async fn run_tui_loop(
                             thinking_budget,
                             channel_id: None,
                             channel_capabilities: None,
-                            canvas: None,
+                            canvas: Some(frankclaw_gateway::canvas::CanvasStore::new()),
                             cancel_token: None,
                             approval_tx: None,
                         };

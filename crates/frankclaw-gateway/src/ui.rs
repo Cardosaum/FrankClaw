@@ -1385,7 +1385,37 @@ pub async fn index() -> Html<&'static str> {
       if (canvas.body) {
         const body = document.createElement("div");
         body.className = "text-sm whitespace-pre-wrap leading-relaxed mt-2";
-        body.textContent = canvas.body;
+        const trimmed = canvas.body.trim();
+        if (trimmed.startsWith("<svg") || trimmed.startsWith("<?xml")) {
+          // Render SVG safely via DOMParser (no script execution).
+          try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(trimmed, "image/svg+xml");
+            const svg = doc.querySelector("svg");
+            if (svg && !doc.querySelector("parsererror")) {
+              svg.removeAttribute("width");
+              svg.removeAttribute("height");
+              svg.style.maxWidth = "100%";
+              svg.style.height = "auto";
+              body.appendChild(svg);
+            } else {
+              body.textContent = canvas.body;
+            }
+          } catch (_) {
+            body.textContent = canvas.body;
+          }
+        } else if (/<[a-z][\s\S]*>/i.test(trimmed)) {
+          // Render HTML content in a sandboxed iframe to prevent XSS.
+          const iframe = document.createElement("iframe");
+          iframe.sandbox = "allow-same-origin";
+          iframe.style.cssText = "width:100%;border:none;min-height:200px;background:white;border-radius:8px;";
+          iframe.srcdoc = trimmed;
+          body.appendChild(iframe);
+        } else if (typeof marked !== "undefined") {
+          body.innerHTML = marked.parse(canvas.body);
+        } else {
+          body.textContent = canvas.body;
+        }
         stage.appendChild(body);
       }
 
