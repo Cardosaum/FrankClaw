@@ -896,7 +896,7 @@ fn parse_session_key_param(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::Path;
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -915,28 +915,9 @@ mod tests {
 
     use crate::delivery::{StoredReplyMetadata, set_last_reply_in_metadata};
     use crate::pairing::PairingStore;
+    use crate::test_fixtures::TestTempDir;
 
     use super::*;
-
-    // ── RAII guard for temp directories ──────────────────────────────
-
-    struct TempTestDir {
-        path: PathBuf,
-    }
-
-    impl TempTestDir {
-        fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("{}-{}", label, uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&path).expect("temp dir should create");
-            Self { path }
-        }
-    }
-
-    impl Drop for TempTestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
 
     // ── Test helpers ─────────────────────────────────────────────────
 
@@ -1082,13 +1063,13 @@ mod tests {
     // ── State builders ───────────────────────────────────────────────
 
     async fn build_test_state(
-        temp_dir: &PathBuf,
+        temp_dir: &Path,
     ) -> (Arc<GatewayState>, Arc<SqliteSessionStore>) {
         build_test_state_with_providers(temp_dir, vec![Arc::new(MockProvider)]).await
     }
 
     async fn build_test_state_with_providers(
-        temp_dir: &PathBuf,
+        temp_dir: &Path,
         providers: Vec<Arc<dyn ModelProvider>>,
     ) -> (Arc<GatewayState>, Arc<SqliteSessionStore>) {
         std::fs::create_dir_all(temp_dir).expect("temp dir should exist");
@@ -1126,8 +1107,8 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_get_returns_session_entry() {
-        let temp = TempTestDir::new("frankclaw-gateway-methods-get");
-        let (state, sessions) = build_test_state(&temp.path).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-get");
+        let (state, sessions) = build_test_state(temp.path()).await;
         let session_key = SessionKey::from_raw("agent:main:web:default:user-1");
         let mut entry = make_session(session_key.clone());
         set_last_reply_in_metadata(
@@ -1171,8 +1152,8 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_reset_clears_transcript_entries() {
-        let temp = TempTestDir::new("frankclaw-gateway-methods-reset");
-        let (state, sessions) = build_test_state(&temp.path).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-reset");
+        let (state, sessions) = build_test_state(temp.path()).await;
         let session_key = SessionKey::from_raw("agent:main:web:default:user-1");
         sessions
             .upsert(&make_session(session_key.clone()))
@@ -1210,9 +1191,9 @@ mod tests {
 
     #[tokio::test]
     async fn chat_send_streams_delta_events_to_requesting_client() {
-        let temp = TempTestDir::new("frankclaw-gateway-methods-stream");
+        let temp = TestTempDir::new("frankclaw-gateway-methods-stream");
         let (state, _sessions) = build_test_state_with_providers(
-            &temp.path,
+            temp.path(),
             vec![Arc::new(StreamingMockProvider)],
         )
         .await;
@@ -1286,8 +1267,8 @@ mod tests {
 
     #[tokio::test]
     async fn webhooks_test_executes_runtime_chat() {
-        let temp = TempTestDir::new("frankclaw-gateway-methods-webhook");
-        let (state, sessions) = build_test_state(&temp.path).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-webhook");
+        let (state, sessions) = build_test_state(temp.path()).await;
         let mut config = state.current_config().as_ref().clone();
         config.hooks.enabled = true;
         config.hooks.token = Some("secret".into());
@@ -1328,8 +1309,8 @@ mod tests {
 
     #[tokio::test]
     async fn canvas_set_creates_document() {
-        let temp = TempTestDir::new("frankclaw-gateway-methods-canvas-set");
-        let (state, _sessions) = build_test_state(&temp.path).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-set");
+        let (state, _sessions) = build_test_state(temp.path()).await;
 
         let set_response = canvas_set(
             &state,
@@ -1362,8 +1343,8 @@ mod tests {
 
     #[tokio::test]
     async fn canvas_get_returns_document() {
-        let temp = TempTestDir::new("frankclaw-gateway-methods-canvas-get");
-        let (state, _sessions) = build_test_state(&temp.path).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-get");
+        let (state, _sessions) = build_test_state(temp.path()).await;
         setup_canvas(&state).await;
 
         let get_response = canvas_get(
@@ -1393,8 +1374,8 @@ mod tests {
 
     #[tokio::test]
     async fn canvas_export_produces_markdown() {
-        let temp = TempTestDir::new("frankclaw-gateway-methods-canvas-export");
-        let (state, _sessions) = build_test_state(&temp.path).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-export");
+        let (state, _sessions) = build_test_state(temp.path()).await;
         setup_canvas(&state).await;
 
         let export_response = canvas_export(
@@ -1426,8 +1407,8 @@ mod tests {
 
     #[tokio::test]
     async fn canvas_patch_appends_blocks() {
-        let temp = TempTestDir::new("frankclaw-gateway-methods-canvas-patch");
-        let (state, _sessions) = build_test_state(&temp.path).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-patch");
+        let (state, _sessions) = build_test_state(temp.path()).await;
         setup_canvas(&state).await;
 
         let patch_response = canvas_patch(
@@ -1454,8 +1435,8 @@ mod tests {
 
     #[tokio::test]
     async fn canvas_clear_removes_document() {
-        let temp = TempTestDir::new("frankclaw-gateway-methods-canvas-clear");
-        let (state, _sessions) = build_test_state(&temp.path).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-clear");
+        let (state, _sessions) = build_test_state(temp.path()).await;
         setup_canvas(&state).await;
 
         let clear_response = canvas_clear(
