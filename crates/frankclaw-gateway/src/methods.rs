@@ -896,7 +896,7 @@ fn parse_session_key_param(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::Path;
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -911,12 +911,55 @@ mod tests {
     use frankclaw_core::types::{AgentId, ChannelId, ConnId, RequestId, Role};
     use frankclaw_media::MediaStore;
     use frankclaw_sessions::SqliteSessionStore;
+    use rstest::{fixture, rstest};
     use tokio::time::{Duration, timeout};
 
     use crate::delivery::{StoredReplyMetadata, set_last_reply_in_metadata};
     use crate::pairing::PairingStore;
+    use crate::test_fixtures::TestTempDir;
 
     use super::*;
+
+    // ── Test helpers ─────────────────────────────────────────────────
+
+    fn make_request(method: Method, params: serde_json::Value) -> RequestFrame {
+        RequestFrame {
+            id: RequestId::Text("1".into()),
+            method,
+            params,
+        }
+    }
+
+    fn make_session(key: SessionKey) -> SessionEntry {
+        SessionEntry {
+            key,
+            agent_id: AgentId::default_agent(),
+            channel: ChannelId::new("web"),
+            account_id: "default".into(),
+            scoping: SessionScoping::PerChannelPeer,
+            created_at: chrono::Utc::now(),
+            last_message_at: Some(chrono::Utc::now()),
+            thread_id: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[fixture]
+    fn temp_dir() -> TestTempDir {
+        TestTempDir::new("frankclaw-gateway-methods")
+    }
+
+    async fn setup_canvas(state: &Arc<GatewayState>) {
+        canvas_set(state, make_request(Method::CanvasSet, serde_json::json!({
+            "canvas_id": "ops",
+            "title": "Ops",
+            "body": "Current deployment summary",
+            "session_key": "default:web:control",
+            "blocks": [{"kind": "note", "text": "deploy window open"}],
+        }))).await;
+    }
+
+    // ── Mock providers ───────────────────────────────────────────────
 
     struct MockProvider;
 
@@ -1023,14 +1066,16 @@ mod tests {
         }
     }
 
+    // ── State builders ───────────────────────────────────────────────
+
     async fn build_test_state(
-        temp_dir: &PathBuf,
+        temp_dir: &Path,
     ) -> (Arc<GatewayState>, Arc<SqliteSessionStore>) {
         build_test_state_with_providers(temp_dir, vec![Arc::new(MockProvider)]).await
     }
 
     async fn build_test_state_with_providers(
-        temp_dir: &PathBuf,
+        temp_dir: &Path,
         providers: Vec<Arc<dyn ModelProvider>>,
     ) -> (Arc<GatewayState>, Arc<SqliteSessionStore>) {
         std::fs::create_dir_all(temp_dir).expect("temp dir should exist");
@@ -1064,25 +1109,14 @@ mod tests {
         )
     }
 
+    // ── Tests ────────────────────────────────────────────────────────
+
     #[tokio::test]
     async fn sessions_get_returns_session_entry() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-get-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, sessions) = build_test_state(&temp_dir).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-get");
+        let (state, sessions) = build_test_state(temp.path()).await;
         let session_key = SessionKey::from_raw("agent:main:web:default:user-1");
-        let mut entry = SessionEntry {
-            key: session_key.clone(),
-            agent_id: AgentId::default_agent(),
-            channel: ChannelId::new("web"),
-            account_id: "default".into(),
-            scoping: SessionScoping::PerChannelPeer,
-            created_at: chrono::Utc::now(),
-            last_message_at: Some(chrono::Utc::now()),
-            thread_id: None,
-            metadata: serde_json::json!({}),
-        };
+        let mut entry = make_session(session_key.clone());
         set_last_reply_in_metadata(
             &mut entry.metadata,
             &StoredReplyMetadata {
@@ -1106,13 +1140,9 @@ mod tests {
 
         let response = sessions_get(
             &state,
-            RequestFrame {
-                id: RequestId::Text("1".into()),
-                method: Method::SessionsGet,
-                params: serde_json::json!({
-                    "session_key": session_key.as_str(),
-                }),
-            },
+            make_request(Method::SessionsGet, serde_json::json!({
+                "session_key": session_key.as_str(),
+            })),
         )
         .await;
 
@@ -1124,32 +1154,15 @@ mod tests {
                 .and_then(|value| value["session"]["key"].as_str()),
             Some(session_key.as_str())
         );
-
-        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
-        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]
     async fn sessions_reset_clears_transcript_entries() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-reset-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, sessions) = build_test_state(&temp_dir).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-reset");
+        let (state, sessions) = build_test_state(temp.path()).await;
         let session_key = SessionKey::from_raw("agent:main:web:default:user-1");
         sessions
-            .upsert(&SessionEntry {
-                key: session_key.clone(),
-                agent_id: AgentId::default_agent(),
-                channel: ChannelId::new("web"),
-                account_id: "default".into(),
-                scoping: SessionScoping::PerChannelPeer,
-                created_at: chrono::Utc::now(),
-                last_message_at: Some(chrono::Utc::now()),
-                thread_id: None,
-                metadata: serde_json::json!({}),
-            })
+            .upsert(&make_session(session_key.clone()))
             .await
             .expect("session should upsert");
         sessions
@@ -1168,13 +1181,9 @@ mod tests {
 
         let response = sessions_reset(
             &state,
-            RequestFrame {
-                id: RequestId::Text("1".into()),
-                method: Method::SessionsReset,
-                params: serde_json::json!({
-                    "session_key": session_key.as_str(),
-                }),
-            },
+            make_request(Method::SessionsReset, serde_json::json!({
+                "session_key": session_key.as_str(),
+            })),
         )
         .await;
 
@@ -1184,20 +1193,13 @@ mod tests {
             .await
             .expect("transcript should load");
         assert!(transcript.is_empty());
-
-        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
-        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]
     async fn chat_send_streams_delta_events_to_requesting_client() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-stream-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp = TestTempDir::new("frankclaw-gateway-methods-stream");
         let (state, _sessions) = build_test_state_with_providers(
-            &temp_dir,
+            temp.path(),
             vec![Arc::new(StreamingMockProvider)],
         )
         .await;
@@ -1267,18 +1269,12 @@ mod tests {
         }
 
         state.clients.remove(&conn_id);
-        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
-        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]
     async fn webhooks_test_executes_runtime_chat() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-webhook-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, sessions) = build_test_state(&temp_dir).await;
+        let temp = TestTempDir::new("frankclaw-gateway-methods-webhook");
+        let (state, sessions) = build_test_state(temp.path()).await;
         let mut config = state.current_config().as_ref().clone();
         config.hooks.enabled = true;
         config.hooks.token = Some("secret".into());
@@ -1290,16 +1286,12 @@ mod tests {
 
         let response = webhooks_test(
             &state,
-            RequestFrame {
-                id: RequestId::Text("1".into()),
-                method: Method::WebhooksTest,
-                params: serde_json::json!({
-                    "mapping_id": "incoming",
-                    "payload": {
-                        "message": "hello from hook"
-                    }
-                }),
-            },
+            make_request(Method::WebhooksTest, serde_json::json!({
+                "mapping_id": "incoming",
+                "payload": {
+                    "message": "hello from hook"
+                }
+            })),
         )
         .await;
 
@@ -1319,38 +1311,25 @@ mod tests {
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript[0].content, "hello from hook");
         assert_eq!(transcript[1].content, "mock reply");
-
-        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
-        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]
-    async fn canvas_set_and_clear_roundtrip() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-canvas-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, _sessions) = build_test_state(&temp_dir).await;
+    async fn canvas_set_creates_document() {
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-set");
+        let (state, _sessions) = build_test_state(temp.path()).await;
 
         let set_response = canvas_set(
             &state,
-            RequestFrame {
-                id: RequestId::Text("1".into()),
-                method: Method::CanvasSet,
-                params: serde_json::json!({
-                    "canvas_id": "ops",
-                    "title": "Ops",
-                    "body": "Current deployment summary",
-                    "session_key": "default:web:control",
-                    "blocks": [{
-                        "kind": "note",
-                        "text": "deploy window open"
-                    }],
-                }),
-            },
+            make_request(Method::CanvasSet, serde_json::json!({
+                "canvas_id": "ops",
+                "title": "Ops",
+                "body": "Current deployment summary",
+                "session_key": "default:web:control",
+                "blocks": [{"kind": "note", "text": "deploy window open"}],
+            })),
         )
         .await;
+
         assert!(set_response.error.is_none());
         assert_eq!(
             state.canvas.get("ops").await.expect("canvas should exist").title,
@@ -1366,18 +1345,22 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn canvas_get_returns_document() {
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-get");
+        let (state, _sessions) = build_test_state(temp.path()).await;
+        setup_canvas(&state).await;
 
         let get_response = canvas_get(
             &state,
-            RequestFrame {
-                id: RequestId::Text("2".into()),
-                method: Method::CanvasGet,
-                params: serde_json::json!({
-                    "canvas_id": "ops",
-                }),
-            },
+            make_request(Method::CanvasGet, serde_json::json!({
+                "canvas_id": "ops",
+            })),
         )
         .await;
+
         assert!(get_response.error.is_none());
         assert_eq!(
             get_response
@@ -1393,19 +1376,23 @@ mod tests {
                 .and_then(|value| value["canvas"]["revision"].as_u64()),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn canvas_export_produces_markdown() {
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-export");
+        let (state, _sessions) = build_test_state(temp.path()).await;
+        setup_canvas(&state).await;
 
         let export_response = canvas_export(
             &state,
-            RequestFrame {
-                id: RequestId::Text("export".into()),
-                method: Method::CanvasExport,
-                params: serde_json::json!({
-                    "canvas_id": "ops",
-                    "format": "markdown",
-                }),
-            },
+            make_request(Method::CanvasExport, serde_json::json!({
+                "canvas_id": "ops",
+                "format": "markdown",
+            })),
         )
         .await;
+
         assert!(export_response.error.is_none());
         assert_eq!(
             export_response
@@ -1422,22 +1409,23 @@ mod tests {
                 .expect("export should include markdown content")
                 .contains("Current deployment summary")
         );
+    }
+
+    #[tokio::test]
+    async fn canvas_patch_appends_blocks() {
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-patch");
+        let (state, _sessions) = build_test_state(temp.path()).await;
+        setup_canvas(&state).await;
 
         let patch_response = canvas_patch(
             &state,
-            RequestFrame {
-                id: RequestId::Text("3".into()),
-                method: Method::CanvasPatch,
-                params: serde_json::json!({
-                    "canvas_id": "ops",
-                    "append_blocks": [{
-                        "kind": "markdown",
-                        "text": "## Next steps"
-                    }]
-                }),
-            },
+            make_request(Method::CanvasPatch, serde_json::json!({
+                "canvas_id": "ops",
+                "append_blocks": [{"kind": "markdown", "text": "## Next steps"}]
+            })),
         )
         .await;
+
         assert!(patch_response.error.is_none());
         assert_eq!(
             state
@@ -1449,33 +1437,30 @@ mod tests {
                 .len(),
             2
         );
-
-        let clear_response = canvas_clear(
-            &state,
-            RequestFrame {
-                id: RequestId::Text("4".into()),
-                method: Method::CanvasClear,
-                params: serde_json::json!({
-                    "canvas_id": "ops",
-                }),
-            },
-        )
-        .await;
-        assert!(clear_response.error.is_none());
-        assert!(state.canvas.get("ops").await.is_none());
-
-        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
-        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]
-    async fn chat_cancel_stops_active_run() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-cancel-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, _sessions) = build_test_state(&temp_dir).await;
+    async fn canvas_clear_removes_document() {
+        let temp = TestTempDir::new("frankclaw-gateway-methods-canvas-clear");
+        let (state, _sessions) = build_test_state(temp.path()).await;
+        setup_canvas(&state).await;
+
+        let clear_response = canvas_clear(
+            &state,
+            make_request(Method::CanvasClear, serde_json::json!({
+                "canvas_id": "ops",
+            })),
+        )
+        .await;
+
+        assert!(clear_response.error.is_none());
+        assert!(state.canvas.get("ops").await.is_none());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn chat_cancel_stops_active_run(temp_dir: TestTempDir) {
+        let (state, _sessions) = build_test_state(temp_dir.path()).await;
 
         // Insert a fake active run token.
         let token = tokio_util::sync::CancellationToken::new();
@@ -1500,69 +1485,37 @@ mod tests {
         );
         assert!(token.is_cancelled());
         assert!(state.active_runs.is_empty());
-
-        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
-        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
+    #[rstest]
+    #[case(serde_json::json!({ "request_id": "nonexistent" }), 404, "cancel-2")]
+    #[case(serde_json::json!({}), 400, "cancel-3")]
     #[tokio::test]
-    async fn chat_cancel_returns_404_for_unknown_run() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-cancel-404-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, _sessions) = build_test_state(&temp_dir).await;
+    async fn chat_cancel_returns_expected_error(
+        temp_dir: TestTempDir,
+        #[case] params: serde_json::Value,
+        #[case] expected_code: u16,
+        #[case] request_id: &str,
+    ) {
+        let (state, _sessions) = build_test_state(temp_dir.path()).await;
 
         let response = chat_cancel(
             &state,
             RequestFrame {
-                id: RequestId::Text("cancel-2".into()),
+                id: RequestId::Text(request_id.into()),
                 method: Method::ChatCancel,
-                params: serde_json::json!({ "request_id": "nonexistent" }),
+                params,
             },
         )
         .await;
 
-        assert_eq!(response.error.as_ref().map(|e| e.code), Some(404));
-
-        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
-        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
-        let _ = std::fs::remove_dir_all(temp_dir);
+        assert_eq!(response.error.as_ref().map(|e| e.code), Some(expected_code));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn chat_cancel_requires_request_id() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-cancel-400-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, _sessions) = build_test_state(&temp_dir).await;
-
-        let response = chat_cancel(
-            &state,
-            RequestFrame {
-                id: RequestId::Text("cancel-3".into()),
-                method: Method::ChatCancel,
-                params: serde_json::json!({}),
-            },
-        )
-        .await;
-
-        assert_eq!(response.error.as_ref().map(|e| e.code), Some(400));
-
-        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
-        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
-        let _ = std::fs::remove_dir_all(temp_dir);
-    }
-
-    #[tokio::test]
-    async fn sessions_delete_removes_session() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-delete-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, sessions) = build_test_state(&temp_dir).await;
+    async fn sessions_delete_removes_session(temp_dir: TestTempDir) {
+        let (state, sessions) = build_test_state(temp_dir.path()).await;
         let session_key = SessionKey::from_raw("agent:main:web:default:user-del");
 
         let entry = SessionEntry {
@@ -1594,17 +1547,12 @@ mod tests {
         // Verify it's gone.
         let got = sessions.get(&session_key).await.expect("get should work");
         assert!(got.is_none(), "session should be deleted");
-
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn sessions_delete_requires_session_key() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-delete-nokey-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, _sessions) = build_test_state(&temp_dir).await;
+    async fn sessions_delete_requires_session_key(temp_dir: TestTempDir) {
+        let (state, _sessions) = build_test_state(temp_dir.path()).await;
 
         let response = sessions_delete(
             &state,
@@ -1616,17 +1564,12 @@ mod tests {
         )
         .await;
         assert_eq!(response.error.as_ref().map(|e| e.code), Some(400));
-
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn sessions_patch_updates_metadata() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-patch-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, sessions) = build_test_state(&temp_dir).await;
+    async fn sessions_patch_updates_metadata(temp_dir: TestTempDir) {
+        let (state, sessions) = build_test_state(temp_dir.path()).await;
         let session_key = SessionKey::from_raw("agent:main:web:default:user-patch");
 
         let entry = SessionEntry {
@@ -1660,17 +1603,12 @@ mod tests {
         let updated = sessions.get(&session_key).await.unwrap().unwrap();
         assert_eq!(updated.metadata["label"], "new");
         assert_eq!(updated.metadata["extra"], 42);
-
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn sessions_patch_returns_404_for_missing_session() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-patch-404-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, _sessions) = build_test_state(&temp_dir).await;
+    async fn sessions_patch_returns_404_for_missing_session(temp_dir: TestTempDir) {
+        let (state, _sessions) = build_test_state(temp_dir.path()).await;
 
         let response = sessions_patch(
             &state,
@@ -1685,17 +1623,12 @@ mod tests {
         )
         .await;
         assert_eq!(response.error.as_ref().map(|e| e.code), Some(404));
-
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn usage_get_returns_session_usage() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "frankclaw-gateway-methods-usage-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let (state, sessions) = build_test_state(&temp_dir).await;
+    async fn usage_get_returns_session_usage(temp_dir: TestTempDir) {
+        let (state, sessions) = build_test_state(temp_dir.path()).await;
         let session_key = SessionKey::from_raw("agent:main:web:default:user-usage");
 
         let entry = SessionEntry {
@@ -1732,8 +1665,6 @@ mod tests {
         assert_eq!(result["totals"]["output_tokens"], 50);
         assert_eq!(result["totals"]["turns"], 3);
         assert_eq!(result["count"], 1);
-
-        let _ = std::fs::remove_dir_all(temp_dir);
     }
 }
 

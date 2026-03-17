@@ -216,60 +216,47 @@ mod tests {
     use super::*;
     use frankclaw_core::model::{CompletionMessage, FinishReason, ToolDef, Usage};
     use frankclaw_core::types::Role;
+    use rstest::{fixture, rstest};
 
+    #[fixture]
+    fn cache() -> ResponseCache {
+        ResponseCache::new(ResponseCacheConfig::default())
+    }
+
+    #[fixture]
     fn simple_request() -> CompletionRequest {
         CompletionRequest {
             model_id: "test-model".into(),
             messages: vec![CompletionMessage::text(Role::User, "hello")],
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         }
     }
 
+    #[fixture]
     fn different_request() -> CompletionRequest {
         CompletionRequest {
             model_id: "test-model".into(),
             messages: vec![CompletionMessage::text(Role::User, "goodbye")],
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         }
     }
 
+    #[fixture]
     fn tool_request() -> CompletionRequest {
         CompletionRequest {
             model_id: "test-model".into(),
             messages: vec![CompletionMessage::text(Role::User, "use tool")],
-            max_tokens: None,
-            temperature: None,
-            system: None,
             tools: vec![ToolDef {
                 name: "test_tool".into(),
                 description: "a tool".into(),
                 parameters: serde_json::json!({}),
                 risk_level: Default::default(),
             }],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         }
     }
 
+    #[fixture]
     fn dummy_response() -> CompletionResponse {
         CompletionResponse {
             content: "cached response".into(),
@@ -284,168 +271,173 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cache_key_is_deterministic() {
-        let req = simple_request();
-        let k1 = cache_key(&req);
-        let k2 = cache_key(&req);
+    #[rstest]
+    fn cache_key_is_deterministic(simple_request: CompletionRequest) {
+        let k1 = cache_key(&simple_request);
+        let k2 = cache_key(&simple_request);
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 64); // SHA-256 hex
     }
 
-    #[test]
-    fn cache_key_varies_by_model() {
-        let mut req_a = simple_request();
-        let mut req_b = simple_request();
+    #[rstest]
+    fn cache_key_varies_by_model(mut simple_request: CompletionRequest) {
+        let mut req_b = simple_request.clone();
         req_b.model_id = "other-model".into();
-        assert_ne!(cache_key(&req_a), cache_key(&req_b));
-        req_a.model_id = req_b.model_id.clone();
-        assert_eq!(cache_key(&req_a), cache_key(&req_b));
+        assert_ne!(cache_key(&simple_request), cache_key(&req_b));
+        simple_request.model_id = req_b.model_id.clone();
+        assert_eq!(cache_key(&simple_request), cache_key(&req_b));
     }
 
-    #[test]
-    fn cache_key_varies_by_messages() {
+    #[rstest]
+    fn cache_key_varies_by_messages(
+        simple_request: CompletionRequest,
+        different_request: CompletionRequest,
+    ) {
         assert_ne!(
-            cache_key(&simple_request()),
-            cache_key(&different_request())
+            cache_key(&simple_request),
+            cache_key(&different_request)
         );
     }
 
-    #[test]
-    fn cache_key_varies_by_temperature() {
-        let mut req_a = simple_request();
+    #[rstest]
+    fn cache_key_varies_by_temperature(simple_request: CompletionRequest) {
+        let mut req_a = simple_request.clone();
         req_a.temperature = Some(0.0);
-        let mut req_b = simple_request();
+        let mut req_b = simple_request;
         req_b.temperature = Some(1.0);
         assert_ne!(cache_key(&req_a), cache_key(&req_b));
     }
 
-    #[test]
-    fn cache_key_varies_by_max_tokens() {
-        let mut req_a = simple_request();
+    #[rstest]
+    fn cache_key_varies_by_max_tokens(simple_request: CompletionRequest) {
+        let mut req_a = simple_request.clone();
         req_a.max_tokens = Some(100);
-        let mut req_b = simple_request();
+        let mut req_b = simple_request;
         req_b.max_tokens = Some(500);
         assert_ne!(cache_key(&req_a), cache_key(&req_b));
     }
 
-    #[test]
-    fn cache_key_varies_by_system_prompt() {
-        let mut req_a = simple_request();
+    #[rstest]
+    fn cache_key_varies_by_system_prompt(simple_request: CompletionRequest) {
+        let mut req_a = simple_request.clone();
         req_a.system = Some("system A".into());
-        let mut req_b = simple_request();
+        let mut req_b = simple_request;
         req_b.system = Some("system B".into());
         assert_ne!(cache_key(&req_a), cache_key(&req_b));
     }
 
-    #[test]
-    fn cache_hit_returns_stored_response() {
-        let cache = ResponseCache::new(ResponseCacheConfig::default());
-        let req = simple_request();
-        let resp = dummy_response();
-
-        assert!(cache.lookup(&req).is_none());
-        cache.store(&req, &resp);
-        let cached = cache.lookup(&req).expect("should hit cache");
+    #[rstest]
+    fn cache_hit_returns_stored_response(
+        cache: ResponseCache,
+        simple_request: CompletionRequest,
+        dummy_response: CompletionResponse,
+    ) {
+        assert!(cache.lookup(&simple_request).is_none());
+        cache.store(&simple_request, &dummy_response);
+        let cached = cache.lookup(&simple_request).expect("should hit cache");
         assert_eq!(cached.content, "cached response");
         assert_eq!(cache.total_hits(), 1);
     }
 
-    #[test]
-    fn different_messages_get_different_entries() {
-        let cache = ResponseCache::new(ResponseCacheConfig::default());
-        let resp = dummy_response();
-
-        cache.store(&simple_request(), &resp);
-        cache.store(&different_request(), &resp);
+    #[rstest]
+    fn different_messages_get_different_entries(
+        cache: ResponseCache,
+        simple_request: CompletionRequest,
+        different_request: CompletionRequest,
+        dummy_response: CompletionResponse,
+    ) {
+        cache.store(&simple_request, &dummy_response);
+        cache.store(&different_request, &dummy_response);
         assert_eq!(cache.len(), 2);
     }
 
-    #[test]
-    fn tool_requests_are_never_cached() {
-        let cache = ResponseCache::new(ResponseCacheConfig::default());
-        let req = tool_request();
-        let resp = dummy_response();
-
-        cache.store(&req, &resp);
+    #[rstest]
+    fn tool_requests_are_never_cached(
+        cache: ResponseCache,
+        tool_request: CompletionRequest,
+        dummy_response: CompletionResponse,
+    ) {
+        cache.store(&tool_request, &dummy_response);
         assert!(cache.is_empty(), "tool requests should not be stored");
-        assert!(cache.lookup(&req).is_none());
+        assert!(cache.lookup(&tool_request).is_none());
     }
 
-    #[test]
-    fn expired_entries_are_evicted() {
+    #[rstest]
+    fn expired_entries_are_evicted(
+        simple_request: CompletionRequest,
+        dummy_response: CompletionResponse,
+    ) {
         let cache = ResponseCache::new(ResponseCacheConfig {
             ttl: Duration::from_millis(1),
             max_entries: 100,
         });
-        let req = simple_request();
-        let resp = dummy_response();
 
-        cache.store(&req, &resp);
+        cache.store(&simple_request, &dummy_response);
         assert_eq!(cache.len(), 1);
 
         // Wait for TTL to expire
         std::thread::sleep(Duration::from_millis(10));
 
         // Should be a cache miss now
-        assert!(cache.lookup(&req).is_none());
+        assert!(cache.lookup(&simple_request).is_none());
     }
 
-    #[test]
-    fn lru_eviction_removes_oldest() {
+    #[rstest]
+    fn lru_eviction_removes_oldest(
+        simple_request: CompletionRequest,
+        different_request: CompletionRequest,
+        dummy_response: CompletionResponse,
+    ) {
         let cache = ResponseCache::new(ResponseCacheConfig {
             ttl: Duration::from_secs(60),
             max_entries: 2,
         });
-        let resp = dummy_response();
 
-        cache.store(&simple_request(), &resp);
-        cache.store(&different_request(), &resp);
+        cache.store(&simple_request, &dummy_response);
+        cache.store(&different_request, &dummy_response);
         assert_eq!(cache.len(), 2);
 
         // Third entry should evict the oldest
         let third = CompletionRequest {
             model_id: "test-model".into(),
             messages: vec![CompletionMessage::text(Role::User, "third")],
-            max_tokens: None,
-            temperature: None,
-            system: None,
-            tools: vec![],
-            thinking_budget: None,
-            parallel_tool_calls: None,
-            seed: None,
-            response_format: None,
-            reasoning_effort: None,
+            ..Default::default()
         };
-        cache.store(&third, &resp);
+        cache.store(&third, &dummy_response);
         assert_eq!(cache.len(), 2);
     }
 
-    #[test]
-    fn clear_empties_cache() {
-        let cache = ResponseCache::new(ResponseCacheConfig::default());
-        cache.store(&simple_request(), &dummy_response());
+    #[rstest]
+    fn clear_empties_cache(
+        cache: ResponseCache,
+        simple_request: CompletionRequest,
+        dummy_response: CompletionResponse,
+    ) {
+        cache.store(&simple_request, &dummy_response);
         assert_eq!(cache.len(), 1);
 
         cache.clear();
         assert!(cache.is_empty());
     }
 
-    #[test]
-    fn total_hits_survives_eviction() {
+    #[rstest]
+    fn total_hits_survives_eviction(
+        simple_request: CompletionRequest,
+        different_request: CompletionRequest,
+        dummy_response: CompletionResponse,
+    ) {
         let cache = ResponseCache::new(ResponseCacheConfig {
             ttl: Duration::from_secs(60),
             max_entries: 1,
         });
-        let resp = dummy_response();
 
         // Populate and score a hit
-        cache.store(&simple_request(), &resp);
-        cache.lookup(&simple_request());
+        cache.store(&simple_request, &dummy_response);
+        cache.lookup(&simple_request);
         assert_eq!(cache.total_hits(), 1);
 
         // Evict by adding a different entry
-        cache.store(&different_request(), &resp);
+        cache.store(&different_request, &dummy_response);
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.total_hits(), 1, "hit count survives eviction");
     }

